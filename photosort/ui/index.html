@@ -43,8 +43,8 @@
     <button type="button" data-view="categories" title="categories found in the shoot">
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
     </button>
-    <button type="button" data-view="index" title="index this folder, move the index">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Index</span>
+    <button type="button" data-view="index" title="scan this folder, save or load the scan file">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Scan</span>
     </button>
     <div class="nav-group">Filters</div>
     <label class="check nav-row" title="only aerial shots"><input type="checkbox" id="aerial-only" name="aerial" value="1" form="q"> Drone shots</label>
@@ -64,13 +64,30 @@
 
 <main>
   <section id="view-nofolder" hidden>
-    <div class="prompt">
-      <div class="wordmark">sorted</div>
-      <p class="lede">Open a shoot folder. Everything is indexed on this Mac; nothing leaves it.</p>
-      <div class="actions">
-        <button type="button" id="open-folder-main" class="btn primary" title="open a shoot folder on this Mac">Open folder</button>
-        <button type="button" id="bundle-import-main" class="btn" title="install an index bundle made on another Mac">Import index bundle</button>
+    <div class="welcome">
+      <div class="welcome-brand">
+        <svg class="welcome-mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="4" y="4" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="4" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36.6" y="3.4" width="24" height="24" rx="5" fill="#f3c8d0" transform="rotate(12 48.6 15.4)"/></svg>
+        <span class="wordmark">sorted</span>
       </div>
+      <p class="welcome-lede">sorted scans every photo and clip on a shoot disk and keeps what it learns on this Mac. Search the shoot in plain words, pull every frame of one person, sort it into categories, export what you pick. Nothing leaves the Mac.</p>
+      <p class="welcome-ask">Connect the shoot disk, then:</p>
+      <p id="welcome-unmounted" class="welcome-unmounted" hidden>Connect <span id="welcome-disk"></span> or scan another folder.</p>
+      <div class="welcome-actions">
+        <button type="button" id="welcome-scan" class="btn welcome-btn" title="pick a disk or folder; a folder not scanned yet starts scanning straight away">
+          <span class="l">Scan a disk or folder</span>
+          <span class="s">Pick the folder. A new one starts scanning at once; a scanned one opens.</span>
+        </button>
+        <button type="button" id="welcome-load" class="btn welcome-btn" title="open a scan file (.photosort-index.zip) made on another Mac">
+          <span class="l">Load a scan file</span>
+          <span class="s">A .photosort-index.zip made on another Mac. Loads in seconds.</span>
+        </button>
+      </div>
+      <div class="welcome-under">
+        <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="welcome-faces" checked> Detect faces on photos</label>
+        <p class="welcome-note">Faces can be added later from the People tab.</p>
+      </div>
+      <div id="welcome-recent" class="welcome-recent" hidden><span class="welcome-recent-label">Recent</span></div>
+      <button type="button" id="welcome-help" class="link welcome-help" title="how sorted works, section by section">How it works</button>
     </div>
   </section>
 
@@ -155,7 +172,7 @@
       <label class="field" title="lower is stricter; leave it unless groups mix people">Tightness <input id="eps" type="number" step="0.01" min="0.1" max="0.9" value="0.32"></label>
       <button type="button" id="export-people" class="btn" title="export links for every person, group and solo shot">Export people</button>
     </div>
-    <p id="faces-pending-row" class="hint faces-pending" hidden><span id="faces-pending-text"></span> <button type="button" id="faces-pending-scan" class="link small" title="find faces in the photos that were indexed without them">scan now</button></p>
+    <p id="faces-pending-row" class="hint faces-pending" hidden><span id="faces-pending-text"></span> <button type="button" id="faces-pending-scan" class="link small" title="find faces in the photos that were scanned without them">find them now</button></p>
     <div id="merge-block" class="panel" data-panel="merge" hidden>
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered on every re-grouping</span></button>
       <div class="panel-body">
@@ -236,13 +253,13 @@
 
   <section id="view-index" hidden>
     <div class="subbar">
-      <button type="button" id="start-index" class="btn" title="index every photo and clip in this folder">Index this folder</button>
-      <label class="check" title="find faces while indexing; untick to index faster and scan for faces later"><input type="checkbox" id="faces" checked> Detect faces (people tab)</label>
+      <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder">Scan this folder</button>
+      <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
       <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
-      <button type="button" id="detect-faces-now" class="btn" hidden title="find faces in the photos that were indexed without them">Detect faces now</button>
+      <button type="button" id="detect-faces-now" class="btn" hidden title="find faces in the photos that were scanned without them">Detect faces now</button>
       <span class="spring"></span>
-      <button type="button" id="bundle-export" class="btn" title="pack the index into one zip for another Mac">Export index bundle</button>
-      <button type="button" id="bundle-import" class="btn" title="install an index bundle made on another Mac">Import index bundle</button>
+      <button type="button" id="bundle-export" class="btn" title="save this shoot's scan file (one zip) wherever you like">Save scan file</button>
+      <button type="button" id="bundle-import" class="btn" title="open a scan file made on another Mac">Load scan file</button>
     </div>
     <div class="panel" data-panel="progress">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Progress</button>
@@ -255,8 +272,11 @@
       </div>
     </div>
     <div class="panel" data-panel="bundle">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Move this shoot to another Mac</button>
-      <div class="panel-body"><p class="hint">One zip with the index, thumbs and saved people, so another Mac opens this shoot without re-indexing.</p></div>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Hand this shoot to another Mac</button>
+      <div class="panel-body">
+        <p class="hint">The scan file is one zip with everything sorted knows about this shoot: what is in each shot, the thumbnails, the saved people. Save it anywhere, hand it over with the disk, and the other Mac loads it in seconds instead of scanning again.</p>
+        <p id="bundle-out" class="bundle-out" hidden><span id="bundle-out-path" class="filename" title=""></span><button type="button" id="bundle-reveal" class="link small" title="show the scan file in the Finder">Show in Finder</button></p>
+      </div>
     </div>
     <div id="reorg-block" class="panel collapsed" data-panel="reorganise">
       <button type="button" class="panel-head danger" aria-expanded="false" title="the one thing that writes to the shoot disk"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Reorganise disk</button>
@@ -299,6 +319,15 @@
     <button type="button" id="help-close" class="tb-icon" aria-label="close" title="close (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
   </div>
   <div class="help-body">
+    <div class="panel" data-panel="help-scan">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, or load a scan file</button>
+      <div class="panel-body help-lines">
+        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The disk is only ever read.</p>
+        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort. "Save scan file" packs it into one zip, wherever you like.</p>
+        <p>Hand that zip to an editor with the disk and "Load a scan file" opens the shoot on their Mac in seconds, already searchable, with the saved people.</p>
+        <p>Nothing leaves the Mac, ever.</p>
+      </div>
+    </div>
     <div class="panel" data-panel="help-search">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Search and select</button>
       <div class="panel-body help-lines">
@@ -344,7 +373,7 @@
         <p>One folder per ticked category, per person, or for the current selection.</p>
         <p>"Videos: only the matching segments" trims clips at keyframes.</p>
         <p>Google Drive as the destination: paste a folder link and the files go straight from the shoot disk into it; nothing is saved on this Mac on the way. What you upload counts against your own Drive space, unless the folder is on a Shared Drive. Uploads are resumable, and a manifest means a re-run only sends what is missing.</p>
-        <p>The index bundle is a zip a designer imports to get the shoot already sorted.</p>
+        <p>The scan file is the zip an editor loads to get the shoot already sorted.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-reorganise">
@@ -360,7 +389,7 @@
     <div class="panel" data-panel="help-feedback">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Feedback</button>
       <div class="panel-body help-lines">
-        <p>While you test, sorted keeps a log on this Mac: which tabs and buttons you used, what you searched for, what was indexed and exported, how long each step took, and every error. No photos, no thumbnails, no names, no file paths beyond the shoot folder's name. Nothing is sent anywhere; the report is a zip you email us yourself.</p>
+        <p>While you test, sorted keeps a log on this Mac: which tabs and buttons you used, what you searched for, what was scanned and exported, how long each step took, and every error. No photos, no thumbnails, no names, no file paths beyond the shoot folder's name. Nothing is sent anywhere; the report is a zip you email us yourself.</p>
         <div class="help-actions">
           <button type="button" id="fb-save" class="btn" title="write the log and a summary as one zip on your Desktop">Save report to Desktop</button>
           <button type="button" id="fb-copy" class="btn" title="put the summary on the clipboard">Copy summary</button>

@@ -131,7 +131,9 @@ main, .top, .foot { position: relative; z-index: 1; }
 .hero-head { display: grid; justify-items: center; text-align: center; gap: 12px; margin-bottom: 28px; }
 .hero-head h1 { font-size: clamp(42px, 4.4vw, 60px); max-width: none; }
 .hero-head .only { margin-top: -2px; }
-.hero-head .lede { max-width: 66ch; font-size: clamp(17px, 1.35vw, 19px); margin-top: 2px; }
+.hero-head .lede { max-width: 50ch; font-size: clamp(17px, 1.35vw, 19px); margin-top: 2px; }
+.hero-for { margin: -2px 0 0; font-size: 14px; color: var(--ink-3); max-width: none; white-space: nowrap; }
+@media (max-width: 700px) { .hero-for { white-space: normal; } }
 .hero-head .cta-row { justify-content: center; margin-top: 8px; }
 .hero-brand { justify-content: center; }
 .only { font-size: clamp(20px, 1.8vw, 26px); font-weight: 500; color: var(--ink-2); line-height: 1.2; letter-spacing: -0.01em; }

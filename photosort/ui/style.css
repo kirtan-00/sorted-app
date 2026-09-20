@@ -386,18 +386,46 @@ body:not(.insp) #inspector { border-left-width: 0; }   /* a closed 0 px column m
 }
 #save-person-form input { width: 220px; }
 
-/* no folder open: the frame collapses to the prompt */
-body:has(#view-nofolder:not([hidden])) { grid-template-columns: 1fr; }
-body:has(#view-nofolder:not([hidden])) .toolbar,
-body:has(#view-nofolder:not([hidden])) nav,
-body:has(#view-nofolder:not([hidden])) #inspector { display: none; }
-body:has(#view-nofolder:not([hidden])) main { grid-column: 1; }
-body:has(#view-nofolder:not([hidden])) #status { grid-column: 1; }
-#view-nofolder { align-items: center; justify-content: center; }
-#view-nofolder .prompt { width: 340px; display: flex; flex-direction: column; gap: 12px; }
-#view-nofolder .wordmark { font-size: 16px; font-weight: 600; }
-#view-nofolder .lede { color: var(--g600); line-height: 1.4; }
-#view-nofolder .actions { display: flex; gap: 8px; margin-top: 4px; }
+/* no folder open: the frame stays, dimmed and inert (app.js sets body.nofolder and the inert attributes); main holds the welcome */
+body.nofolder { grid-template-columns: 200px 1fr 0px; }
+body.nofolder nav, body.nofolder .tb-title, body.nofolder #folderbar, body.nofolder #exportbar, body.nofolder #inspector-toggle { opacity: 0.35; }
+body.nofolder #inspector { display: none; }
+#view-nofolder { align-items: center; justify-content: center; padding: 40px 32px; }
+.welcome { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 20px; }
+.welcome-brand { display: flex; align-items: center; gap: 12px; }
+.welcome-mark { width: 40px; height: 40px; flex: none; }
+.welcome .wordmark { font-size: 22px; font-weight: 600; line-height: 1; color: var(--g800); }
+.welcome-lede { font-size: 15px; line-height: 1.5; color: var(--g700); }
+.welcome-ask { font-size: 14px; font-weight: 500; color: var(--g800); margin-top: 4px; }
+.welcome-unmounted { font-size: 14px; font-weight: 500; color: var(--red); margin-top: 4px; }
+.welcome-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.welcome-btn {
+  height: auto;
+  min-height: 76px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  text-align: left;
+  white-space: normal;
+  line-height: 1.3;
+  background: var(--g100);
+}
+.welcome-btn:hover { background: var(--g200); border-color: var(--g400); }
+.welcome-btn:active { background: var(--g300); }
+.welcome-btn .l { font-size: 15px; font-weight: 600; color: var(--g800); }
+.welcome-btn .s { font-size: 12px; font-weight: 400; color: var(--g600); }
+.welcome-under { display: flex; flex-direction: column; gap: 2px; margin-top: -4px; }
+.welcome-under label.check { height: 24px; }
+.welcome-note { font-size: 12px; color: var(--g500); padding-left: 22px; }
+.welcome-recent { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 13px; color: var(--g500); padding-top: 8px; border-top: 1px solid var(--g100); }
+.welcome-recent-label { margin-right: 4px; }
+.welcome-recent .link.small { font-size: 13px; }
+.welcome-help { align-self: flex-start; margin-left: -4px; color: var(--blue); }
+.welcome-help:hover { color: var(--blue-h); background: none; text-decoration: underline; text-underline-offset: 2px; }
+@media (max-width: 1000px) { .welcome-actions { grid-template-columns: 1fr; } }
 
 /* sub-toolbar in every tab */
 .subbar {
@@ -944,6 +972,8 @@ body:has(#view-nofolder:not([hidden])) #status { grid-column: 1; }
   background-repeat: no-repeat;
   background-size: calc(var(--p, 0) * 100%) 100%;
 }
+.bundle-out { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; }
+.bundle-out .filename { color: var(--g600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #index-errors { margin-top: 12px; }
 #index-errors-title { color: var(--red); font-size: 13px; margin-bottom: 6px; }
 #index-errors-list, .drive-failures {

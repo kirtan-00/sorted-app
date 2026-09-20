@@ -1,0 +1,90 @@
+<template>
+  <style>
+@font-face{font-family:"Archivo";font-weight:700;font-stretch:112.5%;font-style:normal;font-display:block;src:url("assets/fonts/Archivo-SemiExpanded-Bold-latin.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:400;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Regular.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:500;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Medium.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:600;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Semibold.woff2") format("woff2");}
+
+#root { position: absolute; inset: 0; width: 1080px; height: 1920px; overflow: hidden;
+  font-family: "Source Sans 3", -apple-system, "Helvetica Neue", Arial, sans-serif; color: #26282d; }
+.clip { position: absolute; inset: 0; }
+.ground { position: absolute; inset: 0; background: #f7f4ee; }
+.blob { position: absolute; border-radius: 50%; opacity: 0.85; }
+.b1 { width: 720px; height: 720px; left: -220px; top: -160px; background: radial-gradient(circle, #cfe4fb, rgba(207,228,251,0) 68%); }
+.b2 { width: 820px; height: 820px; right: -300px; top: 240px; background: radial-gradient(circle, #ddd6f5, rgba(221,214,245,0) 68%); }
+.b3 { width: 640px; height: 640px; left: 260px; top: 1000px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.b4 { width: 760px; height: 760px; right: -120px; bottom: -300px; background: radial-gradient(circle, #fbefb8, rgba(251,239,184,0) 68%); }
+.b5 { width: 600px; height: 600px; left: -200px; bottom: -180px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.hl { position: absolute; left: 70px; width: 940px; font-family: "Archivo", "Source Sans 3", sans-serif; font-weight: 700;
+  font-stretch: 112.5%; letter-spacing: -0.015em; line-height: 1.04; color: #26282d; }
+.hl.c { text-align: center; }
+.lm { display: block; overflow: hidden; padding-bottom: 0.06em; margin-bottom: -0.06em; }
+.li { display: block; }
+.sub { position: absolute; left: 70px; width: 940px; font-size: 34px; line-height: 1.4; color: #4f545d; }
+.sub.c { text-align: center; }
+.win { position: absolute; overflow: hidden; border-radius: 12px; background: #1d1d1d;
+  box-shadow: 0 0 0 1px rgba(38,40,45,0.18), 0 40px 90px rgba(38,40,45,0.22); }
+.win img { position: absolute; display: block; }
+.block { position: absolute; left: 40px; width: 1000px; border-radius: 28px; }
+
+.hl { top: 280px; font-size: 84px; }
+.sub { top: 950px; font-size: 30px; }
+.w1 { left: 70px; top: 500px; width: 860px; height: 200px; }
+.cl, .cr { position: absolute; top: 0; height: 200px; overflow: hidden; }
+.cl { left: 0; width: 480px; }
+.cr { left: 480px; width: 380px; }
+.mcap { position: absolute; width: 2202px; height: 1309px; top: -206px; opacity: 0; background-size: 2202px 1309px; background-repeat: no-repeat; }
+.cl .mcap { left: -353px; }
+.cr .mcap { left: -1345px; }
+.mcap.m0 { opacity: 1; }
+.sub { top: 760px; }
+.w2 { left: 70px; top: 880px; width: 860px; height: 614px; }
+.w2 img { width: 1167px; height: 1474px; left: -307px; top: -307px; }
+
+  </style>
+  <div id="root" data-composition-id="03-people" data-width="1080" data-height="1920" data-duration="5">
+    <div id="f03-people-ground" class="clip" data-start="0" data-duration="5" data-track-index="1">
+      <div class="ground"></div>
+      <div class="blob b1" data-layout-allow-overflow></div><div class="blob b2" data-layout-allow-overflow></div><div class="blob b3" data-layout-allow-overflow></div><div class="blob b4" data-layout-allow-overflow></div><div class="blob b5" data-layout-allow-overflow></div>
+
+    </div>
+    <div id="f03-people-content" class="clip" data-start="0" data-duration="5" data-track-index="2">
+
+      <div class="hl f3-hl"><span class="lm"><span class="li ">Every face,</span></span><span class="lm"><span class="li ">one person.</span></span></div>
+      <div class="win w1 f3-w1"><div class="cl"><div class="mcap m0" style="background-image:url(assets/captures/replica-merge-034.jpg)"></div><div class="mcap m1" style="background-image:url(assets/captures/replica-merge-038.jpg)"></div><div class="mcap m2" style="background-image:url(assets/captures/replica-merge-041.jpg)"></div><div class="mcap m3" style="background-image:url(assets/captures/replica-merge-045.jpg)"></div><div class="mcap m4" style="background-image:url(assets/captures/replica-merge-050.jpg)"></div></div><div class="cr"><div class="mcap m0" style="background-image:url(assets/captures/replica-merge-034.jpg)"></div><div class="mcap m1" style="background-image:url(assets/captures/replica-merge-038.jpg)"></div><div class="mcap m2" style="background-image:url(assets/captures/replica-merge-041.jpg)"></div><div class="mcap m3" style="background-image:url(assets/captures/replica-merge-045.jpg)"></div><div class="mcap m4" style="background-image:url(assets/captures/replica-merge-050.jpg)"></div></div></div>
+      <div class="sub f3-sub">One photo of someone finds every frame of them.</div>
+      <div class="win w2 f3-w2"><img src="assets/captures/app-people.jpg" alt=""></div>
+
+    </div>
+  </div>
+  <script>
+  (function () {
+    var D = 4.5;
+    var R = document.querySelector('[data-composition-id="03-people"]');
+    var q = function (s) { return R.querySelectorAll(s); };
+    var one = function (s) { return R.querySelector(s); };
+    window.__timelines = window.__timelines || {};
+    var tl = gsap.timeline({ paused: true });
+    tl.fromTo(q('.f3-hl .li'), { yPercent: 112 }, { yPercent: 0, duration: 0.8, ease: 'power3.out', stagger: 0.12 }, 0.05);
+    tl.fromTo(q('.f3-w1'), { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.7, ease: 'power2.out' }, 0.6);
+    tl.fromTo(q('.f3-sub'), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.6, ease: 'power2.out' }, 3.0);
+    tl.fromTo(q('.f3-w2'), { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.7, ease: 'power2.out' }, 2.6);
+
+    ['.cl', '.cr'].forEach(function (side) {
+      var m = q(side + ' .mcap');
+      [1.6, 1.85, 2.05, 2.3].forEach(function (t, i) {
+        tl.set(m[i + 1], { opacity: 1 }, t);
+        tl.set(m[i], { opacity: 0 }, t + 0.001);
+      });
+    });
+
+      tl.fromTo(q('.b1'), { x: 0, y: 0 }, { x: 70, y: 40, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b2'), { x: 0, y: 0 }, { x: -60, y: 50, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b3'), { x: 0, y: 0 }, { x: 50, y: -40, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b4'), { x: 0, y: 0 }, { x: -40, y: -30, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b5'), { x: 0, y: 0 }, { x: 40, y: -20, duration: D, ease: 'sine.inOut' }, 0);
+
+    window.__timelines["03-people"] = tl;
+  })();
+  </script>
+</template>

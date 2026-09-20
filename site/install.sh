@@ -1,7 +1,8 @@
 #!/bin/bash
 # sorted for Mac, one line install:
 #   curl -fsSL https://kirtan-00.github.io/sorted/install.sh | bash
-# Downloads the beta into ~/sorted, runs the installer there, opens the app. Re-run any time.
+# Downloads the beta into ~/sorted, runs the installer there (which leaves a sorted icon on the
+# Desktop), opens the app. Re-run any time.
 # Files fetched by curl carry no quarantine flag, so macOS does not block the installer or the app.
 set -e
 DEST="$HOME/sorted"

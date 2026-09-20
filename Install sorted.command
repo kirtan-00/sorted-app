@@ -11,11 +11,14 @@
 #      and proves they load
 #   6. ffmpeg + ffprobe for videos: Homebrew's if there is a Homebrew, otherwise a static arm64
 #      build dropped into .venv/bin
-#   7. opens sorted.app
+#   7. makes sorted.app in this folder openable
+#   8. puts a sorted icon on the Desktop: ~/Desktop/sorted.app, a tiny launcher that starts the
+#      app here (re-runs replace it; a sorted.app the installer did not make is left alone)
+#   9. opens sorted.app
 #
-# Touches only: this folder (.venv, .uv, install.log), ~/.local/bin (uv) and the Hugging Face
-# cache (~/.cache/huggingface). uv's own download cache and its Python live in .uv/ here, not in
-# your home folder. Nothing is added to your shell profile.
+# Touches only: this folder (.venv, .uv, install.log), ~/.local/bin (uv), the Hugging Face
+# cache (~/.cache/huggingface) and ~/Desktop/sorted.app. uv's own download cache and its Python
+# live in .uv/ here, not in your home folder. Nothing is added to your shell profile.
 #
 # Static ffmpeg source (used only when Homebrew is absent or its install fails):
 #   https://ffmpeg.martin-riedl.de  (macOS arm64 release builds, listed on ffmpeg.org/download)
@@ -218,8 +221,59 @@ xattr -dr com.apple.quarantine "$REPO/sorted.app" 2>/dev/null
 "$UV" cache prune --quiet 2>/dev/null
 note "ready"
 
+# 8. A sorted icon on the Desktop ----------------------------------------------------------------
+# ~/Desktop/sorted.app is a real bundle (so Finder shows the icon), not an alias: the same
+# Info.plist keys and icon as sorted.app here, and a launcher that execs the one here by absolute
+# path. A marker file records which folder made it, so a re-run (or an install in a new folder)
+# replaces it and a sorted.app somebody put on the Desktop by hand is left alone.
+desktop_icon() {
+  local desk="$HOME/Desktop/sorted.app" marker="Contents/Resources/sorted-installed-from"
+  local src="$REPO/sorted.app" launcher="$REPO/sorted.app/Contents/MacOS/sorted"
+  DESKTOP_ICON=""
+  if [ ! -d "$HOME/Desktop" ]; then
+    note "no Desktop folder at $HOME/Desktop, skipping the Desktop icon"; return 0
+  fi
+  if [ -e "$desk" ] && [ ! -f "$desk/$marker" ]; then
+    note "there is already a sorted.app on the Desktop that this installer did not make; leaving it alone"
+    return 0
+  fi
+  rm -rf "$desk"
+  mkdir -p "$desk/Contents/MacOS" "$desk/Contents/Resources" || { note "could not write to the Desktop, skipping the Desktop icon"; return 0; }
+  cp "$src/Contents/Resources/sorted.icns" "$desk/Contents/Resources/sorted.icns"
+  printf '%s\n' "$REPO" > "$desk/$marker"
+  cat > "$desk/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>sorted</string>
+<key>CFBundleIdentifier</key><string>in.craywingz.photosort.desktop</string>
+<key>CFBundleVersion</key><string>0.1.0</string>
+<key>CFBundleExecutable</key><string>sorted</string>
+<key>CFBundleIconFile</key><string>sorted</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSUIElement</key><true/>
+<key>LSArchitecturePriority</key><array><string>arm64</string></array>
+<key>LSRequiresNativeExecution</key><true/>
+</dict></plist>
+PLIST
+  # $REPO is expanded now, so the shortcut carries the absolute path of this folder.
+  printf '#!/bin/bash\n# Desktop shortcut made by "Install sorted.command"; the app lives in the folder below.\nexec %q "$@"\n' "$launcher" > "$desk/Contents/MacOS/sorted"
+  chmod +x "$desk/Contents/MacOS/sorted"
+  xattr -dr com.apple.quarantine "$desk" 2>/dev/null
+  touch "$desk"
+  DESKTOP_ICON="$desk"
+  note "sorted.app is on the Desktop; it starts the app in $REPO"
+}
+step "Desktop icon"
+desktop_icon
+
+# 9. Open it ------------------------------------------------------------------------------------
 printf '\nfinished: %s\n' "$(date)"
-printf '\nsorted is installed. Double-click sorted.app to start.\n\n'
+if [ -n "$DESKTOP_ICON" ]; then
+  printf '\nsorted is installed. There is a sorted icon on your Desktop; double-click it any time.\n\n'
+else
+  printf '\nsorted is installed. Double-click sorted.app in %s to start.\n\n' "$REPO"
+fi
 if [ -z "${SORTED_INSTALL_NO_OPEN:-}" ]; then
   open "$REPO/sorted.app"
 fi

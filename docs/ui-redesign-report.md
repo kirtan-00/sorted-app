@@ -134,3 +134,23 @@ Unchanged except: `#q` and the new `#ctxbar` sit inside `div.search-head`; the s
 - The "N of M" narrowing count in the brief does not exist server-side: a text query ranks within the filter, so the crumb shows shown-of-total instead.
 - History entries from before a folder switch stay in the browser's list; walking back into one restores its view only.
 - A person picked from the "anyone" picker with no context, then a tab switch and a browser back, comes back to Search with the picker cleared: the entry describes the filter state, and that pick was never one.
+
+## Round 5: first-run welcome, Index is Scan, save the scan file anywhere
+Same skin, same files. Verified against a scratch server on 7793 (scratch `PHOTOSORT_HOME`, a 54-item shoot plus a fresh three-photo folder) with Playwright at 1280 and 1100: zero page errors, no 4xx but the 409 the harness injects, `scrollWidth` equals the viewport.
+
+### Welcome (no folder open, or the open folder's disk is out)
+`#view-nofolder` holds `.welcome`, max-width 640, centred in `main`: the mark (inline SVG from `site/brand/mark.svg`, the three squares in gray-800 so they read on the dark ground, the tilted one in the brand pink) at 40 px beside the wordmark at 22/600; one paragraph in gray-700 at 15/1.5 saying what the app does; "Connect the shoot disk, then:"; two equal buttons (`.welcome-btn`, gray-100 ground, gray-300 border, 15/600 label over a 12 px gray-600 line) `#welcome-scan` and `#welcome-load`; the faces tick `#welcome-faces` (default on) with "Faces can be added later from the People tab." under it; `#welcome-recent` (the same folders as the toolbar picker, as `.link.small` buttons); `#welcome-help`. The frame stays: `body.nofolder` dims the sidebar, the title block, the folder and export groups and the inspector toggle to 35 % and app.js sets `inert` on them, so nothing there takes a click or the keyboard; the How it works toggle stays live. When `/api/folder` or `/api/stats` says `mounted: false` for an open folder, the same welcome shows with `#welcome-unmounted` ("Connect <disk> or scan another folder.", red, in place of the ask line); `disk` is the volume under /Volumes, else the folder name.
+
+Scan a disk or folder: `openFolderPicker()` (POST /api/folder/choose); a folder with nothing scanned yet lands on the Scan tab and `startIndexJob({faces})` goes out at once with the welcome's tick, mirrored into `#faces`; a scanned one opens. Load a scan file: the existing `importBundle()` with its choose-root step. The welcome's How it works link is excluded from the slide-over's click-outside close.
+
+### Scan wording
+Sidebar "Scan"; "Scan this folder", "Detect faces (People tab)", "Detect faces now", "Save scan file", "Load scan file"; the progress line reads "Scanning 1,204 of 3,677  reading photos and clips  4.1/s, about 3 min left" (`STAGE_TEXT` maps scan, features, faces, embed to words; "Scanned N of N  finished" at the end); status lines "scan started…", "scan finished", "scan failed: …"; the counts tooltip "scanned <date>"; the errors note says "tick Retry failed files and Scan again". Server 409/400 messages a person reads say scanning and scan file too. The file stays `<shoot>.photosort-index.zip`.
+
+### Save scan file
+`#bundle-export` posts `/api/bundle/export/choose`: the macOS folder picker opening on `~/Desktop/photosort-out` (never a chosen export disk, which may be the unplugged one), then the export into the pick. `/api/export/progress` carries `what: "bundle"`; the poller ends with "scan file saved to <path>" and `#bundle-out` in the Hand this shoot to another Mac panel: the path in the mono face plus `#bundle-reveal` "Show in Finder" (POST /api/reveal {path}, `open -R`). A pick that is the shoot root or inside it is refused with bundle_path's own message. `POST /api/bundle/export {dest}` does the same without the picker.
+
+### How it works
+A new first section, "Scan, or load a scan file": connect the disk and scan, where what the scan learns lives, Save scan file, hand it to an editor with the disk, Load a scan file opens it in seconds. The Export section's last line and the Feedback section say scan file and scanned.
+
+### Hooks
+Removed ids: `open-folder-main`, `bundle-import-main`. New ids: `welcome-scan`, `welcome-load`, `welcome-faces`, `welcome-recent`, `welcome-help`, `welcome-unmounted`, `welcome-disk`, `bundle-out`, `bundle-out-path`, `bundle-reveal`. New body class `nofolder`. `/api/folder` gained `mounted` and `disk`; `/api/stats` gained `mounted`.

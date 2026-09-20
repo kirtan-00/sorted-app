@@ -1,0 +1,79 @@
+<template>
+  <style>
+@font-face{font-family:"Archivo";font-weight:700;font-stretch:112.5%;font-style:normal;font-display:block;src:url("assets/fonts/Archivo-SemiExpanded-Bold-latin.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:400;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Regular.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:500;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Medium.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:600;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Semibold.woff2") format("woff2");}
+
+#root { position: absolute; inset: 0; width: 1080px; height: 1920px; overflow: hidden;
+  font-family: "Source Sans 3", -apple-system, "Helvetica Neue", Arial, sans-serif; color: #26282d; }
+.clip { position: absolute; inset: 0; }
+.ground { position: absolute; inset: 0; background: #f7f4ee; }
+.blob { position: absolute; border-radius: 50%; opacity: 0.85; }
+.b1 { width: 720px; height: 720px; left: -220px; top: -160px; background: radial-gradient(circle, #cfe4fb, rgba(207,228,251,0) 68%); }
+.b2 { width: 820px; height: 820px; right: -300px; top: 240px; background: radial-gradient(circle, #ddd6f5, rgba(221,214,245,0) 68%); }
+.b3 { width: 640px; height: 640px; left: 260px; top: 1000px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.b4 { width: 760px; height: 760px; right: -120px; bottom: -300px; background: radial-gradient(circle, #fbefb8, rgba(251,239,184,0) 68%); }
+.b5 { width: 600px; height: 600px; left: -200px; bottom: -180px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.hl { position: absolute; left: 70px; width: 940px; font-family: "Archivo", "Source Sans 3", sans-serif; font-weight: 700;
+  font-stretch: 112.5%; letter-spacing: -0.015em; line-height: 1.04; color: #26282d; }
+.hl.c { text-align: center; }
+.lm { display: block; overflow: hidden; padding-bottom: 0.06em; margin-bottom: -0.06em; }
+.li { display: block; }
+.sub { position: absolute; left: 70px; width: 940px; font-size: 34px; line-height: 1.4; color: #4f545d; }
+.sub.c { text-align: center; }
+.win { position: absolute; overflow: hidden; border-radius: 12px; background: #1d1d1d;
+  box-shadow: 0 0 0 1px rgba(38,40,45,0.18), 0 40px 90px rgba(38,40,45,0.22); }
+.win img { position: absolute; display: block; }
+.block { position: absolute; left: 40px; width: 1000px; border-radius: 28px; }
+
+.hl { top: 290px; font-size: 92px; }
+.sub { top: 500px; }
+.tile { position: absolute; width: 250px; height: 171px; padding: 4px; border-radius: 6px; background: #fffdf8;
+  box-shadow: 0 10px 30px rgba(38,40,45,0.12); }
+.tile b { display: block; width: 100%; height: 100%; border-radius: 3px; background-size: cover; background-position: center; }
+
+  </style>
+  <div id="root" data-composition-id="01-pile" data-width="1080" data-height="1920" data-duration="4.1">
+    <div id="f01-pile-ground" class="clip" data-start="0" data-duration="4.1" data-track-index="1">
+      <div class="ground"></div>
+      <div class="blob b1" data-layout-allow-overflow></div><div class="blob b2" data-layout-allow-overflow></div><div class="blob b3" data-layout-allow-overflow></div><div class="blob b4" data-layout-allow-overflow></div><div class="blob b5" data-layout-allow-overflow></div>
+
+    </div>
+    <div id="f01-pile-content" class="clip" data-start="0" data-duration="4.1" data-track-index="2">
+
+      <div class="hl f1-hl"><span class="lm"><span class="li ">A shoot arrives</span></span><span class="lm"><span class="li ">as a pile.</span></span></div>
+      <div class="sub f1-sub">955 items. 800 GB. All named DSC05455.</div>
+      <div class="pile"><div class="tile t0" style="left:80px;top:620px;--r:-8deg"><b style="background-image:url(assets/photos/boats1.webp)"></b></div><div class="tile t1" style="left:390px;top:600px;--r:5deg"><b style="background-image:url(assets/photos/hari1.webp)"></b></div><div class="tile t2" style="left:700px;top:640px;--r:-4deg"><b style="background-image:url(assets/photos/coast.webp)"></b></div><div class="tile t3" style="left:150px;top:820px;--r:6deg"><b style="background-image:url(assets/photos/sari.webp)"></b></div><div class="tile t4" style="left:470px;top:800px;--r:-7deg"><b style="background-image:url(assets/photos/harbour.webp)"></b></div><div class="tile t5" style="left:760px;top:860px;--r:3deg"><b style="background-image:url(assets/photos/hari2.webp)"></b></div><div class="tile t6" style="left:90px;top:1030px;--r:4deg"><b style="background-image:url(assets/photos/site.webp)"></b></div><div class="tile t7" style="left:400px;top:1010px;--r:-5deg"><b style="background-image:url(assets/photos/boatman.webp)"></b></div><div class="tile t8" style="left:690px;top:1060px;--r:7deg"><b style="background-image:url(assets/photos/road.webp)"></b></div><div class="tile t9" style="left:170px;top:1240px;--r:-6deg"><b style="background-image:url(assets/photos/hari3.webp)"></b></div><div class="tile t10" style="left:480px;top:1220px;--r:4deg"><b style="background-image:url(assets/photos/sea.webp)"></b></div><div class="tile t11" style="left:760px;top:1260px;--r:-3deg"><b style="background-image:url(assets/photos/face1.webp)"></b></div><div class="tile t12" style="left:300px;top:1400px;--r:5deg"><b style="background-image:url(assets/photos/golden.webp)"></b></div><div class="tile t13" style="left:620px;top:1420px;--r:-6deg"><b style="background-image:url(assets/photos/boats2.webp)"></b></div></div>
+
+    </div>
+  </div>
+  <script>
+  (function () {
+    var D = 3.5;
+    var R = document.querySelector('[data-composition-id="01-pile"]');
+    var q = function (s) { return R.querySelectorAll(s); };
+    var one = function (s) { return R.querySelector(s); };
+    window.__timelines = window.__timelines || {};
+    var tl = gsap.timeline({ paused: true });
+
+    var tiles = q('.tile');
+    tiles.forEach(function (t, i) {
+      var r = parseFloat(t.style.getPropertyValue('--r'));
+      tl.fromTo(t, { y: -900, rotation: r + (i % 2 ? 22 : -22), opacity: 0 },
+        { y: 0, rotation: r, opacity: 1, duration: 0.85, ease: 'power3.out' }, i * 0.055);
+      tl.to(t, { y: 6 + (i % 3) * 3, duration: 1.6, ease: 'sine.inOut' }, 1.5 + (i % 5) * 0.1);
+    });
+    tl.fromTo(q('.f1-hl .li'), { yPercent: 112 }, { yPercent: 0, duration: 0.8, ease: 'power3.out', stagger: 0.12 }, 1.2);
+    tl.fromTo(q('.f1-sub'), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.6, ease: 'power2.out' }, 2.4);
+
+      tl.fromTo(q('.b1'), { x: 0, y: 0 }, { x: 70, y: 40, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b2'), { x: 0, y: 0 }, { x: -60, y: 50, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b3'), { x: 0, y: 0 }, { x: 50, y: -40, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b4'), { x: 0, y: 0 }, { x: -40, y: -30, duration: D, ease: 'sine.inOut' }, 0);
+      tl.fromTo(q('.b5'), { x: 0, y: 0 }, { x: 40, y: -20, duration: D, ease: 'sine.inOut' }, 0);
+
+    window.__timelines["01-pile"] = tl;
+  })();
+  </script>
+</template>

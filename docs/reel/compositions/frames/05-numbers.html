@@ -1,0 +1,100 @@
+<template>
+  <style>
+@font-face{font-family:"Archivo";font-weight:700;font-stretch:112.5%;font-style:normal;font-display:block;src:url("assets/fonts/Archivo-SemiExpanded-Bold-latin.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:400;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Regular.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:500;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Medium.woff2") format("woff2");}
+@font-face{font-family:"Source Sans 3";font-weight:600;font-style:normal;font-display:block;src:url("assets/fonts/SourceSans3-Semibold.woff2") format("woff2");}
+
+#root { position: absolute; inset: 0; width: 1080px; height: 1920px; overflow: hidden;
+  font-family: "Source Sans 3", -apple-system, "Helvetica Neue", Arial, sans-serif; color: #26282d; }
+.clip { position: absolute; inset: 0; }
+.ground { position: absolute; inset: 0; background: #f7f4ee; }
+.blob { position: absolute; border-radius: 50%; opacity: 0.85; }
+.b1 { width: 720px; height: 720px; left: -220px; top: -160px; background: radial-gradient(circle, #cfe4fb, rgba(207,228,251,0) 68%); }
+.b2 { width: 820px; height: 820px; right: -300px; top: 240px; background: radial-gradient(circle, #ddd6f5, rgba(221,214,245,0) 68%); }
+.b3 { width: 640px; height: 640px; left: 260px; top: 1000px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.b4 { width: 760px; height: 760px; right: -120px; bottom: -300px; background: radial-gradient(circle, #fbefb8, rgba(251,239,184,0) 68%); }
+.b5 { width: 600px; height: 600px; left: -200px; bottom: -180px; background: radial-gradient(circle, #cfeee0, rgba(207,238,224,0) 68%); }
+.hl { position: absolute; left: 70px; width: 940px; font-family: "Archivo", "Source Sans 3", sans-serif; font-weight: 700;
+  font-stretch: 112.5%; letter-spacing: -0.015em; line-height: 1.04; color: #26282d; }
+.hl.c { text-align: center; }
+.lm { display: block; overflow: hidden; padding-bottom: 0.06em; margin-bottom: -0.06em; }
+.li { display: block; }
+.sub { position: absolute; left: 70px; width: 940px; font-size: 34px; line-height: 1.4; color: #4f545d; }
+.sub.c { text-align: center; }
+.win { position: absolute; overflow: hidden; border-radius: 12px; background: #1d1d1d;
+  box-shadow: 0 0 0 1px rgba(38,40,45,0.18), 0 40px 90px rgba(38,40,45,0.22); }
+.win img { position: absolute; display: block; }
+.block { position: absolute; left: 40px; width: 1000px; border-radius: 28px; }
+
+.block { top: 240px; height: 1340px; background: #fbefb8; }
+.hl { left: 100px; width: 880px; top: 320px; font-size: 80px; }
+.sub { left: 100px; width: 880px; top: 520px; font-size: 32px; color: #4f545d; }
+.rows { position: absolute; left: 100px; width: 830px; top: 680px; }
+.row { position: relative; height: 230px; opacity: 0; }
+.k { font-size: 32px; color: #26282d; margin-bottom: 26px; }
+.tr { display: flex; align-items: center; gap: 28px; }
+.track { display: block; flex: 1; height: 16px; border-radius: 8px; background: rgba(38,40,45,0.10); overflow: hidden; }
+.fill { display: block; width: 100%; height: 100%; border-radius: 8px; background: #26282d; transform-origin: left center; transform: scaleX(0.001); }
+.v { display: block; width: 250px; text-align: right; font-size: 40px; font-weight: 600; font-variant-numeric: tabular-nums; color: #26282d; }
+.close { position: absolute; left: 100px; width: 880px; top: 1400px; font-size: 30px; line-height: 1.4; color: #4f545d; }
+
+  </style>
+  <div id="root" data-composition-id="05-numbers" data-width="1080" data-height="1920" data-duration="6.5">
+    <div id="f05-numbers-ground" class="clip" data-start="0" data-duration="6.5" data-track-index="1">
+    </div>
+    <div id="f05-numbers-content" class="clip" data-start="0" data-duration="6.5" data-track-index="2">
+
+      <div class="ground"></div>
+      <div class="blob b1" data-layout-allow-overflow></div><div class="blob b2" data-layout-allow-overflow></div><div class="blob b4" data-layout-allow-overflow></div>
+      <div class="block f5-block"></div>
+      <div class="hl f5-hl"><span class="lm"><span class="li ">A five-year-old</span></span><span class="lm"><span class="li ">Mac is enough.</span></span></div>
+      <div class="sub f5-sub">Every number measured on a 2020 MacBook Air, M1, 8 GB, the base model.</div>
+      <div class="rows f5-rows">
+        <div class="row r0"><div class="k">3,677 photos, 147 GB</div>
+          <div class="tr"><i class="track"><b class="fill" style="--p:0.24"></b></i><span class="v">10 min 42 s</span></div></div>
+        <div class="row r1"><div class="k">955 items, 800 GB, photos and 4K clips</div>
+          <div class="tr"><i class="track"><b class="fill" style="--p:1.0"></b></i><span class="v">44 min 36 s</span></div></div>
+        <div class="row r2"><div class="k">One 4K drone clip, 23 s</div>
+          <div class="tr"><i class="track"><b class="fill" style="--p:0.03"></b></i><span class="v">1.0 s</span></div></div></div>
+      <div class="close f5-close">No GPU farm. No upload. No subscription for compute.</div>
+
+    </div>
+  </div>
+  <script>
+  (function () {
+    var D = 6.0;
+    var R = document.querySelector('[data-composition-id="05-numbers"]');
+    var q = function (s) { return R.querySelectorAll(s); };
+    var one = function (s) { return R.querySelector(s); };
+    window.__timelines = window.__timelines || {};
+    var tl = gsap.timeline({ paused: true });
+
+    tl.fromTo(one('.f5-block'), { opacity: 0, scale: 0.98 }, { opacity: 1, scale: 1, duration: 0.7, ease: 'power3.out', transformOrigin: '50% 50%' }, 0);
+    tl.fromTo(q('.f5-hl .li'), { yPercent: 112 }, { yPercent: 0, duration: 0.8, ease: 'power3.out', stagger: 0.12 }, 0.25);
+    tl.fromTo(q('.f5-sub'), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.6, ease: 'power2.out' }, 0.9);
+
+    var rows = q('.row');
+    var seconds = [642, 2676, 1.0];
+    var fmt = [function (s) { return Math.floor(s / 60) + ' min ' + String(Math.round(s % 60)).padStart(2, '0') + ' s'; },
+               function (s) { return Math.floor(s / 60) + ' min ' + String(Math.round(s % 60)).padStart(2, '0') + ' s'; },
+               function (s) { return s.toFixed(1) + ' s'; }];
+    rows.forEach(function (row, i) {
+      var at = 1.3 + i * 1.3;
+      var fill = row.querySelector('.fill'), v = row.querySelector('.v');
+      var p = parseFloat(fill.style.getPropertyValue('--p'));
+      tl.fromTo(row, { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.5, ease: 'power2.out' }, at);
+      tl.fromTo(fill, { scaleX: 0.001 }, { scaleX: p, duration: 1.1, ease: 'power3.out' }, at + 0.15);
+      var st = { s: 0 };
+      tl.to(st, { s: seconds[i], duration: 1.1, ease: 'power3.out', onUpdate: function () { v.textContent = fmt[i](st.s); } }, at + 0.15);
+    });
+    tl.fromTo(q('.f5-close'), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.6, ease: 'power2.out' }, 5.1);
+
+    tl.fromTo(q('.b1'), { x: 0, y: 0 }, { x: 70, y: 40, duration: D, ease: 'sine.inOut' }, 0);
+    tl.fromTo(q('.b2'), { x: 0, y: 0 }, { x: -60, y: 50, duration: D, ease: 'sine.inOut' }, 0);
+    tl.fromTo(q('.b4'), { x: 0, y: 0 }, { x: -40, y: -30, duration: D, ease: 'sine.inOut' }, 0);
+
+    window.__timelines["05-numbers"] = tl;
+  })();
+  </script>
+</template>

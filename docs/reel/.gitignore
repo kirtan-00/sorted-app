@@ -1,0 +1,7 @@
+# renders and review output stay out of git; the source rebuilds them
+renders/
+snapshots/
+*.mp4
+capture/
+.hyperframes/frame-packets/
+node_modules/

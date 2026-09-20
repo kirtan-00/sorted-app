@@ -212,7 +212,7 @@ def test_free_port_skips_busy_port():
 def test_no_folder_open_by_default_and_endpoints_degrade():
     c = TestClient(create_app(None))
     f = c.get("/api/folder").json()
-    assert f == {"root": None, "name": None, "indexed": False}
+    assert f == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None}
     assert c.get("/api/stats").json()["photos"] == 0
     assert c.get("/api/search").json() == {"results": [], "total": 0, "offset": 0, "limit": 200}
     assert c.get("/api/people").json() == []
@@ -1076,7 +1076,7 @@ def test_bundle_export_endpoint_runs_to_completion(tmp_path, tmp_path_factory):
     assert c.post("/api/export/destination", json={"path": str(disk)}).status_code == 200
     r = c.post("/api/bundle/export")
     assert r.status_code == 200, r.text
-    assert r.json() == {"started": True, "total": 6}
+    assert r.json() == {"started": True, "total": 6, "dest": str(disk.resolve())}
     p = _wait_export(c)
     assert p["error"] is None and p["done"] == 6 and p["total"] == 6 and p["failed"] == 0
     z = Path(p["path"])
@@ -1105,6 +1105,98 @@ def test_bundle_export_409_while_busy_and_preflight(tmp_path, tmp_path_factory, 
     r = c.post("/api/bundle/export")
     assert r.status_code == 400 and "free" in r.json()["detail"]
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+
+
+def test_bundle_export_dest_lands_there_and_refuses_the_shoot(tmp_path, tmp_path_factory):
+    """Save scan file anywhere: {dest} picks the folder; the shoot root, anything under it, and a
+    non-folder are refused before anything runs."""
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=2)
+    before = sorted(os.listdir(tmp_path))
+    r = c.post("/api/bundle/export", json={"dest": str(tmp_path)})
+    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
+    r = c.post("/api/bundle/export", json={"dest": str(tmp_path / "sub")})
+    assert r.status_code == 400
+    r = c.post("/api/bundle/export", json={"dest": str(tmp_path_factory.mktemp("x") / "missing")})
+    assert r.status_code == 400 and "not a directory" in r.json()["detail"]
+    assert c.get("/api/export/progress").json()["running"] is False
+    dest = tmp_path_factory.mktemp("anywhere")
+    r = c.post("/api/bundle/export", json={"dest": str(dest)})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"started": True, "total": 4, "dest": str(dest.resolve())}
+    p = _wait_export(c)
+    assert p["error"] is None and p["what"] == "bundle"
+    z = Path(p["path"])
+    assert z == dest.resolve() / f"{tmp_path.resolve().name}.photosort-index.zip" and z.is_file()
+    assert inspect_bundle(z)["photos"] == 2
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_bundle_export_choose_runs_the_picker_then_exports(tmp_path, tmp_path_factory, monkeypatch):
+    import subprocess as sp
+    c = _shoot_client(tmp_path, n=1)
+    before = sorted(os.listdir(tmp_path))
+    scripts = []
+    def fake_run(cmd, *a, **k):
+        scripts.append(cmd[-1])
+        return sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+    monkeypatch.setattr("photosort.server.subprocess.run", fake_run)
+    assert c.post("/api/bundle/export/choose").status_code == 204          # cancelled: nothing started
+    from photosort.config import export_root
+    assert "choose folder" in scripts[-1] and f'default location (POSIX file "{export_root()}")' in scripts[-1]
+    assert c.get("/api/export/progress").json()["running"] is False
+    # an export destination on a disk that is not there must not block the picker (it opens on the Desktop folder)
+    gone = tmp_path_factory.mktemp("gone") / "disk"; gone.mkdir()
+    assert c.post("/api/export/destination", json={"path": str(gone)}).status_code == 200
+    gone.rmdir()
+    assert c.get("/api/export/destination").json()["mounted"] is False
+    assert c.post("/api/bundle/export/choose").status_code == 204
+    assert c.delete("/api/export/destination").status_code == 200
+    # a pick inside the shoot is refused with bundle_path's message
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(tmp_path) + "\n", stderr=""))
+    r = c.post("/api/bundle/export/choose")
+    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
+    dest = tmp_path_factory.mktemp("picked")
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(dest) + "\n", stderr=""))
+    r = c.post("/api/bundle/export/choose")
+    assert r.status_code == 200 and r.json()["dest"] == str(dest.resolve())
+    p = _wait_export(c)
+    assert p["error"] is None and Path(p["path"]).is_file() and Path(p["path"]).parent == dest.resolve()
+    assert TestClient(create_app(None)).post("/api/bundle/export/choose").status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_reveal_only_for_paths_that_exist(tmp_path, monkeypatch):
+    import subprocess as sp
+    c = _shoot_client(tmp_path, n=1)
+    calls = []
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda cmd, *a, **k: (calls.append(cmd), sp.CompletedProcess(cmd, returncode=0, stdout="", stderr=""))[1])
+    assert c.post("/api/reveal", json={"path": str(tmp_path / "nope.zip")}).status_code == 400
+    assert calls == []
+    r = c.post("/api/reveal", json={"path": str(tmp_path / "p0.jpg")})
+    assert r.status_code == 200 and calls[0][:2] == ["open", "-R"]
+
+
+def test_folder_info_says_whether_the_disk_is_there(tmp_path, tmp_path_factory):
+    c = _shoot_client(tmp_path, n=1)
+    f = c.get("/api/folder").json()
+    assert f["mounted"] is True and f["disk"] == tmp_path.resolve().name
+    assert c.get("/api/stats").json()["mounted"] is True
+    assert TestClient(create_app(None)).get("/api/folder").json() == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None}
+    # the disk got unplugged: the index is still there, the folder is not
+    disk = tmp_path_factory.mktemp("disk") / "shoot"; disk.mkdir()
+    from conftest import make_image
+    make_image(disk, "a.jpg")
+    index_folder(disk, faces=False, workers=1, embed=False)
+    c2 = TestClient(create_app(disk))
+    import shutil as sh
+    sh.rmtree(disk)
+    f = c2.get("/api/folder").json()
+    assert f["root"] == str(disk) and f["indexed"] is True and f["mounted"] is False and f["disk"] == "shoot"
+    assert c2.get("/api/stats").json()["mounted"] is False
 
 
 def test_bundle_import_endpoint_switches_to_the_shoot(tmp_path, tmp_path_factory):

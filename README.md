@@ -12,8 +12,10 @@ Once, about ten minutes, mostly downloading.
    unpacks as `sorted-app-main`; leave it wherever you like, Desktop is fine). Or
    `git clone https://github.com/kirtan-00/sorted-app.git` if you have git.
 2. Double-click **Install sorted.command** inside the folder. A Terminal window opens and shows
-   what it is doing. Wait for the line `sorted is installed. Double-click sorted.app to start.`
-3. Done. The installer opens sorted once for you at the end.
+   what it is doing. Wait for the line `sorted is installed. There is a sorted icon on your
+   Desktop; double-click it any time.`
+3. Done. The installer opens sorted once for you at the end and leaves a **sorted** icon on your
+   Desktop.
 
 If macOS refuses to open the installer ("Apple could not verify", "from an unidentified
 developer"): open **System Settings**, **Privacy & Security**, scroll down and click **Open
@@ -24,25 +26,29 @@ happens once. If double-clicking opens the file in a text editor instead, right-
 The installer needs an Apple silicon Mac (M1 or newer) on macOS 14 or newer and an internet
 connection. It fetches uv (a Python package manager) into `~/.local/bin`, Python 3.11 and the
 libraries into `.venv` inside the folder, the search model into `~/.cache/huggingface`, and
-ffmpeg if the Mac has none. It touches nothing else. Run it again any time: a second run takes
-seconds and repairs whatever is missing.
+ffmpeg if the Mac has none, and puts the `sorted` icon on your Desktop. It touches nothing else.
+Run it again any time: a second run takes seconds and repairs whatever is missing.
 
 ## Start
 
-Double-click **sorted.app** in the folder. It starts a local server and opens your browser at
-`http://127.0.0.1:7777` (or the next free port). Close the browser tab when you are done; the
-server stops the next time you start the app.
+Double-click the **sorted** icon on your Desktop. (Or `sorted.app` inside the folder; the Desktop
+icon is a shortcut to it.) It starts a local server and opens Chrome at `http://127.0.0.1:7777`
+(or the next free port). Close the browser tab when you are done; the server stops the next time
+you start the app. Moved the folder? Run **Install sorted.command** again and the Desktop icon
+points at the new place.
 
 If the app cannot see your Desktop or an external disk when you pick a folder, macOS is blocking
-it: **System Settings**, **Privacy & Security**, **Full Disk Access**, add `sorted.app` (drag it
-in), then start it again. Nothing here leaves the Mac; this is only macOS asking whether the app
-may read the disk.
+it: **System Settings**, **Privacy & Security**, **Full Disk Access**, add the `sorted.app` you
+double-click (drag the Desktop icon in), then start it again. Nothing here leaves the Mac; this
+is only macOS asking whether the app may read the disk.
 
 ## First run
 
-1. **Open folder**, pick the shoot (the disk or the folder with the day's cards). It shows up
-   under **Recent** next time.
-2. **Index**. Leave **Detect faces** ticked unless you are in a hurry (untick it, index, and run
+1. The app opens on a welcome screen with two buttons. **Scan a disk or folder**: pick the shoot
+   (the disk or the folder with the day's cards) and the scan starts. **Load a scan file**: pick a
+   `.photosort-index.zip` someone gave you and skip the scan. Recent shoots are listed under the
+   buttons.
+2. Leave **Detect faces** ticked unless you are in a hurry (untick it, scan, and run
    **Detect faces now** later). A few thousand photos take a while; the progress bar is honest.
 3. Then:
    - **Search** in plain words ("sunset on the boat", "close-up of hands"). The **Sharp** slider
@@ -54,7 +60,7 @@ may read the disk.
    - **Check focus** (top bar) marks the frames nothing is sharp in, so you can hide or skip them.
 4. **Export** anything you have selected or ticked: copies, links (need the disk plugged in) or a
    CSV, full size or web size, to a folder on this Mac.
-5. **Reorganise disk** (Index tab) sorts the shoot folder itself into `sorted/` by category and
+5. **Reorganise disk** (Scan tab) sorts the shoot folder itself into `sorted/` by category and
    person. It shows a **Preview** first, moves files on the same disk without copying, and
    **Undo** puts every file back where it was.
 6. Exporting straight into a Google Drive folder works too, after a one-time sign-in:
@@ -62,7 +68,7 @@ may read the disk.
 
 ## Where things live
 
-- The index and thumbnails: `~/Library/Application Support/photosort/<shoot>/`. Delete a shoot's
+- The scan (index) and thumbnails: `~/Library/Application Support/photosort/<shoot>/`. Delete a shoot's
   folder there and it is gone from sorted; the photos are untouched.
 - Exports: `~/Desktop/photosort-out/<shoot>/<selection>/`.
 - The app log: `~/Library/Logs/photosort.log`. The installer's log: `install.log` in the folder.

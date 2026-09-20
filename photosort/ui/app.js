@@ -189,11 +189,12 @@
       b.classList.toggle("on", b.dataset.view === name);
     });
     // ===== end nav selector =====
-    var hasFolder = !!(state.folder && state.folder.root);
+    var hasFolder = folderOpen(state.folder);
     $$("main > section").forEach(function (s) {
       if (s.id === "view-nofolder") { s.hidden = hasFolder; return; }
       s.hidden = !hasFolder || s.id !== "view-" + name;
     });
+    setWelcomeFrame(hasFolder);                        // ===== welcome: the sidebar and toolbar groups dim and go inert =====
     if (!hasFolder) return;
     trackTab(name);                                    // ===== usage log: the tab and the time on the one before =====
     // ===== scroll memory: the returned-to list sits where it was =====
@@ -408,12 +409,18 @@
       if (s.videos) bits.push(s.videos + " videos");
       bits.push(s.faces + " faces");
       if (s.people) bits.push(s.people + " people");
-      if (s.indexing) bits.push("indexing…");
+      if (s.indexing) bits.push("scanning…");
       if (s.errors) bits.push(s.errors + " failed");
       if (s.faces_pending) bits.push(s.faces_pending + " need faces");
       $("#stats").textContent = bits.join(" · ");
-      $("#stats").title = s.last_index ? "indexed " + s.last_index : "";
+      $("#stats").title = s.last_index ? "scanned " + s.last_index : "";
       // ===== end title block =====
+      // ===== welcome: the shoot disk went away since the folder opened; the welcome comes back with its line =====
+      if (state.folder && state.folder.root && s.mounted === false && state.folder.mounted !== false) {
+        state.folder.mounted = false;
+        showView(state.view);
+      }
+      // ===== end welcome =====
       // ===== after stats: capabilities, the faces-pending controls, the focus line and the reorganise status =====
       state.caps.focus = !!(s && typeof s.focus === "object");   // an older server has no focus or reorganise endpoints
       renderFacesPending(s);
@@ -433,7 +440,7 @@
       var list = (data && data.errors) || [];
       var box = $("#index-errors");
       box.hidden = list.length === 0;
-      $("#index-errors-title").textContent = list.length + " file(s) could not be read. They are skipped; tick retry and Index again once fixed.";
+      $("#index-errors-title").textContent = list.length + " file(s) could not be read. They are skipped; tick Retry failed files and Scan again once fixed.";
       $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.rel; }).join("\n") + (list.length > 200 ? "\n… " + (list.length - 200) + " more" : "");
     }).catch(function () { /* non-fatal */ });
   }
@@ -447,6 +454,22 @@
     folderNameEl.textContent = state.folder.name || "no folder open";
     folderNameEl.title = state.folder.root || "";
   }
+  // ===== welcome: a folder counts as open only while its disk is there (/api/folder and /api/stats carry mounted) =====
+  function folderOpen(f) { return !!(f && f.root && f.mounted !== false); }
+  var welcomeUnmounted = $("#welcome-unmounted");
+  var welcomeDisk = $("#welcome-disk");
+  function setWelcomeFrame(hasFolder) {
+    document.body.classList.toggle("nofolder", !hasFolder);
+    ["header nav", "#folderbar", "#exportbar", "#inspector-toggle"].forEach(function (sel) {
+      var el = $(sel);
+      if (el) el.inert = !hasFolder;
+    });
+    var out = !hasFolder && !!(state.folder && state.folder.root);   // a shoot is open but its disk is unplugged
+    welcomeUnmounted.hidden = !out;
+    $(".welcome-ask").hidden = out;
+    if (out) welcomeDisk.textContent = state.folder.disk || state.folder.name || "the disk";
+  }
+  // ===== end welcome =====
 
   function loadFolder() {
     return api("/api/folder").then(function (info) {
@@ -471,6 +494,18 @@
       recentSelect.appendChild(opt);
     });
     recentSelect.value = "";
+    // ===== welcome: the same folders as small links under the two buttons =====
+    var box = $("#welcome-recent");
+    $$(".link", box).forEach(function (b) { b.remove(); });
+    state.recent.forEach(function (r) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "link small";
+      b.textContent = r.name || r.path; b.title = r.path;
+      b.addEventListener("click", function () { switchFolder(r.path); });
+      box.appendChild(b);
+    });
+    box.hidden = state.recent.length === 0;
+    // ===== end welcome =====
   }
 
   // Reached after any folder switch: reset per-folder UI state, then either land
@@ -502,7 +537,7 @@
     state.scroll = {};
     // ===== end navigation =====
     loadRecent();
-    if (!info.root) {
+    if (!folderOpen(info)) {
       showView(state.view);
       return;
     }
@@ -511,7 +546,7 @@
       navPush(true);                                   // ===== navigation: the new shoot replaces the entry, never a push =====
       var btn = $("#start-index");
       if (btn) btn.focus();
-      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first index of a fresh folder, page reloaded mid-run
+      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first scan of a fresh folder, page reloaded mid-run
       return;
     }
     loadStats().then(function (s) { loadErrors(); if (s.indexing) pollProgress(); });
@@ -533,12 +568,14 @@
       }
       return r.json();
     }).then(function (info) {
-      if (!info) return;
+      if (!info) return null;
       applyFolderInfo(info);
       setStatus("opened " + (info.name || info.root));
       settleFolder(info);
+      return info;
     }).catch(function (err) {
       setStatus("could not open folder: " + err.message);
+      return null;
     });
   }
 
@@ -610,7 +647,6 @@
   });
 
   $("#open-folder").addEventListener("click", openFolderPicker);
-  $("#open-folder-main").addEventListener("click", openFolderPicker);
   recentSelect.addEventListener("change", function () {
     var path = recentSelect.value;
     if (path) switchFolder(path);
@@ -900,6 +936,14 @@
           return;
         }
         clearInterval(exportTimer); exportTimer = null;
+        // ===== save scan file: its own end line, the path in the Scan tab with Show in Finder =====
+        if (p.what === "bundle") {
+          if (p.error) { setStatus("could not save the scan file: " + p.error, true); return; }
+          renderBundleSaved(p.path);
+          setStatus("scan file saved to " + p.path + (p.failed ? " (" + p.failed + " thumbnails could not be read)" : ""), true);
+          return;
+        }
+        // ===== end save scan file =====
         if (p.error) { setStatus("export failed: " + p.error, true); return; }
         var written = p.done - p.failed - (p.skipped || 0);
         var msg = "exported " + written + " of " + p.total + " to " + p.path;
@@ -2299,10 +2343,15 @@
     }
   }
 
+  // ===== scan wording: "Scanning 1,204 of 3,677  reading photos and clips  4.1/s, about 3 min left" =====
+  var STAGE_TEXT = { scan: "finding files", features: "reading photos and clips", faces: "finding faces", embed: "learning what is in each shot" };
   function formatProgress(p) {
-    if (p.stage === "error") return "indexing failed: " + (p.error || "unknown error");
+    if (p.stage === "error") return "scan failed: " + (p.error || "unknown error");
     var done = p.done || 0, total = p.total || 0;
-    var line = p.stage + "  " + done + "/" + total;
+    var n = function (x) { return Number(x).toLocaleString("en-US"); };
+    if (p.stage === "done") return "Scanned " + n(total) + " of " + n(total) + (p.running ? "" : "  finished");
+    var line = (total || p.stage !== "scan") ? "Scanning " + n(done) + " of " + n(total) : "Scanning";
+    line += "  " + (STAGE_TEXT[p.stage] || p.stage);
     if (p.running && p.stage_started && done > 0 && total > done) {
       var elapsed = Date.now() / 1000 - p.stage_started;
       var rate = done / Math.max(elapsed, 0.001);
@@ -2323,9 +2372,9 @@
         if (!p.running) {
           stopProgressPoll();
           if (p.stage === "error") {
-            setStatus("indexing failed: " + (p.error || "unknown error"), true);
+            setStatus("scan failed: " + (p.error || "unknown error"), true);
           } else {
-            setStatus("indexing finished");
+            setStatus("scan finished");
           }
           // the index changed under us: refresh everything that shows it
           loadStats();
@@ -2349,15 +2398,15 @@
       loadStats();
     }).catch(function (err) {
       if (err.status === 409) {
-        setStatus(err.message || "already indexing");
+        setStatus(err.message || "already scanning");
         pollProgress();
       } else {
-        setStatus("could not start indexing: " + err.message);
+        setStatus("could not start the scan: " + err.message);
       }
     });
   }
   $("#start-index").addEventListener("click", function () {
-    startIndexJob({ faces: $("#faces").checked, retry_errors: $("#retry-errors").checked }, "indexing started…");
+    startIndexJob({ faces: $("#faces").checked, retry_errors: $("#retry-errors").checked }, "scan started…");
   });
   // ===== end index job starter =====
 
@@ -2379,34 +2428,66 @@
     });
   }
 
+  // ===== save scan file anywhere: the native folder picker (POST /api/bundle/export/choose, opening on the export
+  // destination), then the export into the pick; the poller shows the path and a Show in Finder button at the end =====
+  var bundleOut = $("#bundle-out");
+  var bundleOutPath = $("#bundle-out-path");
+  function revealPath(path) {
+    return api("/api/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: path }) })
+      .catch(function (err) { setStatus("could not show it in the Finder: " + err.message, true); });
+  }
+  function renderBundleSaved(path) {
+    bundleOutPath.textContent = path || ""; bundleOutPath.title = path || "";
+    bundleOut.hidden = !path;
+  }
+  $("#bundle-reveal").addEventListener("click", function () { if (bundleOutPath.textContent) revealPath(bundleOutPath.textContent); });
   $("#bundle-export").addEventListener("click", function () {
-    setStatus("packing the index…", true);
-    api("/api/bundle/export", { method: "POST" }).then(function () { pollExportProgress("packing index"); })
-      .catch(function (err) { setStatus("could not pack the index: " + err.message, true); });
+    setStatus("waiting for the folder picker…", true);
+    renderBundleSaved(null);
+    pickerPost("/api/bundle/export/choose").then(function (res) {
+      if (!res) { setStatus("save cancelled"); return; }
+      setStatus("saving the scan file…", true);
+      pollExportProgress("saving the scan file");
+    }).catch(function (err) { setStatus("could not save the scan file: " + err.message, true); });
   });
+  // ===== end save scan file =====
 
   function importBundle() {
-    setStatus("waiting for the bundle picker…", true);
+    setStatus("waiting for the scan file picker…", true);
     pickerPost("/api/bundle/import/choose").then(function (res) {
-      if (!res) { setStatus("import cancelled"); return null; }
+      if (!res) { setStatus("load cancelled"); return null; }
       if (!res.needs_root) return res;
       // Made on a Mac where the disk sat under another path: ask for the folder, then install under it.
-      setStatus("that bundle was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
+      setStatus("that scan file was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
       return pickerPost("/api/bundle/import/choose-root", { zip: res.zip }).then(function (r2) {
-        if (!r2) { setStatus("import cancelled, nothing was installed"); return null; }
+        if (!r2) { setStatus("load cancelled, nothing was changed"); return null; }
         return r2;
       });
     }).then(function (info) {
       if (!info) return;
       applyFolderInfo(info);
-      setStatus("imported " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
+      setStatus("loaded " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
       settleFolder(info);
     }).catch(function (err) {
-      setStatus("could not import the bundle: " + err.message, true);
+      setStatus("could not load the scan file: " + err.message, true);
     });
   }
   $("#bundle-import").addEventListener("click", importBundle);
-  $("#bundle-import-main").addEventListener("click", importBundle);
+
+  // ===== welcome: the two buttons, the faces tick, the How it works link =====
+  // Scan a disk or folder: the folder picker; a folder with nothing scanned yet starts the scan at once with the
+  // welcome's faces choice (mirrored into the Scan tab's box); a scanned one just opens. Load a scan file: importBundle.
+  var welcomeFaces = $("#welcome-faces");
+  $("#welcome-scan").addEventListener("click", function () {
+    openFolderPicker().then(function (info) {
+      if (!info || !folderOpen(info) || info.indexed) return;
+      $("#faces").checked = welcomeFaces.checked;
+      startIndexJob({ faces: welcomeFaces.checked, retry_errors: false }, "scan started…");
+    });
+  });
+  $("#welcome-load").addEventListener("click", importBundle);
+  $("#welcome-help").addEventListener("click", function () { setHelp(true); });
+  // ===== end welcome =====
 
   // ===== help: the "How it works" slide-over (420 px from the right, over the inspector) =====
   // Opens from the toolbar button; Esc (keyboard block above), the close button and a click outside close it.
@@ -2426,6 +2507,7 @@
   document.addEventListener("click", function (e) {
     if (helpEl.hidden) return;
     if (helpEl.contains(e.target) || helpToggle.contains(e.target)) return;
+    if (e.target.closest && e.target.closest("#welcome-help")) return;   // ===== welcome: its link opens the panel =====
     setHelp(false);
   });
   // ===== end help =====
@@ -2546,7 +2628,7 @@
     $("#faces-pending-text").textContent = n + (n === 1 ? " photo" : " photos") + " not scanned for faces yet,";
   }
   function scanFacesNow() {
-    startIndexJob({ faces: true }, "scanning " + state.facesPending + " photo(s) for faces…");
+    startIndexJob({ faces: true }, "finding faces in " + state.facesPending + " photo(s)…");
     goView("index");                                   // ===== navigation: a tab switch, so a history entry =====
   }
   detectFacesNow.addEventListener("click", scanFacesNow);
@@ -2701,7 +2783,7 @@
   loadExportDest();
   loadFolder().then(function (info) {
     loadRecent();
-    if (!info.root) {
+    if (!folderOpen(info)) {
       showView(state.view);
       return;
     }
@@ -2715,7 +2797,7 @@
       navPush(true);                                   // ===== navigation: the boot entry is a replace, never a push =====
       var btn = $("#start-index");
       if (btn) btn.focus();
-      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first index of a fresh folder, page reloaded mid-run
+      loadStats().then(function (s) { if (s.indexing) pollProgress(); });   // first scan of a fresh folder, page reloaded mid-run
       return;
     }
     loadStats().then(function (s) { if (s.indexing) pollProgress(); });

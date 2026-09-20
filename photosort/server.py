@@ -124,6 +124,14 @@ class BundleZipReq(BaseModel):
     zip: str
 
 
+class BundleExportReq(BaseModel):
+    dest: str | None = None                 # folder the scan file goes in; None = the export destination
+
+
+class RevealReq(BaseModel):
+    path: str
+
+
 class DriveLinkReq(BaseModel):
     link: str
 
@@ -222,13 +230,22 @@ def create_app(root: Path | None = None) -> FastAPI:
         return PlainTextResponse("Internal Server Error", status_code=500)
     # ===== end usage log =====
 
+    def _disk_name(r: Path) -> str:
+        """What to ask the user to plug back in: the volume under /Volumes, else the folder itself."""
+        parts = r.parts
+        if len(parts) >= 3 and parts[:2] == ("/", "Volumes"):
+            return parts[2]
+        return r.name or str(r)
+
     def _folder_info() -> dict:
         r = state["root"]
         if r is None:
-            return {"root": None, "name": None, "indexed": False}
+            return {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None}
         conn = db.connect(r)
         n = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
-        return {"root": str(r), "name": r.name or str(r), "indexed": n > 0, "items": n}
+        # mounted: the folder is reachable right now; false once the shoot disk is unplugged.
+        return {"root": str(r), "name": r.name or str(r), "indexed": n > 0, "items": n,
+                "mounted": r.is_dir(), "disk": _disk_name(r)}
 
     def _public_folder_info() -> dict:
         return {k: v for k, v in _folder_info().items() if k != "items"}
@@ -243,7 +260,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     def _switch_root(new_root: Path) -> dict:
         if state["running"]:
-            raise HTTPException(409, "cannot switch folders while indexing")
+            raise HTTPException(409, "cannot switch folders while scanning")
         with state["export_lock"]:
             if state["export"]["running"]:
                 raise HTTPException(409, "cannot switch folders while an export is running")
@@ -336,7 +353,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     def choose_folder():
         # Same gates as _switch_root, checked up front so nobody sits through the picker for a 409.
         if state["running"]:
-            raise HTTPException(409, "cannot switch folders while indexing")
+            raise HTTPException(409, "cannot switch folders while scanning")
         if state["export"]["running"]:
             raise HTTPException(409, "cannot switch folders while an export is running")
         try:
@@ -392,6 +409,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             indexing=state["running"],
             faces_pending=n("SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL"),
             focus={k: v for k, v in focus_mod.status(root).items() if k != "unchecked"},
+            mounted=root.is_dir(),
         )
 
     @app.get("/api/errors")
@@ -407,13 +425,13 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "already indexing")
+            raise HTTPException(409, "already scanning")
         # A reorganise or undo renames files under the root while it runs; an index pass in the
         # middle would insert sorted/ rows before their old rows are re-keyed.
         if state["export"]["running"] and state["export"].get("what") in ("reorganise", "undo"):
-            raise HTTPException(409, "cannot index while the disk is being reorganised")
+            raise HTTPException(409, "cannot scan while the disk is being reorganised")
         if state["focus"]["running"]:
-            raise HTTPException(409, "cannot index while the focus check is running")
+            raise HTTPException(409, "cannot scan while the focus check is running")
         state["running"] = True
         usage.log("index_start", shoot=state["root"].name, faces=req.faces, retry_errors=req.retry_errors)
         threading.Thread(target=_run, args=(state["root"], req.faces, req.retry_errors), daemon=True).start()
@@ -557,7 +575,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             return {"suggestions": []}
         if state["running"]:
-            raise HTTPException(409, "indexing")
+            raise HTTPException(409, "scanning")
         from .people import suggest_merges
         return {"suggestions": suggest_merges(state["root"])}
 
@@ -566,7 +584,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "indexing")
+            raise HTTPException(409, "scanning")
         from .people import merge_people
         try:
             out = merge_people(state["root"], req.keep, req.drop)
@@ -581,7 +599,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "indexing")
+            raise HTTPException(409, "scanning")
         from .people import reject_merge
         try:
             reject_merge(state["root"], req.a, req.b)
@@ -741,7 +759,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "cannot rename while indexing")
+            raise HTTPException(409, "cannot rename while scanning")
         if state["classify"]["running"]:
             raise HTTPException(409, "cannot rename while categorising")
         try:
@@ -798,7 +816,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "cannot check focus while indexing")
+            raise HTTPException(409, "cannot check focus while scanning")
         if state["classify"]["running"]:
             raise HTTPException(409, "cannot check focus while categorising")
         if state["export"]["running"]:
@@ -1228,7 +1246,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if root_at_start is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "cannot reorganise while indexing")
+            raise HTTPException(409, "cannot reorganise while scanning")
         if state["classify"]["running"]:
             raise HTTPException(409, "cannot reorganise while categorising")
         if state["export"]["running"]:
@@ -1309,18 +1327,26 @@ def create_app(root: Path | None = None) -> FastAPI:
     # Index bundles: the whole index (db with saved people, thumbs, grid) as one zip on the export
     # destination, and the reverse: install such a zip here and open the shoot without re-indexing.
 
-    @app.post("/api/bundle/export")
-    def export_bundle_api():
+    def _start_bundle_export(dest: Path | None) -> dict:
+        """Pack the open shoot's index into <dest>/<shoot>.photosort-index.zip in the background.
+        dest None means the export destination. A dest that is the shoot root or inside it is refused
+        (bundle_path raises), as is one that is not a folder."""
         from . import bundle
         with state["export_lock"]:
             root_at_start = state["root"]
             if root_at_start is None:
                 raise HTTPException(400, "no folder open")
             if state["running"]:
-                raise HTTPException(409, "cannot pack the index while indexing")
+                raise HTTPException(409, "cannot save the scan file while scanning")
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
-            base = _resolve_base()
+            if dest is None:
+                base = _resolve_base()
+            else:
+                base = dest.expanduser()
+                if not base.is_dir():
+                    raise HTTPException(400, f"not a directory: {dest}")
+                base = base.resolve()
             try:
                 bundle.bundle_path(root_at_start, base)
             except ValueError as e:
@@ -1328,7 +1354,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             n_files = len(bundle.bundle_files(root_at_start))
             nbytes = bundle.bundle_bytes(root_at_start)
             _check_free(nbytes, base, hint="Free some space there first.")
-            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None}
+            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None, "what": "bundle"}
         t0 = _export_started("bundle", "local", n_files)
 
         def prog(d):
@@ -1344,14 +1370,50 @@ def create_app(root: Path | None = None) -> FastAPI:
                 _export_finished("bundle", "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
-        return {"started": True, "total": n_files}
+        return {"started": True, "total": n_files, "dest": str(base)}
+
+    @app.post("/api/bundle/export")
+    def export_bundle_api(req: BundleExportReq | None = None):
+        return _start_bundle_export(Path(req.dest) if req and req.dest else None)
+
+    @app.post("/api/bundle/export/choose")
+    def export_bundle_choose():
+        """The native folder picker, opening on ~/Desktop/photosort-out (created if need be, and never a
+        chosen export disk, which may be the one that is unplugged), then the export into the pick."""
+        # Same gates as the export, checked up front so nobody sits through the picker for an error.
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot save the scan file while scanning")
+        if state["export"]["running"]:
+            raise HTTPException(409, "an export is already running")
+        start = export_root(); start.mkdir(parents=True, exist_ok=True)
+        quoted = str(start).replace("\\", "\\\\").replace('"', '\\"')
+        path_str = _run_picker(f'POSIX path of (choose folder with prompt "Where should the scan file go?" default location (POSIX file "{quoted}"))', "folder")
+        if path_str is None:
+            return Response(status_code=204)
+        return _start_bundle_export(Path(path_str))
+
+    @app.post("/api/reveal")
+    def reveal(req: RevealReq):
+        """Show a file or folder the app wrote in the Finder (open -R). Only for paths that exist."""
+        p = Path(req.path).expanduser()
+        if not p.exists():
+            raise HTTPException(400, f"not there: {req.path}")
+        try:
+            subprocess.run(["open", "-R", str(p)], capture_output=True, text=True, timeout=20, check=False)
+        except FileNotFoundError:
+            raise HTTPException(501, "Finder is not available here")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "the Finder did not answer")
+        return {"revealed": str(p)}
 
     def _import_gates() -> None:
         # Same gates as _switch_root, checked up front so nobody sits through a picker for a 409.
         if state["running"]:
-            raise HTTPException(409, "cannot import an index while indexing")
+            raise HTTPException(409, "cannot load a scan file while scanning")
         if state["export"]["running"]:
-            raise HTTPException(409, "cannot import an index while an export is running")
+            raise HTTPException(409, "cannot load a scan file while an export is running")
 
     def _run_picker(script: str, what: str) -> str | None:
         """POSIX path from a macOS picker, or None when the user cancelled."""
@@ -1383,7 +1445,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, str(e))
         except sqlite3.Error:
             # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
-            raise HTTPException(400, "that bundle's index is not readable")
+            raise HTTPException(400, "that scan file is not readable")
         out = _switch_root(root)
         usage.log("bundle_import", photos=info.get("photos"))
         return dict(out, imported=True, root=str(root), photos=info.get("photos"))
@@ -1391,7 +1453,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/api/bundle/import/choose")
     def import_bundle_choose():
         _import_gates()
-        path_str = _run_picker('POSIX path of (choose file with prompt "Pick a photosort index bundle" of type {"public.zip-archive"})', "bundle")
+        path_str = _run_picker('POSIX path of (choose file with prompt "Pick a scan file (.photosort-index.zip)" of type {"public.zip-archive"})', "bundle")
         if path_str is None:
             return Response(status_code=204)
         zip_path = Path(path_str)
@@ -1419,7 +1481,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         _import_gates()
         zip_path = Path(req.zip).expanduser()
         info = _inspect_zip(zip_path)
-        path_str = _run_picker('POSIX path of (choose folder with prompt "Pick the photo folder this index was made for")', "folder")
+        path_str = _run_picker('POSIX path of (choose folder with prompt "Pick the photo folder this scan was made for")', "folder")
         if path_str is None:
             return Response(status_code=204)
         root = Path(path_str)

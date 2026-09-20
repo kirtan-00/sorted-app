@@ -23,6 +23,8 @@ def make_img(tmp_path):
 def _isolated_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path_factory.mktemp("home")))
     monkeypatch.setenv("PHOTOSORT_EXPORT_DIR", str(tmp_path_factory.mktemp("out")))
+    # the launcher log: never the real ~/Library/Logs/photosort.log, whose content is whatever ran on this Mac
+    monkeypatch.setenv("PHOTOSORT_LOG", str(tmp_path_factory.mktemp("log") / "photosort.log"))
 
 FFMPEG = shutil.which("ffmpeg") or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg") if os.path.exists(p)), None)
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")
