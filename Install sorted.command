@@ -4,7 +4,8 @@
 # What it does, in order (each step is skipped when already done, so a second run is fast):
 #   1. refuses Intel Macs and macOS older than 14
 #   2. installs uv (the Python package manager) into ~/.local/bin if it is missing
-#   3. makes .venv here with Python 3.11 (uv downloads its own CPython when the Mac has none)
+#   3. makes .venv here with uv's own arm64 Python 3.11 (never the Mac's python.org universal one,
+#      which LaunchServices can start as x86_64 and then no wheel loads)
 #   4. installs sorted and its libraries into .venv (runtime only, no test tools)
 #   5. fetches the models: MobileCLIP-S1 into the Hugging Face cache (the face models ship in models/)
 #      and proves they load
@@ -90,12 +91,13 @@ mkdir -p "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR"
 # 3. .venv with Python 3.11 ------------------------------------------------------------------------
 step "Python 3.11 in .venv"
 PY="$REPO/.venv/bin/python"
-if [ -x "$PY" ] && "$PY" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>/dev/null; then
+if [ -x "$PY" ] && "$PY" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 1)' 2>/dev/null \
+   && ! file "$(readlink -f "$PY")" | grep -q universal; then
   note "already here: $("$PY" --version)"
 else
   [ -d "$REPO/.venv" ] && note "replacing the old .venv"
   # uv finds a Python 3.11 on the Mac, or downloads its own CPython (about 25 MB) into .uv/python.
-  "$UV" venv --python 3.11 --clear "$REPO/.venv" || fail "could not create .venv (see the lines above)"
+  "$UV" venv --managed-python --python 3.11 --clear "$REPO/.venv" || fail "could not create .venv (see the lines above)"
   note "made .venv with $("$PY" --version)"
 fi
 

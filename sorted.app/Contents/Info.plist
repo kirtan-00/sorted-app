@@ -7,4 +7,6 @@
 <key>CFBundleExecutable</key><string>sorted</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSUIElement</key><true/>
+<key>LSArchitecturePriority</key><array><string>arm64</string></array>
+<key>LSRequiresNativeExecution</key><true/>
 </dict></plist>

@@ -25,4 +25,6 @@ sleep 0.5
 # The CLI takes 7777, or the next free port (7778 and up) when something else holds it; the
 # "photosort serving ... at http://127.0.0.1:<port>" line below says which.
 echo "[$(date)] launching from $REPO" >> "$LOG"
-exec "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" --open >> "$LOG" 2>&1
+# arch -arm64: LaunchServices can start a script bundle under Rosetta; a universal interpreter then
+# loads as x86_64 and every arm64 wheel fails with "incompatible architecture".
+exec arch -arm64 "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" --open >> "$LOG" 2>&1
