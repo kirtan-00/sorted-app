@@ -11,3 +11,5 @@ photosort-out/
 .worktrees/
 docs/ui-screens/
 docs/site-screens/
+.uv/
+install.log

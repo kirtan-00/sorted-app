@@ -16,5 +16,5 @@ Test on "Dhaval lifestyle reels" (46 JPEGs) passed: index, faces, categories, ti
 4. Keep the hard rule: the disk is read-only. `--apply-on-disk` exists but is never run unless asked.
 
 ## How to start the app (Terminal, not Finder, because of the Desktop permission)
-    bash ~/Desktop/photosort/PhotoSort.app/Contents/MacOS/PhotoSort
+    bash ~/Desktop/photosort/sorted.app/Contents/MacOS/sorted
 If the page says "cannot be reached": `pkill -f "photosort.cli serve"` then run the line above again.

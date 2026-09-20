@@ -991,6 +991,12 @@ body:has(#view-nofolder:not([hidden])) #status { grid-column: 1; }
 .help-body .panel:first-child { border-top: 0; }
 .help-lines p { font-size: 14px; line-height: 1.4; color: var(--g700); margin: 0 0 6px; }
 .help-lines p:last-child { margin-bottom: 0; }
+/* feedback: the usage log's buttons at the foot of the slide-over, same row rhythm as the reorganise section */
+.help-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.help-actions a.link { display: inline-flex; align-items: center; color: var(--blue); text-decoration: none; }
+.help-actions a.link:hover { color: var(--blue-h); background: none; text-decoration: underline; text-underline-offset: 2px; }
+.help-lines p.help-out { margin-top: 8px; font-size: 13px; color: var(--g600); overflow-wrap: anywhere; }
+.help-lines p.help-out.err { color: var(--red); }
 
 /* focus filters: the status line under the kind control, a 12 px link beside it */
 .link.small { font-size: 12px; height: 22px; padding: 0 4px; color: var(--blue); }

@@ -1,16 +1,21 @@
 from __future__ import annotations
 import json
 import mimetypes
+import re
 import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
+from . import usage
 from . import classify as classify_mod
 from . import focus as focus_mod
 from . import settings
@@ -181,13 +186,58 @@ def create_app(root: Path | None = None) -> FastAPI:
     }
     app.state.photosort = state
 
+    # ===== usage log (photosort/usage.py): one session per server start; every 4xx/5xx and every uncaught
+    # exception is an event, logged against the route template so a person's name in a URL never lands in it.
+    usage.start_session()
+    usage.log("server_start", **usage.system_info())
+
+    def _route_path(request: Request) -> str:
+        """The matched route's template (/api/people/references/{name}/find), or for an unmatched URL its
+        first two segments: the raw path could carry a name, the template never does."""
+        route = request.scope.get("route")
+        tpl = getattr(route, "path_format", None) or getattr(route, "path", None)
+        if tpl:
+            return tpl
+        parts = [p for p in request.url.path.split("/") if p][:2]
+        return "/" + "/".join(parts) + ("/..." if len(request.url.path.split("/")) > 3 else "")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _log_http_error(request: Request, exc: StarletteHTTPException):
+        route = _route_path(request)
+        if exc.status_code >= 400 and not (exc.status_code == 404 and (route.startswith("/ui/") or route.startswith("/api/thumb"))):
+            usage.log("api_error", route=route, status=exc.status_code, message=str(exc.detail), method=request.method)
+        return await http_exception_handler(request, exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def _log_validation_error(request: Request, exc: RequestValidationError):
+        usage.log("api_error", route=_route_path(request), status=422, message=str(exc.errors()[:1]), method=request.method)
+        return await request_validation_exception_handler(request, exc)
+
+    @app.exception_handler(Exception)
+    async def _log_uncaught(request: Request, exc: Exception):
+        # Starlette re-raises after this returns, so the terminal still sees the traceback.
+        usage.log("exception", route=_route_path(request), status=500, error=f"{type(exc).__name__}: {exc}", method=request.method)
+        return PlainTextResponse("Internal Server Error", status_code=500)
+    # ===== end usage log =====
+
     def _folder_info() -> dict:
         r = state["root"]
         if r is None:
             return {"root": None, "name": None, "indexed": False}
         conn = db.connect(r)
         n = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
-        return {"root": str(r), "name": r.name or str(r), "indexed": n > 0}
+        return {"root": str(r), "name": r.name or str(r), "indexed": n > 0, "items": n}
+
+    def _public_folder_info() -> dict:
+        return {k: v for k, v in _folder_info().items() if k != "items"}
+
+    def _log_folder_open(imported: bool = False) -> None:
+        info = _folder_info()
+        if info["root"]:
+            usage.log("folder_open", shoot=info["name"], items=info["items"], indexed=info["indexed"], imported=imported)
+
+    if root is not None:
+        _log_folder_open()
 
     def _switch_root(new_root: Path) -> dict:
         if state["running"]:
@@ -203,7 +253,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             state["focus"] = {"running": False, "done": 0, "total": 0, "counts": {}, "error": None}
             state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None}
         _save_recent(str(new_root))
-        return _folder_info()
+        _log_folder_open()
+        return _public_folder_info()
 
     def _auto_classify(root_at_start: Path, stats: dict) -> None:
         """Categorise at the end of an index run that changed something. A classify failure is
@@ -215,6 +266,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         total = stats.get("total", 0)
         state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
         state["progress"] = {"stage": "categorise", "done": 0, "total": 0, "stage_started": time.time()}
+        t0 = time.time()
         try:
             state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
             state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
@@ -223,21 +275,37 @@ def create_app(root: Path | None = None) -> FastAPI:
         finally:
             state["classify"]["running"] = False
             state["progress"] = {"stage": "done", "done": total, "total": total, "stage_started": time.time()}
+            _log_classify_done(t0, auto=True)
+
+    def _log_classify_done(t0: float, auto: bool) -> None:
+        c = state["classify"]
+        usage.log("classify_done", auto=auto, seconds=round(time.time() - t0, 1), counts=c["counts"],
+                  discovered=len(c["discovered"] or {}), error=c["error"])
 
     def _run(root_at_start: Path, faces: bool, retry_errors: bool):
         from .index import index_folder
         def prog(d):
             state["progress"] = d
+        t0 = time.time(); stats = {}; err = None
         try:
             stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
             _auto_classify(root_at_start, stats)
         except Exception as e:
             from .index import SourceUnavailable
             msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
+            err = msg
             state["progress"] = {"stage": "error", "error": msg, "done": 0, "total": 0}
         finally:
             state["running"] = False
             state["stale"] = True
+            kinds = {}
+            try:
+                kinds = db.kind_counts(db.connect(root_at_start))
+            except Exception:
+                pass
+            usage.log("index_done", shoot=root_at_start.name, items=stats.get("total", 0), indexed=stats.get("indexed", 0),
+                      skipped=stats.get("skipped", 0), photos=kinds.get("photos"), videos=kinds.get("videos"), faces=faces,
+                      faced=stats.get("faced", 0), failures=stats.get("errors", 0), seconds=round(time.time() - t0, 1), error=err)
 
     def ix() -> Index:
         if state["root"] is None:
@@ -260,7 +328,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/folder")
     def get_folder():
-        return _folder_info()
+        return _public_folder_info()
 
     @app.post("/api/folder/choose")
     def choose_folder():
@@ -345,6 +413,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["focus"]["running"]:
             raise HTTPException(409, "cannot index while the focus check is running")
         state["running"] = True
+        usage.log("index_start", shoot=state["root"].name, faces=req.faces, retry_errors=req.retry_errors)
         threading.Thread(target=_run, args=(state["root"], req.faces, req.retry_errors), daemon=True).start()
         return {"started": True}
 
@@ -374,10 +443,18 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
+        t0 = time.time()
         try:
             rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft))
         except LookupError as e:
             raise HTTPException(404, str(e))
+        # The usage log keeps the query's length and first characters plus which filters were on; an empty
+        # search (the grid's own reload) and a "Show more" page are not logged.
+        filt = {k: v for k, v in dict(sharp=sharp, faces=faces, person=bool(person), taken_from=taken_from, taken_to=taken_to,
+                                      category=category, kind=kind, cluster=cluster, sure_only=sure_only, aerial=aerial,
+                                      hide_bad=hide_bad, hide_soft=hide_soft, image_id=bool(image_id)).items() if v}
+        if offset == 0 and (q or filt):
+            usage.log("search", q=q or "", filters=filt, total=len(rows), ms=round((time.time() - t0) * 1000))
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
 
     @app.get("/api/search/ids")
@@ -455,8 +532,10 @@ def create_app(root: Path | None = None) -> FastAPI:
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         from .people import cluster_faces
+        t0 = time.time()
         out = cluster_faces(state["root"], eps=req.eps)
         state["stale"] = True
+        usage.log("people_group", groups=len(out), eps=req.eps, ms=round((time.time() - t0) * 1000))
         return out
 
     @app.post("/api/people/{pid}/name")
@@ -465,6 +544,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, "no folder open")
         from .people import name_person
         name_person(state["root"], pid, req.name)
+        usage.log("rename", what="group", chars=len(req.name))
         return {"ok": True}
 
     # "Same person?" merge suggestions. Answers are remembered by face id (db.face_links) and applied on
@@ -491,6 +571,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
         state["stale"] = True
+        usage.log("people_merge")
         return out
 
     @app.post("/api/people/reject")
@@ -504,6 +585,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             reject_merge(state["root"], req.a, req.b)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        usage.log("people_reject")
         return {"ok": True}
 
     def _find_person(p: Path, min_sim: float | None) -> dict:
@@ -526,6 +608,8 @@ def create_app(root: Path | None = None) -> FastAPI:
                "total": len(results), "results": results}
         if found.get("reference_face_too_small"):
             out["reference_face_too_small"] = True
+        usage.log("person_find_by_photo", matches=len(results), faces_in_reference=found["faces_in_reference"],
+                  min_sim=min_sim, too_small=bool(found.get("reference_face_too_small")))
         return out
 
     @app.post("/api/people/find")
@@ -571,6 +655,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, "could not read that image")
         except ValueError as e:
             raise HTTPException(400, str(e))
+        usage.log("person_save", faces_in_reference=out["faces_in_reference"], chars=len(req.name))
         return {"id": out["id"], "name": out["name"], "faces_in_reference": out["faces_in_reference"]}
 
     @app.get("/api/people/references")
@@ -602,6 +687,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         matches = match_references(state["root"], _min_sim(req.min_sim), unsure_band=True).get(name, [])
         results = [dict(photos[m["photo_id"]], score=m["sim"], sure=m["sure"], confidence=m["sim"])
                    for m in matches if m["photo_id"] in photos]
+        usage.log("person_find_saved", matches=len(results), min_sim=_min_sim(req.min_sim))
         return {"name": name, "total": len(results), "results": results}
 
     @app.post("/api/people/references/{name:path}/rename")
@@ -619,6 +705,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         moved = db.rename_reference(db.connect(state["root"]), name, new)
         if moved == 0:
             raise HTTPException(404, f"no saved person called {name!r}")
+        usage.log("rename", what="person", chars=len(new), moved=moved)
         return {"ok": True, "name": new, "moved": moved}
 
     @app.delete("/api/people/references/{ref_id}")
@@ -662,6 +749,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         if moved == 0:
             raise HTTPException(404, f"no discovered category called {req.old!r}")
         state["stale"] = True      # the search Index caches the cluster column
+        usage.log("rename", what="category", chars=len(req.new.strip()), moved=moved)
         return {"ok": True, "name": req.new.strip(), "moved": moved}
 
     @app.post("/api/classify")
@@ -674,6 +762,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(409, "cannot categorise while the focus check is running")
         state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
         root_at_start = state["root"]
+        t0 = time.time()
 
         def _run_classify():
             # Both bars fill in one pass: the fixed categories first, then the discovered ones. The Index
@@ -687,6 +776,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             finally:
                 state["stale"] = True
                 state["classify"]["running"] = False
+                _log_classify_done(t0, auto=False)
 
         threading.Thread(target=_run_classify, daemon=True).start()
         return {"started": True}
@@ -721,6 +811,8 @@ def create_app(root: Path | None = None) -> FastAPI:
         def prog(d):
             state["focus"].update(done=d.get("done", 0), total=d.get("total", total))
 
+        t0 = time.time()
+
         def _run_focus():
             try:
                 state["focus"]["counts"] = focus_mod.check_focus(root_at_start, progress=prog)
@@ -729,6 +821,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             finally:
                 state["stale"] = True
                 state["focus"]["running"] = False
+                c = state["focus"]["counts"] or {}
+                usage.log("focus_run", checked=c.get("checked", 0), bad=c.get("bad", 0), soft=c.get("soft", 0),
+                          planned=total, seconds=round(time.time() - t0, 1), error=state["focus"]["error"])
 
         threading.Thread(target=_run_focus, daemon=True).start()
         return {"started": True, "total": total}
@@ -829,6 +924,17 @@ def create_app(root: Path | None = None) -> FastAPI:
         settings.set_export_base(None)
         return _destination_info()
 
+    def _export_started(what: str, dest: str, files: int, **extra) -> float:
+        """Log export_start and hand back the clock; _export_finished logs export_done from state["export"]."""
+        usage.log("export_start", what=what, dest=dest, files=files, **extra)
+        return time.time()
+
+    def _export_finished(what: str, dest: str, t0: float, nbytes: int | None = None) -> None:
+        ex = state["export"]
+        usage.log("export_done", what=what, dest=dest, files=ex.get("done", 0), failed=ex.get("failed", 0),
+                  skipped=ex.get("skipped", 0), bytes=ex.get("bytes") if ex.get("bytes") is not None else nbytes,
+                  seconds=round(time.time() - t0, 1), error=ex.get("error"))
+
     @app.post("/api/export")
     def export(req: ExportReq):
         with state["export_lock"]:
@@ -838,14 +944,17 @@ def create_app(root: Path | None = None) -> FastAPI:
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
             base = _resolve_base()
+            nbytes = None
             if req.mode == "copy":
-                _check_free(export_bytes(root_at_start, req.ids), base)
+                nbytes = export_bytes(root_at_start, req.ids)
+                _check_free(nbytes, base)
             try:
                 from .export import export_dir
                 export_dir(root_at_start, req.name, base)   # validate now so a bad name or base is a 400, not a background error
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("selection", "local", len(req.ids), mode=req.mode)
 
         def prog(d):
             state["export"].update(d)
@@ -857,6 +966,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                _export_finished("selection", "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(req.ids)}
@@ -897,6 +1007,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("categories", "local", n_photos, mode=req.mode, categories=req.categories, discovered=len(req.discovered or []),
+                             include_raw=req.include_raw, include_unsure=req.include_unsure, videos=req.videos, drone=req.drone, hide_bad=req.hide_bad)
 
         def prog(d):
             state["export"].update(d)
@@ -911,6 +1023,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                _export_finished("categories", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
@@ -945,6 +1058,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("people", "local", n_photos, mode=req.mode, people=len(folders), include_raw=req.include_raw, min_sim=min_sim)
 
         def prog(d):
             state["export"].update(d)
@@ -957,6 +1071,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                _export_finished("people", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
@@ -1012,6 +1127,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["drive"]["error"] = str(e) if isinstance(e, (drive_mod.NoClientConfig, ValueError)) else f"{type(e).__name__}: {e}"
             finally:
                 state["drive"]["signing_in"] = False
+                usage.log("drive_signin", ok=state["drive"]["error"] is None, error=state["drive"]["error"])
 
         threading.Thread(target=_run, daemon=True).start()
         return {"started": True}
@@ -1080,6 +1196,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             settings.set_drive_prefs(req.link, req.web_size)
             state["export"] = {"running": True, "done": 0, "total": len(jobs), "failed": 0, "skipped": 0, "path": None,
                                "error": None, "what": "drive", "bytes": 0, "current": None, "failures": []}
+        t0 = _export_started(req.what, "drive", len(jobs), web_size=req.web_size, skip_videos=req.skip_videos, include_raw=req.include_raw)
 
         def prog(d):
             state["export"].update(d)
@@ -1094,6 +1211,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, (ValueError, drive_mod.NotSignedIn)) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                _export_finished(req.what, "drive", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(jobs)}
@@ -1119,6 +1237,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         and state["export"]["path"] is the sorted/ folder."""
         state["export"] = {"running": True, "done": 0, "total": total, "failed": 0, "skipped": 0, "path": None,
                            "error": None, "what": what}
+        t0 = time.time()
 
         def prog(d):
             state["export"].update(d)
@@ -1133,6 +1252,9 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                ex = state["export"]
+                usage.log("reorganise_" + ("apply" if what == "reorganise" else "undo"), moves=total, done=ex.get("done", 0),
+                          failed=ex.get("failed", 0), seconds=round(time.time() - t0, 1), error=ex.get("error"))
 
         threading.Thread(target=_run, daemon=True).start()
         return {"started": True, "total": total, "what": what}
@@ -1143,9 +1265,13 @@ def create_app(root: Path | None = None) -> FastAPI:
             root_at_start = state["root"]
             _reorganise_gates(root_at_start)
             try:
-                return reorganise_mod.plan(root_at_start, by_people=req.by_people)
+                plan = reorganise_mod.plan(root_at_start, by_people=req.by_people)
             except ValueError as e:
+                usage.log("reorganise_plan", by_people=req.by_people, refused=str(e))
                 raise HTTPException(400, str(e))
+            usage.log("reorganise_plan", by_people=req.by_people, moves=plan.get("moves"), folders=plan.get("folders"),
+                      collisions=plan.get("collisions"))
+            return plan
 
     @app.post("/api/reorganise/apply")
     def reorganise_apply(req: ReorganiseApplyReq):
@@ -1198,8 +1324,10 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             n_files = len(bundle.bundle_files(root_at_start))
-            _check_free(bundle.bundle_bytes(root_at_start), base, hint="Free some space there first.")
+            nbytes = bundle.bundle_bytes(root_at_start)
+            _check_free(nbytes, base, hint="Free some space there first.")
             state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("bundle", "local", n_files)
 
         def prog(d):
             state["export"].update(d)
@@ -1211,6 +1339,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
+                _export_finished("bundle", "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_files}
@@ -1254,6 +1383,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
             raise HTTPException(400, "that bundle's index is not readable")
         out = _switch_root(root)
+        usage.log("bundle_import", photos=info.get("photos"))
         return dict(out, imported=True, root=str(root), photos=info.get("photos"))
 
     @app.post("/api/bundle/import/choose")
@@ -1309,9 +1439,64 @@ def create_app(root: Path | None = None) -> FastAPI:
             # One photo lands in several folders (each person, plus groups or solo) and each is a
             # separate copy, so size every folder, not the distinct set of photos.
             _check_free(sum(export_bytes(root_at_start, ids) for ids in export_people_ids(root_at_start).values()), base)
+        t0 = time.time()
         try:
-            return {"path": str(export_people(root_at_start, req.mode, base=base))}
+            out = {"path": str(export_people(root_at_start, req.mode, base=base))}
         except ValueError as e:
+            usage.log("export_done", what="people_groups", dest="local", seconds=round(time.time() - t0, 1), error=str(e))
             raise HTTPException(400, str(e))
+        usage.log("export_done", what="people_groups", dest="local", seconds=round(time.time() - t0, 1), error=None)
+        return out
+
+    # ===== usage log endpoints: the UI posts its own events here (batched), the Feedback section reads the
+    # summary and writes the report zip. Nothing leaves the Mac; see docs/usage-log.md.
+    UI_EVENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+    def _ui_event(d) -> dict | None:
+        if not isinstance(d, dict) or not UI_EVENT_RE.match(str(d.get("ev", ""))):
+            return None
+        fields = {}
+        for k, v in list(d.items())[:20]:
+            if k == "ev" or not isinstance(k, str) or len(k) > 40:
+                continue
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                fields[k] = v
+        return {"ev": "ui_" + d["ev"] if not d["ev"].startswith("ui_") else d["ev"], **fields}
+
+    @app.post("/api/usage")
+    async def usage_post(request: Request):
+        """{ev, ...fields}, a list of them, or {events: [...]}; up to 200 per call. Reply says how many were kept."""
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "expected JSON")
+        items = body.get("events") if isinstance(body, dict) and "events" in body else body
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            raise HTTPException(400, "expected an event or a list of events")
+        kept = 0
+        for d in items[:200]:
+            ev = _ui_event(d)
+            if ev is None:
+                continue
+            usage.log(ev.pop("ev"), src="ui", **ev)
+            kept += 1
+        return {"logged": kept}
+
+    @app.get("/api/usage/summary")
+    def usage_summary():
+        s = usage.summary()
+        return dict(s, text=usage.summary_text(s))
+
+    @app.post("/api/usage/report")
+    def usage_report():
+        try:
+            p = usage.write_report()
+        except OSError as e:
+            raise HTTPException(500, f"could not write the report: {e}")
+        usage.log("report_saved", bytes=p.stat().st_size)
+        return {"path": str(p), "bytes": p.stat().st_size}
+    # ===== end usage log endpoints =====
 
     return app

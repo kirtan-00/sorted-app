@@ -1,0 +1,28 @@
+#!/bin/bash
+# sorted.app: start the local server (no folder yet) and open the browser.
+# The app itself asks for a folder via the Open folder button / picker.
+# Everything it needs lives inside this repo folder: .venv (made by "Install sorted.command"),
+# a static ffmpeg in .venv/bin when Homebrew has none, and the face models in models/.
+REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+LOG="$HOME/Library/Logs/photosort.log"
+PY="$REPO/.venv/bin/python"
+cd "$REPO"
+# .venv/bin first so the app finds the ffmpeg the installer put there (Finder gives us no Homebrew PATH).
+export PATH="$REPO/.venv/bin:$PATH"
+# The MobileCLIP weights are in the Hugging Face cache after install; never go online to check them.
+export HF_HUB_OFFLINE=1
+if [ ! -x "$PY" ]; then
+  echo "[$(date)] no .venv at $REPO, install first" >> "$LOG"
+  osascript -e 'display dialog "sorted is not installed yet. Double-click \"Install sorted.command\" in the same folder first." buttons {"OK"} default button 1 with icon caution' >/dev/null 2>&1
+  exit 1
+fi
+# A server from a previous launch of THIS copy may still own the port; replace it. Matched on the
+# full interpreter path so a second checkout (or a dev server started by hand) is left alone.
+for pid in $(ps -axo pid=,command= | grep -F -- "$PY -m photosort.cli serve" | grep -v grep | awk '{print $1}'); do
+  kill "$pid" 2>/dev/null
+done
+sleep 0.5
+# The CLI takes 7777, or the next free port (7778 and up) when something else holds it; the
+# "photosort serving ... at http://127.0.0.1:<port>" line below says which.
+echo "[$(date)] launching from $REPO" >> "$LOG"
+exec "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" --open >> "$LOG" 2>&1

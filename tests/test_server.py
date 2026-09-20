@@ -1802,3 +1802,59 @@ def test_drive_signin_runs_in_a_thread_and_signout_forgets(tmp_path, monkeypatch
     assert c.post("/api/drive/signout").json() == {"signed_in": False}
     assert not drive.token_path().exists() and not c.get("/api/drive/status").json()["signed_in"]
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+# ===== usage log: the UI's own events land through POST /api/usage, the summary reads every file =====
+
+def test_usage_post_takes_ui_events_batched_and_drops_junk(tmp_path):
+    from photosort import usage
+    c = _shoot_client(tmp_path)
+    assert c.post("/api/usage", json={"ev": "tab", "tab": "people"}).json() == {"logged": 1}
+    batch = {"events": [
+        {"ev": "click", "id": "cluster"},
+        {"ev": "key", "key": "Escape", "cmd": False},
+        {"ev": "tab_time", "tab": "people", "seconds": 12.5},
+        {"ev": "ui_error", "message": "TypeError: x is null", "source": "app.js", "line": 12, "nested": {"not": "kept"}},
+        {"ev": "Bad Name!", "x": 1},                     # not a valid event name
+        "not an event",                                   # not an object
+        {"ev": "click", "path": "/Volumes/SSD/shoot/DSC01.jpg"},   # a path is scrubbed like any other string
+    ]}
+    assert c.post("/api/usage", json=batch).json() == {"logged": 5}
+    assert c.post("/api/usage", json=[{"ev": "inspector", "open": True}]).json() == {"logged": 1}
+    assert c.post("/api/usage", json={"nope": 1}).json() == {"logged": 0}
+    assert c.post("/api/usage", json=12).status_code == 400
+    assert c.post("/api/usage", content=b"{bad", headers={"content-type": "application/json"}).status_code == 400
+    evs = [e for e in usage.read_events() if e.get("src") == "ui"]
+    assert [e["ev"] for e in evs] == ["ui_tab", "ui_click", "ui_key", "ui_tab_time", "ui_error", "ui_click", "ui_inspector"]
+    assert evs[0]["tab"] == "people" and evs[3]["seconds"] == 12.5 and "nested" not in evs[4]
+    assert evs[5]["path"] == "<path>"
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_usage_summary_and_report_endpoints(tmp_path, monkeypatch):
+    import zipfile
+    from photosort import usage
+    monkeypatch.setenv("PHOTOSORT_REPORT_DIR", str(tmp_path.parent / "desk"))
+    c = _shoot_client(tmp_path)
+    c.get("/api/search", params={"q": "boats"})
+    c.get("/api/search", params={"q": "boats"})
+    assert c.post("/api/folder", json={"path": str(tmp_path / "missing")}).status_code == 400
+    c.post("/api/usage", json=[{"ev": "tab_time", "tab": "search", "seconds": 4}, {"ev": "help_open"}])
+    s = c.get("/api/usage/summary").json()
+    assert s["sessions"] == 1 and s["session"] == usage.session_id()
+    assert s["counters"]["server_start"] == 1 and s["counters"]["folder_open"] == 1 and s["counters"]["search"] == 2
+    assert s["counters"]["ui_help_open"] == 1 and s["this_session"]["search"] == 2
+    assert s["top_queries"] == [{"q": "boats", "n": 2}]
+    assert s["errors"][-1]["where"] == "/api/folder" and s["errors"][-1]["status"] == 400 and "<path>" in s["errors"][-1]["error"]
+    assert s["seconds_by_feature"]["tab:search"] == 4 and s["system"]["python"]
+    assert "sorted beta report" in s["text"] and "boats" in s["text"] and str(tmp_path) not in s["text"]
+    r = c.post("/api/usage/report").json()
+    p = Path(r["path"])
+    assert p.parent == tmp_path.parent / "desk" and p.name.startswith("sorted-report-") and p.stat().st_size == r["bytes"] > 0
+    with zipfile.ZipFile(p) as z:
+        names = z.namelist()
+        assert "usage/events.jsonl" in names and "summary.json" in names and "summary.txt" in names and "system.json" in names
+        assert not any(n.endswith((".jpg", ".db")) for n in names)
+        assert str(tmp_path) not in z.read("usage/events.jsonl").decode()
+    assert c.get("/api/usage/summary").json()["counters"]["report_saved"] == 1
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]

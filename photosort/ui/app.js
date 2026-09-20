@@ -60,6 +60,108 @@
     });
   }
 
+  // ===== usage log: what the tester did, kept on this Mac (POST /api/usage, see docs/usage-log.md) =====
+  // One hook, no per-button wiring: document-level click, change and keydown listeners plus window errors.
+  // Events queue up and go out every 2 s in one request (keepalive, so a tab close still delivers; sendBeacon
+  // on pagehide). Facts only: ids, classes, tabs, key names, filter values; never a query, a name or a path.
+  var usageQueue = [];
+  var usageTab = { name: null, since: Date.now() };
+  function track(ev, fields) {
+    var e = fields || {};
+    e.ev = ev;
+    if (e.view === undefined) e.view = state.view;
+    usageQueue.push(e);
+    if (usageQueue.length >= 200) flushUsage();
+  }
+  function flushUsage(unloading) {
+    if (!usageQueue.length) return;
+    var body = JSON.stringify({ events: usageQueue.splice(0, 200) });
+    try {
+      if (unloading && navigator.sendBeacon) {
+        navigator.sendBeacon("/api/usage", new Blob([body], { type: "application/json" }));
+        return;
+      }
+      fetch("/api/usage", { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true })
+        .catch(function () { /* the log is best effort */ });
+    } catch (err) { /* the log is best effort */ }
+  }
+  setInterval(function () { flushUsage(); }, 2000);
+  function trackTab(name) {                            // called from showView: the tab switch plus time on the one just left
+    if (usageTab.name === name) return;
+    var now = Date.now();
+    if (usageTab.name) track("tab_time", { tab: usageTab.name, seconds: Math.round((now - usageTab.since) / 100) / 10, view: usageTab.name });
+    usageTab = { name: name, since: now };
+    track("tab", { tab: name, view: name });
+  }
+  function usageTarget(t) {
+    var el = t && t.closest ? t.closest("button, a, .card, .cat-tile, label.check, .seg label, .panel-head, [data-view]") : null;
+    if (!el) return null;
+    var tile = el.classList.contains("cat-tile") ? el : (el.classList.contains("cat-tile-main") ? el.closest(".cat-tile") : null);
+    if (tile) {
+      return { ev: "tile", kind: tile.classList.contains("drone") ? "drone" : (tile.querySelector(".disc-tick") ? "discovered" : "category") };
+    }
+    if (el.classList.contains("card")) {
+      if (el.classList.contains("person")) return { ev: "tile", kind: "person" };
+      return { ev: "card", kind: el.querySelector(".badge:not(.drone)") ? "video" : "photo", unsure: el.classList.contains("unsure") };
+    }
+    if (el.classList.contains("panel-head")) {
+      var panel = el.closest(".panel");
+      return { ev: "panel", id: panel ? panel.dataset.panel : "", open: el.getAttribute("aria-expanded") !== "true" };
+    }
+    if (el.dataset && el.dataset.view) return null;   // the tab itself: showView logs it
+    var input = el.tagName === "LABEL" ? el.querySelector("input") : null;
+    if (input) return null;                            // its change event is the fact, logged below
+    var out = { ev: "click", id: el.id || "" };
+    if (!el.id) out.cls = (el.className && typeof el.className === "string" ? el.className.split(" ")[0] : el.tagName.toLowerCase());
+    if (!el.id && el.form && el.form.id) out.form = el.form.id;   // the Find button: a submit in form#q
+    if (el.tagName === "A" && el.href) out.href = el.href.split(":")[0];   // the scheme only (mailto)
+    if (el.closest("#help")) out.where = "help";
+    else if (el.closest("#lightbox")) out.where = "lightbox";
+    return out;
+  }
+  document.addEventListener("click", function (e) {
+    var f = usageTarget(e.target);
+    if (!f) return;
+    var ev = f.ev; delete f.ev;
+    if (e.shiftKey) f.shift = true;
+    if (e.metaKey || e.ctrlKey) f.cmd = true;
+    track(ev, f);
+  }, true);
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!t || !t.name && !t.id) return;
+    var f = { id: t.id || "", name: t.name || "" };
+    if (t.type === "checkbox" || t.type === "radio") f.value = t.type === "radio" ? t.value : t.checked;
+    else if (t.tagName === "SELECT") f.value = t.name === "person" || t.id === "person-select" || t.id === "recent-folders" ? (t.value ? "set" : "cleared") : t.value;
+    else if (t.type === "range" || t.type === "number") f.value = Number(t.value);
+    else f.chars = (t.value || "").length;             // a text field: only how much was typed
+    track("filter", f);
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    var t = e.target; var tag = t && t.tagName;
+    var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    var cmd = e.metaKey || e.ctrlKey;
+    var special = /^(Escape|Enter|ArrowLeft|ArrowRight|ArrowUp|ArrowDown| |\/)$/.test(e.key);
+    if (!cmd && !special) return;                      // plain typing is never logged
+    if (!cmd && typing && !/^(Escape|Enter)$/.test(e.key)) return;   // in a field only Esc and Enter are shortcuts
+    if (cmd && !/^[a-z0-9\[\]]$/i.test(e.key) && !special) return;
+    track("key", { key: e.key === " " ? "Space" : e.key, cmd: cmd, shift: e.shiftKey, typing: typing });
+  }, true);
+  window.addEventListener("error", function (e) {
+    var src = (e.filename || "").split("/").pop();
+    track("error", { message: String(e.message || "").slice(0, 200), source: src, line: e.lineno || 0, col: e.colno || 0 });
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var r = e.reason;
+    track("error", { message: String(r && r.message ? r.message : r).slice(0, 200), source: "promise" });
+  });
+  window.addEventListener("pagehide", function () {
+    if (usageTab.name) track("tab_time", { tab: usageTab.name, seconds: Math.round((Date.now() - usageTab.since) / 100) / 10, view: usageTab.name });
+    track("unload");
+    flushUsage(true);
+  });
+  // ===== end usage log =====
+
   // ---------- tabs ----------
   // ===== scroll memory: main is the one scroller and the sections swap inside it, so each list's position is kept per view =====
   var mainEl = $("main");
@@ -93,6 +195,7 @@
       s.hidden = !hasFolder || s.id !== "view-" + name;
     });
     if (!hasFolder) return;
+    trackTab(name);                                    // ===== usage log: the tab and the time on the one before =====
     // ===== scroll memory: the returned-to list sits where it was =====
     if (switching) restoreScroll(name);
     // ===== end scroll memory =====
@@ -1376,6 +1479,7 @@
     faces.body.appendChild(inspRow("Faces", r.kind === "video" ? "not scanned in clips" : facesLabel(r.n_faces)));
   }
   function setInspector(open) {
+    if (open !== document.body.classList.contains("insp")) track("inspector", { open: open });   // ===== usage log =====
     document.body.classList.toggle("insp", open);
     if (inspToggle) inspToggle.setAttribute("aria-pressed", open ? "true" : "false");
     try { localStorage.setItem(INSP_KEY, open ? "1" : "0"); } catch (e) { /* private mode */ }
@@ -2311,6 +2415,7 @@
   var helpToggle = $("#help-toggle");
   var helpClose = $("#help-close");
   function setHelp(open) {
+    if (open && helpEl.hidden) track("help_open");     // ===== usage log =====
     helpEl.hidden = !open;
     helpToggle.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) helpClose.focus();
@@ -2324,6 +2429,48 @@
     setHelp(false);
   });
   // ===== end help =====
+
+  // ===== feedback: the usage log's report and summary, at the foot of the slide-over (docs/usage-log.md) =====
+  // POST /api/usage/report writes ~/Desktop/sorted-report-<date>.zip and replies with its path; GET
+  // /api/usage/summary carries the human-readable text the Copy button puts on the clipboard.
+  var fbSave = $("#fb-save");
+  var fbCopy = $("#fb-copy");
+  var fbOut = $("#fb-out");
+  function fbSay(msg, isErr) {
+    fbOut.textContent = msg || ""; fbOut.hidden = !msg; fbOut.classList.toggle("err", !!isErr);
+    if (msg && fbOut.scrollIntoView) fbOut.scrollIntoView({ block: "nearest" });
+  }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.top = "-1000px";
+      document.body.appendChild(ta); ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error("copy blocked"));
+    });
+  }
+  if (fbSave) fbSave.addEventListener("click", function () {
+    fbSave.disabled = true;
+    flushUsage();
+    api("/api/usage/report", { method: "POST" }).then(function (res) {
+      fbSay("Saved " + res.path);
+    }).catch(function (err) {
+      fbSay("could not save the report: " + err.message, true);
+    }).then(function () { fbSave.disabled = false; });
+  });
+  if (fbCopy) fbCopy.addEventListener("click", function () {
+    fbCopy.disabled = true;
+    flushUsage();
+    api("/api/usage/summary").then(function (s) {
+      return copyText(s.text || JSON.stringify(s, null, 2)).then(function () { fbSay("Summary copied, paste it into the email"); });
+    }).catch(function (err) {
+      fbSay("could not copy the summary: " + err.message, true);
+    }).then(function () { fbCopy.disabled = false; });
+  });
+  // ===== end feedback =====
 
   // ===== focus: the status line under the filters, "Check focus" and its poll =====
   // GET /api/focus/status gives {checked, unchecked, bad, soft}; POST /api/focus scores every unchecked row
