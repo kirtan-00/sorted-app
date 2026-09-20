@@ -1,0 +1,8 @@
+# sorted, https://kirtan-00.github.io/sorted/
+# Note: on a project-path GitHub Pages site this file is not at the origin root, so crawlers do
+# not read it until the site has its own domain. The stats page carries its own noindex meta.
+User-agent: *
+Allow: /
+Disallow: /stats/
+
+Sitemap: https://kirtan-00.github.io/sorted/sitemap.xml

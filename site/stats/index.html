@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sorted stats</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
+<link rel="stylesheet" href="../style.css">
+<style>
+  /* the stats page: the site's paper, ink and pastels, one column, nothing linked from the nav */
+  .st { max-width: 1080px; margin: 0 auto; padding: 28px var(--gutter) 80px; }
+  .st-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 28px; }
+  .st-top .top-mark { text-decoration: none; }
+  .st-top .kicker { font-family: var(--display); font-weight: 700; font-size: 22px; letter-spacing: -0.02em; color: var(--ink-3); font-variation-settings: "wdth" 112.5; font-stretch: 112.5%; }
+  .st-top .when { margin-left: auto; font-size: 14px; color: var(--ink-3); white-space: nowrap; }
+  .st-top .cta { cursor: pointer; }
+  .st-top .cta[disabled] { opacity: 0.6; cursor: default; }
+  .st h2 { font-size: 24px; margin: 40px 0 14px; max-width: none; }
+  .st h2 small { font-family: var(--ui); font-weight: 400; font-size: 14px; color: var(--ink-3); margin-left: 10px; letter-spacing: 0; font-stretch: normal; font-variation-settings: normal; }
+
+  /* the key gate */
+  .gate { border-radius: var(--radius); background: var(--butter); padding: clamp(28px, 5vw, 48px); max-width: 560px; }
+  .gate h1 { font-size: clamp(30px, 4vw, 40px); margin-bottom: 10px; }
+  .gate p { color: var(--ink-2); margin-bottom: 18px; }
+  .gate form { display: flex; gap: 10px; flex-wrap: wrap; }
+  .gate input { flex: 1; min-width: 200px; height: 44px; padding: 0 16px; border-radius: 22px; border: 1px solid var(--line); background: var(--paper-2); font-size: 16px; }
+  .gate .msg { margin: 12px 0 0; font-size: 15px; color: var(--red); min-height: 1.4em; }
+
+  /* big numbers */
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  #people-tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .tile { border-radius: 20px; padding: 18px 20px 16px; min-height: 118px; display: flex; flex-direction: column; justify-content: flex-start; background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line); }
+  .tile.mint { background: var(--mint); box-shadow: none; }
+  .tile.sky { background: var(--sky); box-shadow: none; }
+  .tile.lav { background: var(--lav); box-shadow: none; }
+  .tile.peach { background: var(--peach); box-shadow: none; }
+  .tile.butter { background: var(--butter); box-shadow: none; }
+  .tile b { display: block; font-family: var(--display); font-weight: 700; font-size: clamp(34px, 3.4vw, 44px); line-height: 1; letter-spacing: -0.02em; color: var(--ink); font-variation-settings: "wdth" 112.5; font-stretch: 112.5%; }
+  .tile span { display: block; margin-top: 8px; font-size: 14px; color: var(--ink-2); }
+  .tile small { display: block; font-size: 13px; color: var(--ink-3); margin-top: 2px; }
+
+  /* 30 day chart, two lanes drawn with plain divs */
+  .chart { border-radius: var(--radius); background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line); padding: 22px 22px 16px; }
+  .lane { display: grid; grid-template-columns: 84px 1fr; gap: 14px; align-items: end; }
+  .lane + .lane { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .lane-k { font-size: 13px; color: var(--ink-3); line-height: 1.3; padding-bottom: 2px; }
+  .lane-k b { display: block; font-size: 15px; color: var(--ink); font-weight: 600; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: var(--h, 120px); }
+  .bars i { flex: 1; display: block; min-width: 0; border-radius: 3px 3px 1px 1px; background: var(--ink); height: calc(var(--p) * 100%); min-height: 2px; opacity: 0.92; transition: opacity var(--ease); }
+  .bars i[style*="--p:0;"], .bars i[style*="--p:0 "] { background: rgba(38, 40, 45, 0.1); }
+  .bars i:hover { opacity: 1; }
+  .bars.inst i { background: var(--mint-d); }
+  .bars.inst i[style*="--p:0;"] { background: rgba(47, 143, 106, 0.16); }
+  .axis { display: grid; grid-template-columns: 84px 1fr; gap: 14px; margin-top: 8px; }
+  .axis div { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); }
+
+  /* the funnel: five bars, each as wide as its share of the first stage */
+  .funnel { border-radius: var(--radius); background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line); padding: 22px 22px 18px; }
+  .stage { display: grid; grid-template-columns: 150px 1fr; gap: 14px; align-items: center; padding: 5px 0; }
+  .stage-k { font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.25; }
+  .stage-k small { display: block; font-size: 12px; font-weight: 400; color: var(--ink-3); }
+  .stage-bar { position: relative; height: 40px; }
+  .stage-bar b { position: absolute; left: 0; top: 0; bottom: 0; width: calc(var(--p) * 100%); min-width: 4px; border-radius: 10px; background: var(--mint); transition: width 300ms ease-out; }
+  .stage:nth-child(2) .stage-bar b { background: var(--sky); }
+  .stage:nth-child(3) .stage-bar b { background: var(--lav); }
+  .stage:nth-child(4) .stage-bar b { background: var(--peach); }
+  .stage:nth-child(5) .stage-bar b { background: var(--butter); }
+  .stage-bar span { position: absolute; left: 14px; top: 0; line-height: 40px; font-size: 15px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .stage-bar span i { font-style: normal; font-weight: 400; color: var(--ink-2); margin-left: 8px; }
+  .stage-bar.narrow span { left: calc(var(--p) * 100% + 14px); }
+  .funnel-note { margin: 12px 0 0; font-size: 13px; color: var(--ink-3); max-width: none; }
+  td.isyes { color: var(--mint-d); font-weight: 600; }
+  td.hot { font-weight: 600; }
+  td.hot em { font-style: normal; display: inline-block; min-width: 26px; padding: 1px 8px; border-radius: 10px; background: var(--peach); text-align: center; }
+
+  /* three top lists */
+  .three-col { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .list { border-radius: 20px; padding: 18px 20px; background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line); }
+  .list h3 { margin-bottom: 12px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 4px; align-items: center; padding: 6px 0; font-size: 14px; }
+  .row .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+  .row .n { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .row .t { grid-column: 1 / -1; height: 6px; border-radius: 3px; background: rgba(38, 40, 45, 0.08); overflow: hidden; }
+  .row .t b { display: block; height: 100%; border-radius: 3px; background: var(--ink); transform-origin: left; transform: scaleX(var(--p)); }
+  .list.lav .row .t b { background: var(--lav-d); }
+  .list.mint .row .t b { background: var(--mint-d); }
+  .empty { font-size: 14px; color: var(--ink-3); padding: 6px 0; }
+
+  /* tables, scrollable sideways on a phone */
+  .tbl { border-radius: 20px; background: var(--paper-2); box-shadow: inset 0 0 0 1px var(--line); overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+  th { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); }
+  th:first-child, td:first-child { padding-left: 20px; }
+  th:last-child, td:last-child { padding-right: 20px; }
+  tr:last-child td { border-bottom: 0; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .mono { font-size: 13px; color: var(--ink-2); }
+  td.trunc { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  td.dim { color: var(--ink-3); }
+  .foot-note { margin-top: 48px; font-size: 14px; color: var(--ink-3); max-width: 62ch; }
+  .foot-note a { text-decoration: underline; text-underline-offset: 3px; }
+  .err { margin: 16px 0; padding: 14px 18px; border-radius: 14px; background: var(--peach); font-size: 15px; }
+
+  @media (max-width: 760px) {
+    .st { padding-top: 18px; }
+    .st-top { gap: 10px; }
+    .st-top .when { width: 100%; margin-left: 0; order: 3; }
+    .st h2 { font-size: 22px; margin-top: 32px; }
+    .tiles, #people-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .tile { min-height: 104px; padding: 14px 16px 14px; }
+    .tile b { font-size: 32px; }
+    .lane, .axis { grid-template-columns: 1fr; gap: 6px; }
+    .lane-k { display: flex; gap: 8px; align-items: baseline; }
+    .axis div:first-child { display: none; }
+    .three-col { grid-template-columns: 1fr; }
+    .chart { padding: 16px 16px 12px; }
+    .funnel { padding: 16px 14px 14px; }
+    .stage { grid-template-columns: 1fr; gap: 4px; padding: 8px 0; }
+    .stage-k { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
+    .stage-bar { height: 34px; }
+    .stage-bar span { line-height: 34px; font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+<main class="st">
+  <div class="st-top">
+    <a class="top-mark" href="../"><img class="brand-mark" src="../brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span></a>
+    <span class="kicker">stats</span>
+    <span class="when" id="when" aria-live="polite"></span>
+    <button type="button" class="cta cta-small" id="refresh" hidden>Refresh</button>
+  </div>
+
+  <section class="gate" id="gate">
+    <h1>Stats key</h1>
+    <p>This page reads the beta counters. Paste the key once; it stays in this browser only.</p>
+    <form id="gate-form" novalidate>
+      <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="key" aria-label="Stats key">
+      <button type="submit" class="cta">Save</button>
+    </form>
+    <p class="msg" id="gate-msg" aria-live="polite"></p>
+  </section>
+
+  <div id="dash" hidden>
+    <div class="err" id="err" hidden></div>
+
+    <section class="tiles" id="tiles" aria-label="Totals"></section>
+
+    <h2>People<small>one IP is one person, roughly</small></h2>
+    <section class="tiles" id="people-tiles" aria-label="People"></section>
+
+    <h2>From landing to install</h2>
+    <section class="funnel" id="funnel"></section>
+
+    <h2>Visitors<small id="people-n"></small></h2>
+    <div class="tbl"><table id="people"><thead><tr><th>IP</th><th>Country</th><th>First seen</th><th>Last seen</th><th class="num">Hits</th><th>Download page</th><th class="num">Installs</th></tr></thead><tbody></tbody></table></div>
+
+    <h2>Last 30 days<small>visits and new installs, one bar a day</small></h2>
+    <section class="chart" id="chart"></section>
+
+    <h2>Where visits come from</h2>
+    <section class="three-col">
+      <div class="list"><h3>Pages</h3><div id="paths"></div></div>
+      <div class="list lav"><h3>Referrers</h3><div id="refs"></div></div>
+      <div class="list mint"><h3>Countries</h3><div id="countries"></div></div>
+    </section>
+
+    <h2>Recent visits<small>last 50</small></h2>
+    <div class="tbl"><table id="visits"><thead><tr><th>Time</th><th>Path</th><th>Referrer</th><th>IP</th><th>Country</th></tr></thead><tbody></tbody></table></div>
+
+    <h2>Installs<small>last 50, by last run</small></h2>
+    <div class="tbl"><table id="installs"><thead><tr><th>First</th><th>Last</th><th class="num">Runs</th><th>Kind</th><th>macOS</th><th>Chip</th><th>IP</th><th>Country</th></tr></thead><tbody></tbody></table></div>
+
+    <h2>Beta emails<small id="emails-n"></small></h2>
+    <div class="tbl"><table id="emails"><thead><tr><th>Email</th><th>Joined</th><th>Source</th><th class="num">Taps</th></tr></thead><tbody></tbody></table></div>
+
+    <p class="foot-note">Counts page views on this site and installer runs. The app itself sends nothing, ever. Times are shown in this browser's time zone. Not linked from the site; the key lives in the Supabase dashboard, see docs/stats.md.</p>
+  </div>
+</main>
+
+<script>
+(function () {
+  var URL = 'https://woasffpwdbwavwcrtllz.supabase.co/rest/v1/rpc/site_stats';
+  var KEY = 'sb_publishable_aAR90Pzf1gza49CP2t7uKQ_xyDhkTZI';
+  var STORE = 'sorted.stats.key';
+  var $ = function (id) { return document.getElementById(id); };
+  var gate = $('gate'), dash = $('dash'), when = $('when'), refresh = $('refresh'), err = $('err');
+  var timer = null, busy = false;
+
+  function getKey() { try { return localStorage.getItem(STORE) || ''; } catch (e) { return ''; } }
+  function setKey(v) { try { if (v) localStorage.setItem(STORE, v); else localStorage.removeItem(STORE); } catch (e) {} }
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function n(v) { return Number(v || 0).toLocaleString('en-IN'); }
+  var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function pad(x) { return (x < 10 ? '0' : '') + x; }
+  function when2(ts) {
+    if (!ts) return '';
+    var d = new Date(ts); if (isNaN(d)) return esc(ts);
+    return d.getDate() + ' ' + MON[d.getMonth()] + ', ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  function day2(s) { var p = String(s).split('-'); return p.length === 3 ? Number(p[2]) + ' ' + MON[Number(p[1]) - 1] : s; }
+  function host(ref) {
+    if (!ref || ref === '(direct)') return '(direct)';
+    try { var u = new URL(ref); return u.host + (u.pathname !== '/' ? u.pathname : ''); } catch (e) { return ref; }
+  }
+
+  function fetchStats(key) {
+    return fetch(URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'apikey': KEY, 'authorization': 'Bearer ' + KEY },
+      body: JSON.stringify({ p_key: key })
+    }).then(function (r) {
+      if (r.ok) return r.json();
+      return r.json().catch(function () { return {}; }).then(function (e) {
+        var x = new Error(e.message || ('HTTP ' + r.status)); x.status = r.status; throw x;
+      });
+    });
+  }
+
+  /* render */
+  function tile(cls, big, label, sub) {
+    return '<div class="tile ' + cls + '"><b>' + n(big) + '</b><span>' + label + '</span>' + (sub ? '<small>' + sub + '</small>' : '') + '</div>';
+  }
+  function renderTiles(d) {
+    var v = d.visits || {}, i = d.installs || {}, b = d.beta || {};
+    $('tiles').innerHTML =
+      tile('mint', v.today, 'visits today') +
+      tile('sky', v.week, 'visits, 7 days', n(v.unique_ips_week) + ' unique IPs') +
+      tile('lav', v.total, 'visits, all time', n(v.unique_ips_total) + ' unique IPs') +
+      tile('peach', i.total, 'installs', n(i.today) + ' today') +
+      tile('', i.week, 'installs this week') +
+      tile('', i.updates, 'updates', 'installer re-runs') +
+      tile('butter', b.taps, 'beta taps') +
+      tile('', b.emails, 'beta emails');
+  }
+  function lane(key, cls, label, days, h) {
+    var max = 0; days.forEach(function (x) { max = Math.max(max, Number(x[key] || 0)); });
+    var bars = days.map(function (x) {
+      var c = Number(x[key] || 0), p = max ? c / max : 0;
+      return '<i style="--p:' + (p ? p.toFixed(3) : '0') + ';" title="' + esc(day2(x.day)) + ': ' + n(c) + ' ' + label + (key === 'visits' ? ', ' + n(x.ips) + ' IPs' : '') + '"></i>';
+    }).join('');
+    return '<div class="lane"><div class="lane-k"><b>' + label + '</b>peak ' + n(max) + '</div><div class="bars ' + cls + '" style="--h:' + h + 'px">' + bars + '</div></div>';
+  }
+  function renderChart(days) {
+    days = Array.isArray(days) ? days : [];
+    if (!days.length) { $('chart').innerHTML = '<p class="empty">Nothing yet.</p>'; return; }
+    var first = days[0].day, mid = days[Math.floor(days.length / 2)].day, last = days[days.length - 1].day;
+    $('chart').innerHTML =
+      lane('visits', '', 'visits', days, 120) +
+      lane('installs', 'inst', 'installs', days, 48) +
+      '<div class="axis"><div></div><div><span>' + esc(day2(first)) + '</span><span>' + esc(day2(mid)) + '</span><span>' + esc(day2(last)) + ' (today)</span></div></div>';
+  }
+  function renderList(id, rows, keyName, fmt) {
+    rows = Array.isArray(rows) ? rows : [];
+    if (!rows.length) { $(id).innerHTML = '<p class="empty">Nothing yet.</p>'; return; }
+    var max = 0; rows.forEach(function (r) { max = Math.max(max, Number(r.n || 0)); });
+    $(id).innerHTML = rows.map(function (r) {
+      var k = fmt ? fmt(r[keyName]) : r[keyName];
+      return '<div class="row"><span class="k" title="' + esc(r[keyName]) + '">' + esc(k) + '</span><span class="n">' + n(r.n) + '</span><span class="t"><b style="--p:' + (max ? (Number(r.n || 0) / max).toFixed(3) : 0) + '"></b></span></div>';
+    }).join('');
+  }
+  function fill(id, rows, cols, row) {
+    var tb = $(id).tBodies[0];
+    rows = Array.isArray(rows) ? rows : [];
+    tb.innerHTML = rows.length ? rows.map(row).join('') : '<tr><td colspan="' + cols + '" class="dim">Nothing yet.</td></tr>';
+  }
+  function pct(a, b) { a = Number(a || 0); b = Number(b || 0); return b ? Math.round(a / b * 100) + '%' : '0%'; }
+  function renderPeople(f) {
+    f = f || {};
+    $('people-tiles').innerHTML =
+      tile('mint', f.landed, 'people who landed', n(f.any_page) + ' on any page') +
+      tile('sky', f.download_page, 'on the download page') +
+      tile('peach', f.installed, 'installs', n(f.beta_taps) + ' beta taps') +
+      tile('', f.installed_seen_on_site, 'installs we also saw on the site') +
+      tile('butter', f.reran, 'ran the installer again');
+  }
+  function renderFunnel(f) {
+    f = f || {};
+    var top = Number(f.landed || 0);
+    var stages = [
+      ['Landed', f.landed, 'unique IPs on the front page'],
+      ['Download page', f.download_page, 'unique IPs'],
+      ['Gave an email', f.emails, n(f.emails_download) + ' from the download page'],
+      ['Installed', f.installed, 'unique install ids'],
+      ['Ran it again', f.reran, 'installs with more than one run']
+    ];
+    $('funnel').innerHTML = stages.map(function (st) {
+      var v = Number(st[1] || 0), p = top ? Math.min(1, v / top) : 0;
+      return '<div class="stage"><div class="stage-k">' + st[0] + '<small>' + esc(st[2]) + '</small></div>' +
+        '<div class="stage-bar' + (p < 0.22 ? ' narrow' : '') + '" style="--p:' + p.toFixed(3) + '"><b></b><span>' + n(v) + '<i>' + pct(v, top) + '</i></span></div></div>';
+    }).join('') + '<p class="funnel-note">IPs are people, roughly: one office or one phone hotspot is one IP. Emails are not linked to IPs, so that stage counts every source.</p>';
+  }
+  function render(d) {
+    renderTiles(d);
+    renderPeople(d.funnel);
+    renderFunnel(d.funnel);
+    var ppl = Array.isArray(d.people) ? d.people.slice() : [];
+    ppl.sort(function (a, b) { return String(b.last_seen || '').localeCompare(String(a.last_seen || '')); });
+    $('people-n').textContent = ppl.length ? n(ppl.length) + (ppl.length >= 200 ? ', newest 200' : '') : '';
+    fill('people', ppl, 7, function (x) {
+      var k = Number(x.installs || 0);
+      return '<tr><td><span class="mono">' + esc(x.ip) + '</span></td><td>' + esc(x.country || '?') + '</td><td>' + when2(x.first_seen) + '</td><td>' + when2(x.last_seen) + '</td><td class="num">' + n(x.hits) + '</td><td class="' + (x.download_page ? 'isyes' : 'dim') + '">' + (x.download_page ? 'yes' : '') + '</td><td class="num' + (k ? ' hot' : ' dim') + '">' + (k ? '<em>' + n(k) + '</em>' : '0') + '</td></tr>';
+    });
+    renderChart(d.daily);
+    renderList('paths', d.paths, 'path');
+    renderList('refs', d.refs, 'ref', host);
+    renderList('countries', d.countries, 'country');
+    fill('visits', d.recent_visits, 5, function (v) {
+      return '<tr><td>' + when2(v.ts) + '</td><td>' + esc(v.path) + '</td><td class="trunc" title="' + esc(v.ref) + '">' + (v.ref ? esc(host(v.ref)) : '<span class="dim">(direct)</span>') + '</td><td><span class="mono">' + esc(v.ip) + '</span></td><td>' + esc(v.country || '?') + '</td></tr>';
+    });
+    fill('installs', d.recent_installs, 8, function (i) {
+      return '<tr><td>' + when2(i.first_ts) + '</td><td>' + when2(i.last_ts) + '</td><td class="num">' + n(i.runs) + '</td><td>' + esc(i.kind) + '</td><td>' + esc(i.macos) + '</td><td>' + esc(i.chip) + '</td><td><span class="mono">' + esc(i.ip) + '</span></td><td>' + esc(i.country || '?') + '</td></tr>';
+    });
+    var em = Array.isArray(d.emails) ? d.emails : [];
+    $('emails-n').textContent = em.length ? n(em.length) + (em.length >= 200 ? ', newest 200' : '') : '';
+    fill('emails', em, 4, function (e) {
+      return '<tr><td>' + esc(e.email) + '</td><td>' + when2(e.created_at) + '</td><td class="dim">' + esc(e.source || '') + '</td><td class="num">' + n(e.taps) + '</td></tr>';
+    });
+    var g = d.generated ? new Date(d.generated) : new Date();
+    when.textContent = 'updated ' + pad(g.getHours()) + ':' + pad(g.getMinutes()) + ':' + pad(g.getSeconds());
+  }
+
+  /* flow */
+  function showGate(msg) {
+    stopTimer();
+    dash.hidden = true; refresh.hidden = true; gate.hidden = false; when.textContent = '';
+    $('gate-msg').textContent = msg || '';
+    $('key').focus();
+  }
+  function load() {
+    var key = getKey();
+    if (!key) { showGate(''); return; }
+    if (busy) return;
+    busy = true; refresh.disabled = true; refresh.textContent = 'Refreshing';
+    fetchStats(key).then(function (d) {
+      err.hidden = true;
+      gate.hidden = true; dash.hidden = false; refresh.hidden = false;
+      render(d);
+      startTimer();
+    }).catch(function (e) {
+      if (e.status === 400 || e.status === 401 || e.status === 403) {
+        setKey(''); $('key').value = '';
+        showGate(e.message || 'wrong key');
+      } else {
+        err.textContent = 'Could not refresh: ' + (e.message || 'no answer') + '. The numbers below are from the last good load.';
+        err.hidden = dash.hidden;
+        if (dash.hidden) showGate(e.message || 'Could not reach the server.');
+      }
+    }).then(function () { busy = false; refresh.disabled = false; refresh.textContent = 'Refresh'; });
+  }
+  function startTimer() { stopTimer(); timer = setInterval(function () { if (!document.hidden) load(); }, 60000); }
+  function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+
+  $('gate-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var v = $('key').value.trim();
+    if (!v) { $('gate-msg').textContent = 'Paste the key first.'; return; }
+    setKey(v); $('gate-msg').textContent = ''; load();
+  });
+  refresh.addEventListener('click', load);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !dash.hidden) load(); });
+  load();
+})();
+</script>
+</body>
+</html>

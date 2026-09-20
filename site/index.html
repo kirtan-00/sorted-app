@@ -3,22 +3,147 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>sorted</title>
-<meta name="description" content="A Mac app for wedding photographers, cinematographers and documentary crews. Plug in the shoot disk, search photos and 4K clips in plain words, find every shot of a person from one photo. Public beta. Nothing leaves the room.">
+<title>sorted: search a whole shoot on your Mac, photos and video</title>
+<meta name="description" content="Photo culling and video search on your Mac. Search photos and 4K clips in plain words, find every shot of a person from one photo. Nothing leaves the Mac.">
+<link rel="canonical" href="https://kirtan-00.github.io/sorted/">
 <meta name="theme-color" content="#f7f4ee">
 <meta name="color-scheme" content="light">
+<!-- Google Search Console: paste the HTML-tag verification meta on the next line, then publish. See docs/seo.md.
+<meta name="google-site-verification" content="PASTE_TOKEN_HERE"> -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="sorted">
+<meta property="og:url" content="https://kirtan-00.github.io/sorted/">
+<meta property="og:title" content="sorted: search a whole shoot on your Mac, photos and video">
+<meta property="og:description" content="Photo culling and video search on your Mac. Search photos and 4K clips in plain words, find every shot of a person from one photo. Nothing leaves the Mac.">
+<meta property="og:image" content="https://kirtan-00.github.io/sorted/brand/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="sorted. Sorts out post. Photos and video, on your Mac. Nothing leaves the room.">
+<meta property="og:locale" content="en_GB">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="sorted: search a whole shoot on your Mac, photos and video">
+<meta name="twitter:description" content="Photo culling and video search on your Mac. Search photos and 4K clips in plain words, find every shot of a person from one photo. Nothing leaves the Mac.">
+<meta name="twitter:image" content="https://kirtan-00.github.io/sorted/brand/og-image.png">
+<meta name="twitter:image:alt" content="sorted. Sorts out post. Photos and video, on your Mac. Nothing leaves the room.">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "SoftwareApplication",
+ "name": "sorted",
+ "url": "https://kirtan-00.github.io/sorted/",
+ "description": "Photo culling and video search on your Mac. Search photos and 4K clips in plain words, find every shot of a person from one photo. Nothing leaves the Mac.",
+ "image": "https://kirtan-00.github.io/sorted/brand/og-image.png",
+ "operatingSystem": "macOS",
+ "softwareRequirements": "Apple silicon Mac (M1 to M4), macOS 14 or newer",
+ "applicationCategory": "MultimediaApplication",
+ "downloadUrl": "https://kirtan-00.github.io/sorted/download/",
+ "offers": {
+  "@type": "Offer",
+  "price": "0",
+  "priceCurrency": "USD",
+  "description": "public beta"
+ },
+ "author": {
+  "@type": "Organization",
+  "name": "sorted",
+  "url": "https://kirtan-00.github.io/sorted/"
+ },
+ "creator": {
+  "@type": "Organization",
+  "name": "sorted",
+  "url": "https://kirtan-00.github.io/sorted/"
+ },
+ "sameAs": [
+  "https://github.com/kirtan-00/sorted-app"
+ ],
+ "featureList": [
+  "Index a whole shoot disk on the Mac: JPEG, HEIC, Sony ARW and DNG photos, h264 and HEVC 4K clips, drone footage",
+  "Search photos and video in plain words",
+  "Scene breakdown per clip, each stretch exports on its own",
+  "Faces grouped into people; find every photo of a person from one photo",
+  "Categories found by itself, drone shots as a filter, out of focus photos filtered out",
+  "Export to a folder on the Mac or any disk, or straight to a Google Drive folder",
+  "Reorganise the disk into folders by category and person, with Undo",
+  "Fully offline, no account, no upload, no telemetry"
+ ]
+}
+</script>
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@type": "FAQPage",
+ "mainEntity": [
+  {
+   "@type": "Question",
+   "name": "Does anything leave the Mac?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "No. sorted works fully offline: no account needed to sort, no upload, no telemetry. The vision model and the face detector run on the Mac and the index lives there. The only bytes that go anywhere are the ones you export to a client's Drive yourself."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "Which Macs does it run on?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "An Apple silicon Mac, M1 to M4, on macOS 14 or newer. Every number on this page was measured on the 2020 MacBook Air, M1, 8 GB, the base model. Intel Macs are not supported in the beta."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "Is it for photos or for video?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Both, in one grid. JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips. Photographers cull the soft ones with the sharp slider; editors search forty hours of rushes in plain words and get a scene breakdown per clip. Wedding photo sorting and documentary footage search go through the same search box. Faces are found on photos only for now; clips get the breakdown instead."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How do I find every photo of a person?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Drop in one photo of them. Group faces sorts every detected face in the stills into people; when two groups look alike, the app asks once, Same or Different, and remembers. Name a person and every frame of them is one click away, saved with the shoot."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "How long does indexing take?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "3,677 photos, 147 GB of 61 megapixel Sony RAW, in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, in 44 minutes 36 seconds. A 23 second DJI 4K clip is scanned for scenes in 1.0 second with the hardware decoder. All on the base M1 with 8 GB."
+   }
+  },
+  {
+   "@type": "Question",
+   "name": "Is it an editor? Is it AI?",
+   "acceptedAnswer": {
+    "@type": "Answer",
+    "text": "Neither. It does not cut, colour or retouch; the edit happens in Premiere, Resolve or Lightroom as before. No language model is used anywhere. Two small on-device vision models do the work: MobileCLIP, which understands images and words in the same space, and a face detector and recogniser (YuNet and SFace). They run on the Mac's own chip, no internet needed."
+   }
+  }
+ ]
+}
+</script>
 <link rel="preload" href="fonts/SourceSans3-Regular.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/SourceSans3-Semibold.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
 <link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="beta.css">
+<style>
+  .skip { position: absolute; left: 16px; top: -100px; z-index: 100; padding: 10px 16px; border-radius: 22px; background: var(--ink); color: var(--paper-2); font-weight: 600; text-decoration: none; }
+  .skip:focus { top: 16px; }
+  .faq h2 { margin-bottom: 40px; }
+  .faq .three h3 { font-size: 20px; }
+</style>
 <script>document.documentElement.classList.add('js');</script>
 </head>
 <body>
 
+<a class="skip" href="#main">Skip to content</a>
 <div class="blobs" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="blob b5"></i></div>
 <div class="leak" aria-hidden="true"></div>
 <div class="trail" aria-hidden="true"></div>
@@ -37,7 +162,7 @@
   <a class="cta cta-small magnetic" href="#beta">Join the beta</a>
 </header>
 
-<main>
+<main id="main">
 
 <section class="hero" id="hero">
   <div class="wrap hero-head">
@@ -57,7 +182,7 @@
       <div class="app" id="app" aria-label="the app, running">
         <div class="mac-bar"><span class="mac-dots"><i></i><i></i><i></i></span><span class="mac-title"><span class="wordmark"></span></span></div>
         <div class="toolbar">
-          <h2 class="tb-mark"><span class="wordmark"></span></h2>
+          <div class="tb-mark"><span class="wordmark"></span></div>
           <div class="tb-title">
             <span class="tb-folder">SHOOT_2026_09</span>
             <span class="tb-stats">630 photos, 325 videos · indexed today</span>
@@ -509,6 +634,36 @@
   </div>
 </section>
 
+<section class="faq wrap" id="faq">
+  <h2 data-reveal="lines">Before you ask.</h2>
+  <div class="three" data-reveal="rows">
+    <div>
+      <h3>Does anything leave the Mac?</h3>
+      <p>No. sorted works fully offline: no account needed to sort, no upload, no telemetry. The vision model and the face detector run on the Mac and the index lives there. The only bytes that go anywhere are the ones you export to a client's Drive yourself.</p>
+    </div>
+    <div>
+      <h3>Which Macs does it run on?</h3>
+      <p>An Apple silicon Mac, M1 to M4, on macOS 14 or newer. Every number on this page was measured on the 2020 MacBook Air, M1, 8 GB, the base model. Intel Macs are not supported in the beta.</p>
+    </div>
+    <div>
+      <h3>Is it for photos or for video?</h3>
+      <p>Both, in one grid. JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips. Photographers cull the soft ones with the sharp slider; editors search forty hours of rushes in plain words and get a scene breakdown per clip. Wedding photo sorting and documentary footage search go through the same search box. Faces are found on photos only for now; clips get the breakdown instead.</p>
+    </div>
+    <div>
+      <h3>How do I find every photo of a person?</h3>
+      <p>Drop in one photo of them. Group faces sorts every detected face in the stills into people; when two groups look alike, the app asks once, Same or Different, and remembers. Name a person and every frame of them is one click away, saved with the shoot.</p>
+    </div>
+    <div>
+      <h3>How long does indexing take?</h3>
+      <p>3,677 photos, 147 GB of 61 megapixel Sony RAW, in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, in 44 minutes 36 seconds. A 23 second DJI 4K clip is scanned for scenes in 1.0 second with the hardware decoder. All on the base M1 with 8 GB.</p>
+    </div>
+    <div>
+      <h3>Is it an editor? Is it AI?</h3>
+      <p>Neither. It does not cut, colour or retouch; the edit happens in Premiere, Resolve or Lightroom as before. No language model is used anywhere. Two small on-device vision models do the work: MobileCLIP, which understands images and words in the same space, and a face detector and recogniser (YuNet and SFace). They run on the Mac's own chip, no internet needed.</p>
+    </div>
+  </div>
+</section>
+
 <section class="beta" id="beta"><div class="block lav wrap">
   <p class="badge" data-reveal="fade">public beta, testing right now</p>
   <h2 data-reveal="lines">Runs on a Mac. Be first to run it.</h2>
@@ -524,7 +679,7 @@
 <footer class="foot wrap">
   <span class="wordmark"></span>
   <span>made in Ahmedabad</span>
-  <a class="ul foot-credits" href="credits.html">Photos: Pexels photographers, listed here</a>
+  <a class="ul foot-credits" href="credits.html">Photo credits: Pexels photographers, listed here</a>
   <a class="ul" href="https://github.com/kirtan-00/sorted-app" rel="noopener">GitHub</a>
 </footer>
 
@@ -532,5 +687,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/ScrollTrigger.min.js"></script>
 <script src="main.js"></script>
 <script src="beta.js" defer></script>
+<script src="track.js" defer></script>
 </body>
 </html>

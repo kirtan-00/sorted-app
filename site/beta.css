@@ -14,3 +14,18 @@
 .beta-fine { margin: 6px 0 0; font-size: 14px; color: var(--ink-3); }
 .confetti { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
 @media (max-width: 560px) { .beta-mail-row { flex-direction: column; } .beta-mail-row input { text-align: center; } }
+
+/* download gate */
+.dl-gate { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 24px; background: rgba(38, 40, 45, 0.42); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); opacity: 0; transition: opacity 220ms ease; }
+.dl-gate.in { opacity: 1; }
+.dl-card { position: relative; width: min(520px, 100%); background: var(--paper-2); border-radius: 22px; padding: 30px 30px 26px; box-shadow: 0 30px 80px rgba(38, 40, 45, 0.28); transform: translateY(12px); transition: transform 260ms cubic-bezier(.2,.7,.2,1); }
+.dl-gate.in .dl-card { transform: none; }
+.dl-card h3 { margin: 0 0 8px; font-size: 24px; }
+.dl-card p { margin: 0 0 16px; color: var(--ink-2); max-width: none; }
+.dl-x { position: absolute; top: 12px; right: 14px; width: 32px; height: 32px; border: 0; background: transparent; font-size: 26px; line-height: 1; color: var(--ink-3); cursor: pointer; border-radius: 50%; }
+.dl-x:hover { background: var(--paper); color: var(--ink); }
+.dl-form { display: flex; gap: 10px; }
+.dl-form input { flex: 1; min-width: 0; font: 500 16px/1.3 var(--ui); color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 0 18px; height: 44px; appearance: none; -webkit-appearance: none; }
+.dl-form input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px rgba(75, 156, 245, 0.25); }
+.dl-form .cta { white-space: nowrap; }
+@media (max-width: 560px) { .dl-form { flex-direction: column; } }

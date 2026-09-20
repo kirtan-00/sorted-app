@@ -80,4 +80,48 @@
     });
   }
   join.addEventListener('click', step2, { once: true });
+
+  /* Download for Mac: ask for an email first, then go to the download page. A returning visitor
+     who already gave one goes straight through. */
+  var KEY_MAIL = 'sorted.beta.email';
+  function knownEmail() { try { return localStorage.getItem(KEY_MAIL) || ''; } catch (e) { return ''; } }
+  function remember(email) { try { localStorage.setItem(KEY_MAIL, email); } catch (e) {} }
+  function gate(href) {
+    var old = document.getElementById('dl-gate'); if (old) old.remove();
+    var m = document.createElement('div'); m.id = 'dl-gate'; m.className = 'dl-gate';
+    m.innerHTML =
+      '<div class="dl-card" role="dialog" aria-modal="true" aria-labelledby="dl-h">' +
+        '<button type="button" class="dl-x" aria-label="Close">&times;</button>' +
+        '<h3 id="dl-h">One thing before the download.</h3>' +
+        '<p>Your email, so we can send you the build updates while the beta moves fast. One email at a time, nothing else.</p>' +
+        '<form class="dl-form" novalidate><input name="email" type="email" inputmode="email" autocomplete="email" placeholder="you@studio.in" required maxlength="200" aria-label="Email">' +
+        '<button type="submit" class="cta">Go to the download</button></form>' +
+        '<p class="beta-msg" aria-live="polite"></p>' +
+      '</div>';
+    document.body.appendChild(m);
+    var form = m.querySelector('form'), msg = m.querySelector('.beta-msg'), btn = form.querySelector('button');
+    function close() { m.remove(); document.removeEventListener('keydown', esc); }
+    function esc(e) { if (e.key === 'Escape') close(); }
+    m.querySelector('.dl-x').addEventListener('click', close);
+    m.addEventListener('click', function (e) { if (e.target === m) close(); });
+    document.addEventListener('keydown', esc);
+    requestAnimationFrame(function () { m.classList.add('in'); form.email.focus(); });
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var email = form.email.value.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(email)) { msg.textContent = 'That email does not look right.'; msg.classList.add('bad'); return; }
+      btn.disabled = true; msg.classList.remove('bad'); msg.textContent = 'One second';
+      rpc('beta_join', { p_email: email, p_source: 'download', p_user_agent: ua() }).then(function () {
+        remember(email); location.href = href;
+      }).catch(function (err) {
+        btn.disabled = false; msg.classList.add('bad'); msg.textContent = err.message === 'failed' ? 'Could not save that. Try again in a moment.' : err.message;
+      });
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('a[href$="download/"]'), function (a) {
+    a.addEventListener('click', function (e) {
+      if (knownEmail()) return;
+      e.preventDefault(); gate(a.getAttribute('href'));
+    });
+  });
 })();

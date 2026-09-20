@@ -19,10 +19,10 @@
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var sleep = function (ms) { return new Promise(function (res) { setTimeout(res, ms); }); };
 
-  /* the product name comes from the one CSS custom property; the title and the mailto subject follow it */
+  /* the product name comes from the one CSS custom property; the mailto subject follows it. The <title> is the SEO one, set in the HTML, and stays. */
   var PRODUCT = (getComputedStyle(html).getPropertyValue('--product') || '').trim().replace(/^["']|["']$/g, '') || 'sorted';
-  document.title = PRODUCT;
-  $$('.wordmark').forEach(function (el) { el.setAttribute('aria-label', PRODUCT); });
+  if (!document.title) document.title = PRODUCT;
+  $$('.wordmark').forEach(function (el) { el.setAttribute('role', 'img'); el.setAttribute('aria-label', PRODUCT); });
   $$('a[data-mail]').forEach(function (a) {
     a.href = 'mailto:purohit.krick@gmail.com?subject=' + encodeURIComponent(PRODUCT + ' ' + a.getAttribute('data-mail'));
   });
@@ -72,7 +72,7 @@
       return { to: function (y) { if (!raf) { current = applied = window.scrollY; } target = Math.max(0, Math.min(maxScroll(), y)); start(); } };
     })();
   }
-  $$('a[href^="#"]').forEach(function (a) {
+  $$('a[href^="#"]:not(.skip)').forEach(function (a) {
     a.addEventListener('click', function (e) {
       var id = a.getAttribute('href').slice(1);
       var el = id ? document.getElementById(id) : null;
@@ -704,7 +704,7 @@
       cur.push(s.textContent); lastTop = t; lastSeg = seg;
     });
     if (cur.length) lines.push(cur);
-    el.innerHTML = lines.map(function (l) { return '<span class="line-mask"><span>' + l.join(' ') + '</span></span>'; }).join('');
+    el.innerHTML = lines.map(function (l) { return '<span class="line-mask"><span>' + l.join(' ') + '</span></span>'; }).join(' ');
     return $$('.line-mask > span', el);
   }
 

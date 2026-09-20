@@ -1,0 +1,9 @@
+/* TEAM */
+sorted, made in Ahmedabad.
+Contact: purohit.krick@gmail.com
+
+/* SITE */
+Type: Archivo (headlines), Source Sans 3 (everything else).
+Motion: GSAP 3 with ScrollTrigger.
+Photos: free Pexels stock, no client work. Credits at /credits.html.
+Hosting: GitHub Pages.

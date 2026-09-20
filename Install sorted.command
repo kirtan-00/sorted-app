@@ -14,9 +14,10 @@
 #   7. makes sorted.app in this folder openable
 #   8. puts a sorted icon on the Desktop: ~/Desktop/sorted.app, a tiny launcher that starts the
 #      app here (re-runs replace it; a sorted.app the installer did not make is left alone)
-#   9. opens sorted.app
+#   9. counts the install: one anonymous ping (random id in .install-id, macOS version, chip)
+#  10. opens sorted.app
 #
-# Touches only: this folder (.venv, .uv, install.log), ~/.local/bin (uv), the Hugging Face
+# Touches only: this folder (.venv, .uv, .install-id, install.log), ~/.local/bin (uv), the Hugging Face
 # cache (~/.cache/huggingface) and ~/Desktop/sorted.app. uv's own download cache and its Python
 # live in .uv/ here, not in your home folder. Nothing is added to your shell profile.
 #
@@ -267,7 +268,35 @@ PLIST
 step "Desktop icon"
 desktop_icon
 
-# 9. Open it ------------------------------------------------------------------------------------
+# 9. Count the install ---------------------------------------------------------------------------
+# One anonymous ping to the beta counter, only once everything above succeeded. It carries a random
+# id kept in .install-id here (so a re-run counts as an update, not a new install), the macOS
+# version and the chip name. No name, no path, no photo. The app itself has no network code at all.
+# Failure is silent: a Mac that is offline still gets a working install.
+count_install() {
+  local url="https://woasffpwdbwavwcrtllz.supabase.co/rest/v1/rpc/install_ping"
+  local key="sb_publishable_aAR90Pzf1gza49CP2t7uKQ_xyDhkTZI"
+  local idf="$REPO/.install-id" id kind macos chip body
+  printf 'Counting this install (one anonymous ping, the app itself never phones home).\n'
+  if [ -s "$idf" ] && grep -Eq '^[0-9a-f]{32}$' "$idf"; then
+    kind="update"
+  else
+    uuidgen | tr -d - | tr A-F a-f > "$idf" 2>/dev/null || return 0
+    kind="install"
+  fi
+  id="$(head -c 32 "$idf" 2>/dev/null)"
+  [ "${#id}" = 32 ] || return 0
+  macos="$(sw_vers -productVersion 2>/dev/null | tr -d '"\\' | head -c 40)"
+  chip="$(sysctl -n machdep.cpu.brand_string 2>/dev/null | tr -d '"\\' | head -c 40)"
+  body="$(printf '{"p_install_id":"%s","p_kind":"%s","p_macos":"%s","p_chip":"%s"}' "$id" "$kind" "$macos" "$chip")"
+  curl -s -o /dev/null --max-time 5 -X POST "$url" \
+    -H "apikey: $key" -H "authorization: Bearer $key" -H "content-type: application/json" \
+    -d "$body" >/dev/null 2>&1 || true
+  return 0
+}
+count_install
+
+# 10. Open it -----------------------------------------------------------------------------------
 printf '\nfinished: %s\n' "$(date)"
 if [ -n "$DESKTOP_ICON" ]; then
   printf '\nsorted is installed. There is a sorted icon on your Desktop; double-click it any time.\n\n'
