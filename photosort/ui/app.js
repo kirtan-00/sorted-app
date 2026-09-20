@@ -94,7 +94,7 @@
     track("tab", { tab: name, view: name });
   }
   function usageTarget(t) {
-    var el = t && t.closest ? t.closest("button, a, .card, .cat-tile, label.check, .seg label, .panel-head, [data-view]") : null;
+    var el = t && t.closest ? t.closest("button, a, .card, .cat-tile, label.check, .seg label, .panel-head, .ctx-crumb, [data-view]") : null;
     if (!el) return null;
     var tile = el.classList.contains("cat-tile") ? el : (el.classList.contains("cat-tile-main") ? el.closest(".cat-tile") : null);
     if (tile) {
@@ -2461,11 +2461,23 @@
       fbSay("could not save the report: " + err.message, true);
     }).then(function () { fbSave.disabled = false; });
   });
+  // Safari drops the click's activation across an await, so where ClipboardItem takes a promise the write
+  // starts inside the gesture and the text arrives later; elsewhere the text is fetched first.
+  function copySummary() {
+    var textP = api("/api/usage/summary").then(function (s) { return s.text || JSON.stringify(s, null, 2); });
+    if (navigator.clipboard && navigator.clipboard.write && window.ClipboardItem) {
+      try {
+        var item = new ClipboardItem({ "text/plain": textP.then(function (t) { return new Blob([t], { type: "text/plain" }); }) });
+        return navigator.clipboard.write([item]);
+      } catch (e) { /* a ClipboardItem that takes no promise: fall through */ }
+    }
+    return textP.then(copyText);
+  }
   if (fbCopy) fbCopy.addEventListener("click", function () {
     fbCopy.disabled = true;
     flushUsage();
-    api("/api/usage/summary").then(function (s) {
-      return copyText(s.text || JSON.stringify(s, null, 2)).then(function () { fbSay("Summary copied, paste it into the email"); });
+    copySummary().then(function () {
+      fbSay("Summary copied, paste it into the email");
     }).catch(function (err) {
       fbSay("could not copy the summary: " + err.message, true);
     }).then(function () { fbCopy.disabled = false; });

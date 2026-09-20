@@ -210,7 +210,9 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _log_validation_error(request: Request, exc: RequestValidationError):
-        usage.log("api_error", route=_route_path(request), status=422, message=str(exc.errors()[:1]), method=request.method)
+        first = (exc.errors() or [{}])[0]
+        msg = " ".join(str(x) for x in (".".join(str(p) for p in first.get("loc", ())), first.get("type", ""), first.get("msg", "")) if x)
+        usage.log("api_error", route=_route_path(request), status=422, message=msg or "invalid request", method=request.method)
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(Exception)

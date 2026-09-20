@@ -170,7 +170,7 @@ def system_info() -> dict:
         pass
     info["chip"] = _run(["sysctl", "-n", "machdep.cpu.brand_string"]) or platform.machine()
     try:
-        info["ram_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9)
+        info["ram_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1024 ** 3)
     except Exception:
         pass
     try:
