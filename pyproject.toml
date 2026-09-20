@@ -1,0 +1,21 @@
+[project]
+name = "photosort"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "torch", "torchvision", "open_clip_torch", "timm", "opencv-python",
+  "pillow", "pillow-heif", "imagehash", "rawpy", "numpy", "scikit-learn",
+  "fastapi", "uvicorn[standard]", "pyexiv2",
+  "google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2",
+]
+[project.optional-dependencies]
+dev = ["pytest"]
+[project.scripts]
+photosort = "photosort.cli:main"
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools.packages.find]
+include = ["photosort*"]
+[tool.setuptools.package-data]
+photosort = ["ui/*"]

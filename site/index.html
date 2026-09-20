@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sorted</title>
+<meta name="description" content="A Mac app for wedding photographers, cinematographers and documentary crews. Plug in the shoot disk, search photos and 4K clips in plain words, find every shot of a person from one photo. Public beta. Nothing leaves the room.">
+<meta name="theme-color" content="#f7f4ee">
+<meta name="color-scheme" content="light">
+<link rel="preload" href="fonts/SourceSans3-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/SourceSans3-Semibold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
+<link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="beta.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<div class="blobs" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="blob b5"></i></div>
+<div class="leak" aria-hidden="true"></div>
+<div class="trail" aria-hidden="true"></div>
+
+<header class="top" id="top">
+  <a class="top-mark" href="#top"><img class="brand-mark" src="brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span><span class="badge">public beta, testing right now</span></a>
+  <nav class="top-nav" aria-label="Sections">
+    <a class="ul" href="#how">How it works</a>
+    <a class="ul" href="#deliver">Deliver</a>
+    <a class="ul" href="#numbers">Numbers</a>
+    <a class="ul" href="#video">Photos and videos</a>
+    <a class="ul" href="#people">People</a>
+    <a class="ul" href="#room">Privacy</a>
+    <a class="ul" href="#uses">Use cases</a>
+  </nav>
+  <a class="cta cta-small magnetic" href="#beta">Join the beta</a>
+</header>
+
+<main>
+
+<section class="hero" id="hero">
+  <div class="wrap hero-head">
+    <div class="hero-brand" data-reveal="fade"><img class="brand-mark brand-mark-hero" src="brand/mark.svg" alt="" width="40" height="40"><span class="badge badge-hero">public beta, testing right now</span></div>
+    <h1 data-reveal="lines">Plug in the disk.<br>Search the whole shoot.</h1>
+    <p class="only" data-reveal="lines">The only one that does it all.</p>
+    <p class="lede" data-reveal="lines"><span class="wordmark"></span> is a Mac app for editors, designers, agencies, wedding photographers and filmmakers, documentary editors, photographers, and anyone with a big pile of photo and video data. It indexes photos and 4K clips where they sit, finds any frame from plain words and every shot of a person from one photo, and sends the client their frames tonight. Nothing else leaves the room.</p>
+    <div class="cta-row" data-reveal="fade">
+      <a class="cta magnetic" href="#beta">Join the beta</a>
+      <a class="cta cta-ghost magnetic" href="https://github.com/kirtan-00/photosort" rel="noopener">See it on GitHub</a>
+    </div>
+  </div>
+
+  <div class="wrap wrap-wide">
+    <div class="app-frame" id="app-frame" data-reveal="unmask">
+      <div class="app" id="app" aria-label="the app, running">
+        <div class="mac-bar"><span class="mac-dots"><i></i><i></i><i></i></span><span class="mac-title"><span class="wordmark"></span></span></div>
+        <div class="toolbar">
+          <h2 class="tb-mark"><span class="wordmark"></span></h2>
+          <div class="tb-title">
+            <span class="tb-folder">SHOOT_2026_09</span>
+            <span class="tb-stats">630 photos, 325 videos · indexed today</span>
+          </div>
+          <span class="tb-spring"></span>
+          <span class="tb-select">Recent<i class="chev"></i></span>
+          <span class="btn">Open folder</span>
+          <span class="tb-dest">…Desktop/exports (free space checked)</span>
+          <span class="tb-icon on"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg></span>
+        </div>
+        <nav class="side" aria-label="app sections">
+          <button type="button" class="nav on" data-view="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><span>Search</span></button>
+          <button type="button" class="nav" data-view="people"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/><path d="M11 3.5a2.3 2.3 0 0 1 0 4.4M12 9.2c1.6.5 2.5 1.8 2.5 3.8"/></svg><span>People</span><span class="nav-count">4</span></button>
+          <button type="button" class="nav" data-view="categories"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span class="nav-count">18</span></button>
+          <button type="button" class="nav" data-view="index"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Index</span></button>
+          <div class="nav-group">Filters</div>
+          <label class="check nav-row"><input type="checkbox" id="app-aerial"> Drone shots</label>
+          <div class="seg nav-row"><span class="on">All</span><span>Photos</span><span>Videos</span></div>
+        </nav>
+
+        <div class="main">
+          <section class="view" id="v-search">
+            <form class="subbar" id="app-q" autocomplete="off">
+              <span class="q-wrap"><input type="search" id="app-input" name="q" placeholder="Search" aria-label="search the shoot"></span>
+              <label class="slider">Sharp <span class="range"><b></b></span><span class="val">0</span></label>
+              <span class="select">Any faces<i class="chev"></i></span>
+              <span class="select">anyone<i class="chev"></i></span>
+              <button type="submit" class="btn primary">Find</button>
+              <span class="spring"></span>
+              <span class="link" id="app-selectall" hidden>Select all shown</span>
+            </form>
+            <div class="grid" id="app-grid">
+              <div class="tile" tabindex="0" data-w="woman sari portrait wedding" data-u="img/sari.webp" data-k="photo" data-n="DAY-1/CAM-A/DSC_0142.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="woman in a sari, 91%" data-sharp="84" data-faces="1" data-taken="2026-02-14 17:42"><span class="img" style="--u:url(img/sari.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="woman sari haldi ceremony turmeric" data-u="img/haldi.webp" data-k="photo" data-n="DAY-1/CAM-A/DSC_0207.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="haldi, 88%" data-sharp="71" data-faces="3" data-taken="2026-02-14 11:05"><span class="img" style="--u:url(img/haldi.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="fishing boats harbour morning nets" data-u="img/boats1.webp" data-k="video" data-d="0:14" data-n="DAY-2/CAM-B/C0031.MP4" data-cam="Sony FX3" data-size="3840 × 2160" data-cat="fishing boats, 93%" data-sharp="62" data-taken="2026-02-15 06:48"><span class="img" style="--u:url(img/boats1.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="fishing boats coastline sea aerial" data-u="img/boats2.webp" data-k="video" data-d="0:21" data-a="1" data-n="DAY-2/DRONE/DJI_0051.MP4" data-cam="DJI Mavic 3" data-size="3840 × 2160" data-cat="fishing boats, 87%" data-sharp="58" data-taken="2026-02-15 07:12"><span class="img" style="--u:url(img/boats2.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="coastline aerial beach cliffs" data-u="img/coast.webp" data-k="photo" data-a="1" data-n="DAY-3/DRONE/DJI_0102.DNG" data-cam="DJI Mavic 3" data-size="5280 × 3956" data-cat="beach, 90%" data-sharp="77" data-faces="0" data-taken="2026-02-16 17:20"><span class="img" style="--u:url(img/coast.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="construction site aerial crane" data-u="img/site.webp" data-k="video" data-d="0:33" data-a="1" data-n="DAY-3/DRONE/DJI_0118.MP4" data-cam="DJI Mavic 3" data-size="3840 × 2160" data-cat="building, 81%" data-sharp="66" data-taken="2026-02-16 12:31"><span class="img" style="--u:url(img/site.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="interview elderly man chair talking" data-u="img/hari1.webp" data-k="video" data-d="12:40" data-n="DAY-1/CAM-A/C0007.MP4" data-cam="Sony FX3" data-size="3840 × 2160" data-cat="interview, 96%" data-sharp="80" data-taken="2026-02-14 14:02"><span class="img" style="--u:url(img/hari1.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="market street vegetables crowd" data-u="img/market.webp" data-k="photo" data-n="DAY-2/CAM-A/DSC_0311.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="market, 84%" data-sharp="69" data-faces="4" data-taken="2026-02-15 09:14"><span class="img" style="--u:url(img/market.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="temple stone carving evening" data-u="img/temple.webp" data-k="photo" data-n="DAY-2/CAM-A/DSC_0350.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="building, 77%" data-sharp="88" data-faces="0" data-taken="2026-02-15 18:40"><span class="img" style="--u:url(img/temple.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="kitchen interior counter light" data-u="img/kitchen.webp" data-k="photo" data-n="DAY-4/CAM-A/DSC_0402.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="kitchen, 79%" data-sharp="91" data-faces="0" data-taken="2026-02-17 10:10"><span class="img" style="--u:url(img/kitchen.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="balcony pool facade villa" data-u="img/villa.webp" data-k="photo" data-n="DAY-4/CAM-A/DSC_0419.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="building, 83%" data-sharp="86" data-faces="0" data-taken="2026-02-17 10:42"><span class="img" style="--u:url(img/villa.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="handshake office meeting suits" data-u="img/handshake.webp" data-k="photo" data-n="DAY-4/CAM-B/DSC_0511.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="office, 89%" data-sharp="74" data-faces="2" data-taken="2026-02-17 15:05"><span class="img" style="--u:url(img/handshake.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="speaker stage audience conference" data-u="img/speaker.webp" data-k="video" data-d="0:36" data-n="DAY-4/CAM-B/C0088.MP4" data-cam="Sony FX3" data-size="3840 × 2160" data-cat="people, 92%" data-sharp="63" data-taken="2026-02-17 16:20"><span class="img" style="--u:url(img/speaker.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="golden hour beach silhouette" data-u="img/golden.webp" data-k="video" data-d="0:09" data-n="DAY-3/CAM-B/C0064.MP4" data-cam="Sony FX3" data-size="3840 × 2160" data-cat="beach, 94%" data-sharp="72" data-taken="2026-02-16 18:31"><span class="img" style="--u:url(img/golden.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="varmala couple stage garland" data-u="img/varmala.webp" data-k="photo" data-n="DAY-1/CAM-B/DSC_0288.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="couple on the stage, 90%" data-sharp="79" data-faces="2" data-taken="2026-02-14 20:15"><span class="img" style="--u:url(img/varmala.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="sunset sky clouds sea" data-u="img/sunset.webp" data-k="photo" data-n="DAY-3/CAM-A/DSC_0377.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="sky, 95%" data-sharp="83" data-faces="0" data-taken="2026-02-16 18:55"><span class="img" style="--u:url(img/sunset.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="food table plate dinner" data-u="img/food.webp" data-k="photo" data-n="DAY-1/CAM-B/DSC_0301.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="food, 91%" data-sharp="90" data-faces="0" data-taken="2026-02-14 21:02"><span class="img" style="--u:url(img/food.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="bride portrait mirror room" data-u="img/bride.webp" data-k="photo" data-n="DAY-1/CAM-A/DSC_0119.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="bride, 93%" data-sharp="87" data-faces="1" data-taken="2026-02-14 16:30"><span class="img" style="--u:url(img/bride.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="product table studio bottle" data-u="img/product.webp" data-k="photo" data-n="DAY-4/CAM-A/DSC_0450.ARW" data-cam="Sony A7 IV" data-size="7008 × 4672" data-cat="product on a table, 47%, less sure" data-sharp="93" data-faces="0" data-taken="2026-02-17 12:12"><span class="img" style="--u:url(img/product.webp)"></span></div>
+              <div class="tile" tabindex="0" data-w="aerial road fields drone" data-u="img/road.webp" data-k="video" data-d="0:18" data-a="1" data-n="DAY-3/DRONE/DJI_0124.MP4" data-cam="DJI Mavic 3" data-size="3840 × 2160" data-cat="road, 85%" data-sharp="70" data-taken="2026-02-16 13:04"><span class="img" style="--u:url(img/road.webp)"></span></div>
+            </div>
+            <footer class="actionbar" id="app-selbar">
+              <span id="app-selcount">Hover a tile. Type a word.</span>
+              <span class="spring"></span>
+              <span class="field-fake">Folder name</span>
+              <span class="select">Copy<i class="chev"></i></span>
+              <span class="btn" id="app-export">Export</span>
+            </footer>
+          </section>
+
+          <section class="view" id="v-people" hidden>
+            <div class="subbar">
+              <label class="slider">Match <span class="range"><b style="--p:0.4"></b></span><span class="val">0.55</span></label>
+              <span class="spring"></span>
+              <span class="btn">Group faces</span>
+              <span class="btn">Export people</span>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered on every re-grouping</span></div>
+              <div class="panel-body">
+                <div class="merge-row" id="app-merge">
+                  <div class="merge-side">
+                    <div class="merge-faces" id="app-merge-left"><i class="face" style="--u:url(img/hari1.webp);--pos:53% 56%;--z:400%"></i><i class="face" style="--u:url(img/hari2.webp);--pos:50% 30%"></i></div>
+                    <span class="merge-name" id="app-merge-name">Hari</span>
+                  </div>
+                  <span class="merge-sep"></span>
+                  <div class="merge-side" id="app-merge-rightside">
+                    <div class="merge-faces" id="app-merge-right"><i class="face" style="--u:url(img/hari3.webp);--pos:50% 24%"></i><i class="face" style="--u:url(img/hari4.webp);--pos:50% 30%"></i><i class="face more">+32</i></div>
+                    <span class="merge-name">group of 34</span>
+                  </div>
+                  <span class="merge-act"><span class="merge-sim" id="app-merge-sim">71% alike</span><span class="btn" id="app-same">Same</span><span class="btn">Different</span></span>
+                </div>
+                <div class="merge-row">
+                  <div class="merge-side">
+                    <div class="merge-faces"><i class="face" style="--u:url(img/face1.webp);--pos:50% 28%"></i><i class="face" style="--u:url(img/face3.webp);--pos:50% 12%"></i><i class="face more">+103</i></div>
+                    <span class="merge-name">group of 105</span>
+                  </div>
+                  <span class="merge-sep"></span>
+                  <div class="merge-side">
+                    <div class="merge-faces"><i class="face" style="--u:url(img/face2.webp);--pos:50% 30%"></i><i class="face" style="--u:url(img/face4.webp);--pos:50% 12%"></i><i class="face more">+61</i></div>
+                    <span class="merge-name">group of 63</span>
+                  </div>
+                  <span class="merge-act"><span class="merge-sim">66% alike</span><span class="btn">Same</span><span class="btn">Different</span></span>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Find a person</div>
+              <div class="panel-body">
+                <div class="dropzone"><span class="btn">Find a person from a photo</span><span>Pick a photo of them; matches fill the search grid, then name them to save</span></div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Saved people</div>
+              <div class="panel-body">
+                <div class="ref-row"><i class="tick on"></i><span class="ref-name">Hari</span><span class="ref-count" id="app-meera-count">38 photos</span><span class="link">Show</span></div>
+                <div class="ref-row"><i class="tick on"></i><span class="ref-name">the groom's father</span><span class="ref-count">61 photos</span><span class="link">Show</span></div>
+                <div class="ref-row"><i class="tick"></i><span class="ref-name ghost">unnamed</span><span class="ref-count">9 photos</span><span class="link">Show</span></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <aside class="insp" id="app-insp">
+          <div class="panel">
+            <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Info</div>
+            <div class="panel-body" id="insp-info">
+              <p class="insp-empty">Select a photo or clip</p>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Categories</div>
+            <div class="panel-body" id="insp-cats"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Faces</div>
+            <div class="panel-body" id="insp-faces"></div>
+          </div>
+        </aside>
+
+        <div class="status"><span id="app-status">955 items in the index. Nothing was written to the disk.</span></div>
+      </div>
+    </div>
+    <p class="app-caption" data-reveal="fade">This is the app, not a screenshot. Hover a tile, or type a word into its search field.</p>
+  </div>
+</section>
+
+<section class="sorter" id="sorter">
+  <div class="sorter-pin" id="sorter-pin">
+    <div class="wrap sorter-stage">
+      <p class="sorter-line"><span id="sorter-a">A shoot arrives as a pile.</span><span id="sorter-b">It leaves as folders.</span></p>
+      <div class="pile" id="pile">
+        <i class="p-tile" style="--u:url(img/hari1.webp);--x:4;--y:6;--r:-8deg" data-to="0"><b style="--u:url(img/hari1.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/boats1.webp);--x:22;--y:2;--r:6deg" data-to="1"><b style="--u:url(img/boats1.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/coast.webp);--x:40;--y:10;--r:-4deg" data-to="2"><b style="--u:url(img/coast.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/face1.webp);--x:58;--y:0;--r:9deg" data-to="3"><b style="--u:url(img/face1.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/hari2.webp);--x:76;--y:8;--r:-6deg" data-to="0"><b style="--u:url(img/hari2.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/boats2.webp);--x:12;--y:34;--r:5deg" data-to="1"><b style="--u:url(img/boats2.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/site.webp);--x:30;--y:40;--r:-10deg" data-to="2"><b style="--u:url(img/site.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/face2.webp);--x:50;--y:32;--r:3deg" data-to="3"><b style="--u:url(img/face2.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/hari3.webp);--x:68;--y:42;--r:-3deg" data-to="0"><b style="--u:url(img/hari3.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/road.webp);--x:86;--y:36;--r:7deg" data-to="2"><b style="--u:url(img/road.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/hari4.webp);--x:2;--y:64;--r:4deg" data-to="0"><b style="--u:url(img/hari4.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/harbour.webp);--x:24;--y:70;--r:-7deg" data-to="1"><b style="--u:url(img/harbour.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/coast2.webp);--x:44;--y:66;--r:8deg" data-to="2"><b style="--u:url(img/coast2.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/face3.webp);--x:62;--y:72;--r:-5deg" data-to="3"><b style="--u:url(img/face3.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/boatman.webp);--x:80;--y:68;--r:2deg" data-to="0"><b style="--u:url(img/boatman.webp)"></b></i>
+        <i class="p-tile" style="--u:url(img/face4.webp);--x:92;--y:4;--r:-9deg" data-to="1"><b style="--u:url(img/face4.webp)"></b></i>
+      </div>
+      <div class="pfolders" id="pfolders">
+        <div class="pfolder peach"><i class="pflap"></i><b class="pbody"></b><span>people/Hari/</span></div>
+        <div class="pfolder mint"><i class="pflap"></i><b class="pbody"></b><span>fishing boats/</span></div>
+        <div class="pfolder sky"><i class="pflap"></i><b class="pbody"></b><span>drone/</span></div>
+        <div class="pfolder lav"><i class="pflap"></i><b class="pbody"></b><span>interviews/</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="post" id="post"><div class="block mint wrap">
+  <h2 data-reveal="lines">Sorts out post.</h2>
+  <p class="lede" data-reveal="lines">For editors, designers, agencies, wedding photographers, filmmakers and documentary crews: plug in the disk, search the whole shoot, deliver tonight.</p>
+  <p class="theset" data-reveal="lines">Photos and video. On-device. Person search from one photo. Plain-word search. Scene breakdown per clip. Drone filter. Export to folders. Reorganise with Undo. No other Mac tool has the whole set.</p>
+  <div class="three four" data-reveal="rows">
+    <div>
+      <h3>Editors and agencies</h3>
+      <p>Forty hours of rushes on a drive. Type what you remember, pull the selects, read the scene breakdown per clip, reorganise the drive with Undo.</p>
+    </div>
+    <div>
+      <h3>Wedding photographers</h3>
+      <p>Every frame of the bride's parents from one photo. Type varmala, haldi, couple on the stage. Cull the soft ones with the sharp slider. A folder per ritual, ready for the album.</p>
+    </div>
+    <div>
+      <h3>Filmmakers</h3>
+      <p>A scene breakdown per clip. Tick drone shots. Type golden hour beach. Pull selects by look.</p>
+    </div>
+    <div>
+      <h3>Documentary crews</h3>
+      <p>Forty hours of interviews and B-roll. Interviews flagged on their own. Type market, fishing boats, elderly man. Find the one sound bite location again.</p>
+    </div>
+  </div>
+</div></section>
+
+<section class="story" id="how">
+  <div class="story-pin" id="story-pin">
+    <div class="wrap story-grid">
+      <div class="story-text">
+        <h2>Between the disk and the delivery, five things happen.</h2>
+        <ol class="steps" id="steps">
+          <li class="step is-on"><h3>Plug in</h3><p>The disk mounts read-only. Nothing is written to it, ever.</p></li>
+          <li class="step"><h3>Index</h3><p>Every photo and clip gets a fingerprint on this Mac. 3,677 photos took about 11 minutes on a base M1 with 8 GB.</p></li>
+          <li class="step"><h3>Search</h3><p>Plain words. The matches light up, the less sure ones stay visible under a line.</p></li>
+          <li class="step"><h3>People</h3><p>Every detected face lands in a group. One photo of a person finds the rest of them.</p></li>
+          <li class="step"><h3>Export</h3><p>One folder per category, links or copies, free space checked first. Or one index bundle that opens the shoot already sorted on another Mac.</p></li>
+        </ol>
+        <p class="step-live" id="step-live" hidden></p>
+        <div class="rail" aria-hidden="true"><i id="rail-fill"></i></div>
+      </div>
+
+      <div class="stage" id="stage" aria-label="the five stages">
+        <div class="stage-chrome">
+          <div class="s-toolbar"><span class="wordmark"></span><span class="s-folder" id="s-folder">SHOOT_2026_09</span><span class="s-spring"></span><span class="s-btn">Open folder</span></div>
+          <div class="s-side">
+            <span class="s-nav on" id="s-nav-search">Search</span>
+            <span class="s-nav" id="s-nav-people">People<b id="s-count-people">4</b></span>
+            <span class="s-nav" id="s-nav-cats">Categories<b id="s-count-cats">18</b></span>
+            <span class="s-nav" id="s-nav-index">Index</span>
+            <span class="s-group">In the index</span>
+            <span class="s-row">Photos<b id="s-count-photos">630</b></span>
+            <span class="s-row">Clips<b id="s-count-clips">325</b></span>
+          </div>
+          <div class="s-main">
+            <div class="layer" id="l-plug">
+              <p class="layer-cap">1 Plug in</p>
+              <div class="dock">
+                <svg class="disk" id="disk" viewBox="0 0 120 60" aria-hidden="true"><rect x="1.5" y="1.5" width="117" height="57" rx="8"/><rect x="12" y="14" width="60" height="32" rx="3"/><circle cx="98" cy="30" r="8"/><path d="M78 16v28"/></svg>
+                <svg class="dock-slot" viewBox="0 0 120 60" aria-hidden="true"><rect x="1.5" y="1.5" width="117" height="57" rx="8" stroke-dasharray="4 5"/></svg>
+                <p class="dock-line" id="dock-line"><b>SHOOT_2026_09</b> mounted read-only, 800 GB, 955 items</p>
+              </div>
+            </div>
+            <div class="layer" id="l-index">
+              <p class="layer-cap">2 Index</p>
+              <div class="prog">
+                <div class="prog-line"><span class="mono" id="prog-text">features  955/955  done</span></div>
+                <div class="prog-bar"><i id="prog-fill"></i></div>
+                <div class="ticker-clip"><div class="ticker mono" id="ticker">
+                  <span>DAY-1/CAM-A/DSC_0101.ARW</span><span>DAY-1/CAM-A/DSC_0102.ARW</span><span>DAY-1/CAM-A/DSC_0103.ARW</span><span>DAY-1/CAM-A/C0001.MP4</span><span>DAY-1/CAM-A/C0002.MP4</span><span>DAY-1/CAM-B/DSC_0210.ARW</span><span>DAY-1/CAM-B/DSC_0211.ARW</span><span>DAY-1/CAM-B/DSC_0212.ARW</span><span>DAY-2/CAM-A/DSC_0301.ARW</span><span>DAY-2/CAM-A/DSC_0302.ARW</span><span>DAY-2/CAM-B/C0031.MP4</span><span>DAY-2/CAM-B/C0032.MP4</span><span>DAY-2/DRONE/DJI_0051.MP4</span><span>DAY-2/DRONE/DJI_0052.DNG</span><span>DAY-3/CAM-A/DSC_0377.ARW</span><span>DAY-3/CAM-B/C0064.MP4</span><span>DAY-3/DRONE/DJI_0102.DNG</span><span>DAY-3/DRONE/DJI_0118.MP4</span><span>DAY-4/CAM-A/DSC_0402.ARW</span><span>DAY-4/CAM-A/DSC_0419.ARW</span><span>DAY-4/CAM-B/DSC_0511.ARW</span><span>DAY-4/CAM-B/C0088.MP4</span><span>DAY-4/CAM-B/C0089.MP4</span><span>DAY-4/CAM-A/DSC_0450.ARW</span>                  <span>DAY-1/CAM-A/DSC_0101.ARW</span><span>DAY-1/CAM-A/DSC_0102.ARW</span><span>DAY-1/CAM-A/DSC_0103.ARW</span><span>DAY-1/CAM-A/C0001.MP4</span><span>DAY-1/CAM-A/C0002.MP4</span><span>DAY-1/CAM-B/DSC_0210.ARW</span><span>DAY-1/CAM-B/DSC_0211.ARW</span><span>DAY-1/CAM-B/DSC_0212.ARW</span><span>DAY-2/CAM-A/DSC_0301.ARW</span><span>DAY-2/CAM-A/DSC_0302.ARW</span><span>DAY-2/CAM-B/C0031.MP4</span><span>DAY-2/CAM-B/C0032.MP4</span><span>DAY-2/DRONE/DJI_0051.MP4</span><span>DAY-2/DRONE/DJI_0052.DNG</span><span>DAY-3/CAM-A/DSC_0377.ARW</span><span>DAY-3/CAM-B/C0064.MP4</span><span>DAY-3/DRONE/DJI_0102.DNG</span><span>DAY-3/DRONE/DJI_0118.MP4</span><span>DAY-4/CAM-A/DSC_0402.ARW</span><span>DAY-4/CAM-A/DSC_0419.ARW</span><span>DAY-4/CAM-B/DSC_0511.ARW</span><span>DAY-4/CAM-B/C0088.MP4</span><span>DAY-4/CAM-B/C0089.MP4</span><span>DAY-4/CAM-A/DSC_0450.ARW</span>
+                </div></div>
+                <p class="prog-note">JPEG, Sony ARW, DNG, h264 and HEVC. Sony THMBNL poster frames skipped. S-Log3 shown as Rec.709.</p>
+              </div>
+            </div>
+            <div class="layer" id="l-search">
+              <p class="layer-cap">3 Search</p>
+              <div class="s-subbar"><span class="s-q"><span class="s-q-text" id="s-q-text">fishing boats</span></span><span class="s-find">Find</span></div>
+              <div class="s-grid" id="s-grid">
+                <i class="s-tile hit" style="--u:url(img/boats1.webp)"></i><i class="s-tile" style="--u:url(img/sari.webp)"></i><i class="s-tile hit" style="--u:url(img/boats2.webp)"></i><i class="s-tile" style="--u:url(img/haldi.webp)"></i>
+                <i class="s-tile" style="--u:url(img/market.webp)"></i><i class="s-tile hit" style="--u:url(img/boatman.webp)"></i><i class="s-tile" style="--u:url(img/hari1.webp)"></i><i class="s-tile hit unsure" style="--u:url(img/harbour.webp)"></i>
+                <i class="s-tile" style="--u:url(img/sunset.webp)"></i><i class="s-tile" style="--u:url(img/food.webp)"></i><i class="s-tile" style="--u:url(img/speaker.webp)"></i><i class="s-tile" style="--u:url(img/kitchen.webp)"></i>
+              </div>
+              <p class="s-line" id="s-line">4 matched, 1 less sure</p>
+            </div>
+            <div class="layer" id="l-people">
+              <p class="layer-cap">4 People</p>
+              <div class="cloud" id="cloud">
+                <svg class="links" id="links" viewBox="0 0 520 260" preserveAspectRatio="none" aria-hidden="true">
+                  <path d="M60 60 L180 40" /><path d="M180 40 L300 70" /><path d="M300 70 L430 50" /><path d="M60 60 L120 180" /><path d="M120 180 L260 200" /><path d="M260 200 L380 170" /><path d="M380 170 L430 50" /><path d="M300 70 L260 200" />
+                </svg>
+                <i class="face c-face" style="--u:url(img/hari1.webp);--pos:53% 56%;--z:400%--x:60;--y:60"></i><i class="face c-face" style="--u:url(img/hari2.webp);--pos:50% 30%;--x:180;--y:40"></i><i class="face c-face" style="--u:url(img/hari3.webp);--pos:50% 24%;--x:300;--y:70"></i><i class="face c-face" style="--u:url(img/hari4.webp);--pos:50% 30%;--x:430;--y:50"></i>
+                <i class="face c-face" style="--u:url(img/hari1.webp);--pos:53% 56%;--z:400%--x:120;--y:180"></i><i class="face c-face" style="--u:url(img/hari2.webp);--pos:48% 32%;--x:260;--y:200"></i><i class="face c-face" style="--u:url(img/hari4.webp);--pos:50% 26%;--x:380;--y:170"></i>
+                <p class="cloud-line" id="cloud-line">Hari, 38 photos</p>
+              </div>
+            </div>
+            <div class="layer" id="l-export">
+              <p class="layer-cap">5 Export</p>
+              <div class="fly" id="fly">
+                <i class="f-tile" style="--u:url(img/boats1.webp)" data-to="0"></i><i class="f-tile" style="--u:url(img/boats2.webp)" data-to="0"></i><i class="f-tile" style="--u:url(img/boatman.webp)" data-to="0"></i>
+                <i class="f-tile" style="--u:url(img/hari1.webp)" data-to="1"></i><i class="f-tile" style="--u:url(img/hari2.webp)" data-to="1"></i><i class="f-tile" style="--u:url(img/hari4.webp)" data-to="1"></i>
+                <i class="f-tile" style="--u:url(img/coast.webp)" data-to="2"></i><i class="f-tile" style="--u:url(img/road.webp)" data-to="2"></i><i class="f-tile" style="--u:url(img/site.webp)" data-to="2"></i>
+              </div>
+              <div class="folders" id="folders">
+                <div class="folder"><i class="flap"></i><b class="fbody"></b><span>fishing boats/</span></div>
+                <div class="folder"><i class="flap"></i><b class="fbody"></b><span>people/Hari/</span></div>
+                <div class="folder"><i class="flap"></i><b class="fbody"></b><span>drone/</span></div>
+              </div>
+              <p class="fly-line" id="fly-line">free space checked, links or copies, onto any disk</p>
+            </div>
+          </div>
+          <div class="s-status" id="s-status">955 items in the index</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="deliver" id="deliver"><div class="block sky wrap">
+  <h2 data-reveal="lines">From the shoot disk to the client's Drive, tonight.</h2>
+  <p class="lede" data-reveal="lines">Pick a person or a category, paste the client's Google Drive folder link, and <span class="wordmark"></span> uploads straight from the SSD into their folder. Full size or web size. Nothing is staged on your Mac.</p>
+  <div class="flow" id="flow" data-reveal="unmask">
+    <div class="flow-ssd">
+      <svg viewBox="0 0 120 60" aria-hidden="true"><rect x="1.5" y="1.5" width="117" height="57" rx="8"/><rect x="12" y="14" width="60" height="32" rx="3"/><circle cx="98" cy="30" r="8"/><path d="M78 16v28"/></svg>
+      <span class="mono">SHOOT_2026_09</span>
+    </div>
+    <div class="flow-arrow" aria-hidden="true"><i class="pkt"></i><i class="pkt"></i><i class="pkt"></i></div>
+    <div class="flow-app">
+      <div class="fa-bar"><span class="wordmark"></span><span class="fa-title">Export people</span></div>
+      <div class="fa-row"><span class="fa-k">Who</span><span class="fa-pick">Hari<i class="chev"></i></span><span class="fa-n">372 photos</span></div>
+      <div class="fa-row"><span class="fa-k">To</span><span class="fa-pick">Google Drive folder<i class="chev"></i></span><span class="fa-n">signed in once</span></div>
+      <div class="fa-row"><span class="fa-k">Link</span><span class="fa-field"><span class="fa-link mono" id="fa-link">drive.google.com/drive/folders/1xK9…</span><i class="fa-caret" id="fa-caret"></i></span></div>
+      <div class="fa-row"><span class="fa-k">Size</span><span class="fa-seg"><span class="on">Full size</span><span>Web size</span></span><span class="fa-btn" id="fa-btn">Upload</span></div>
+      <div class="fa-status" id="fa-status">372 of 372 uploaded, 0 skipped, manifest written</div>
+    </div>
+    <div class="flow-arrow" aria-hidden="true"><i class="pkt"></i><i class="pkt"></i><i class="pkt"></i></div>
+    <div class="flow-drive">
+      <div class="fd-head"><i class="fd-icon"></i><span>Hari, all frames</span><b id="fd-count">372 of 372</b></div>
+      <div class="fd-grid" id="fd-grid">
+        <i style="--u:url(img/hari1.webp);--pos:50% 55%"></i><i style="--u:url(img/hari2.webp);--pos:50% 30%"></i><i style="--u:url(img/hari3.webp);--pos:50% 24%"></i><i style="--u:url(img/hari4.webp);--pos:50% 30%"></i><i style="--u:url(img/chapel.webp);--pos:50% 50%"></i><i style="--u:url(img/hari1.webp);--pos:30% 40%"></i><i style="--u:url(img/hari2.webp);--pos:50% 60%"></i><i style="--u:url(img/boatman.webp);--pos:50% 50%"></i><i style="--u:url(img/hari3.webp);--pos:50% 50%"></i><i style="--u:url(img/hari4.webp);--pos:50% 60%"></i><i style="--u:url(img/alley.webp);--pos:50% 50%"></i><i style="--u:url(img/hari1.webp);--pos:70% 30%"></i>
+      </div>
+      <p class="fd-line">their storage, their folder</p>
+    </div>
+  </div>
+  <div class="three dest" data-reveal="rows">
+    <div><h3>A folder on the Mac or any disk</h3><p>Pick a folder on this Mac or on any plugged-in disk. The sorted folders land there, links or copies, free space checked first.</p></div>
+    <div><h3>Google Drive, direct</h3><p>Paste a Drive folder link. Files go from the source disk to Drive with no copy on the laptop. Resumable if the Wi-Fi drops; a manifest means a re-run only sends what is missing. Works with a folder the client shared from their own storage.</p></div>
+    <div><h3>Dropbox, OneDrive and the rest</h3><p>Other drives come through plugins. Coming.</p></div>
+  </div>
+</div></section>
+
+<section class="numbers" id="numbers"><div class="block butter wrap">
+  <h2 data-reveal="lines">A five-year-old Mac is enough.</h2>
+  <p class="lede" data-reveal="lines">Every number here was measured on one machine: a 2020 MacBook Air, Apple M1, 8 GB, the base model.</p>
+  <div class="num-grid">
+    <div class="charts">
+      <figure class="chart" id="chart-minutes">
+        <figcaption><b>Minutes to make a shoot searchable</b><span class="machine">2020 MacBook Air, M1, 8 GB</span></figcaption>
+        <div class="bars">
+          <div class="bar" data-sec="642" data-max="2676" data-fmt="ms"><span class="bar-k">3,677 photos, 147 GB. Sony A7R V, 61 MP, 33 MB JPEGs</span><i class="bar-track"><b class="bar-fill" style="--p:0.24"></b></i><span class="bar-v">10 min 42 s</span></div>
+          <div class="bar" data-sec="2676" data-max="2676" data-fmt="ms"><span class="bar-k">955 items, 800 GB. 630 photos and 325 4K clips, scene-broken and categorised</span><i class="bar-track"><b class="bar-fill" style="--p:1"></b></i><span class="bar-v">44 min 36 s</span></div>
+        </div>
+        <p class="chart-note">Photos go in at 5 to 9 a second, 4K footage at roughly 18 GB a minute. The face pass on the 3,677 photos took about 10 more minutes and found 6,569 faces.</p>
+      </figure>
+      <figure class="chart" id="chart-clip">
+        <figcaption><b>Seconds to scan one clip for scenes</b><span class="machine">2020 MacBook Air, M1, 8 GB</span></figcaption>
+        <div class="bars">
+          <div class="bar" data-sec="1.0" data-max="41" data-fmt="s1"><span class="bar-k">DJI Air 3S, 4K60 HEVC 10-bit, 23 s clip, hardware decoder</span><i class="bar-track"><b class="bar-fill" style="--p:0.0244"></b></i><span class="bar-v">1.0 s</span></div>
+          <div class="bar" data-sec="9.3" data-max="41" data-fmt="s1"><span class="bar-k">The same clip in software</span><i class="bar-track"><b class="bar-fill" style="--p:0.2268"></b></i><span class="bar-v">9.3 s</span></div>
+          <div class="bar" data-sec="41" data-max="41" data-fmt="s0"><span class="bar-k">Sony 4K 10-bit 4:2:2 h264, 87 s clip, software</span><i class="bar-track"><b class="bar-fill" style="--p:1"></b></i><span class="bar-v">41 s</span></div>
+        </div>
+        <p class="chart-note">The decoder is picked per codec. The base M1 has no 4:2:2 hardware decoder; newer M-series chips do. Interviews longer than 5 minutes skip the frame-by-frame scan and get fixed 2-minute windows, so a 24-minute take does not take 11 minutes.</p>
+      </figure>
+      <figure class="chart chart-rate" id="chart-rate">
+        <figcaption><b>Photos per second</b><span class="machine">2020 MacBook Air, M1, 8 GB</span></figcaption>
+        <div class="rate">
+          <div class="rate-count"><span class="big" id="rate-n" data-n="3677">3,677</span><span class="rate-k">photos indexed, 5 to 9 a second</span></div>
+          <div class="strip-clip"><div class="strip" id="strip"><i style="--u:url(img/sari.webp)"></i><i style="--u:url(img/boats1.webp)"></i><i style="--u:url(img/coast.webp)"></i><i style="--u:url(img/hari1.webp)"></i><i style="--u:url(img/market.webp)"></i><i style="--u:url(img/temple.webp)"></i><i style="--u:url(img/villa.webp)"></i><i style="--u:url(img/handshake.webp)"></i><i style="--u:url(img/speaker.webp)"></i><i style="--u:url(img/golden.webp)"></i><i style="--u:url(img/varmala.webp)"></i><i style="--u:url(img/sunset.webp)"></i><i style="--u:url(img/food.webp)"></i><i style="--u:url(img/bride.webp)"></i><i style="--u:url(img/product.webp)"></i><i style="--u:url(img/road.webp)"></i><i style="--u:url(img/haldi.webp)"></i><i style="--u:url(img/harbour.webp)"></i><i style="--u:url(img/kitchen.webp)"></i><i style="--u:url(img/night.webp)"></i><i style="--u:url(img/building.webp)"></i><i style="--u:url(img/dinner.webp)"></i><i style="--u:url(img/audience.webp)"></i><i style="--u:url(img/couple.webp)"></i></div></div>
+        </div>
+        <div class="stack" id="stack">
+          <span class="stack-k">Per photo on the M1</span>
+          <i class="stack-track"><b class="stack-a" style="--p:0.3025"></b><b class="stack-b" style="--p:0.6975"></b></i>
+          <span class="stack-legend"><span><i class="sw a"></i><span class="stack-v" data-ms="36">36 ms</span> vision model</span><span><i class="sw b"></i><span class="stack-v" data-ms="83">83 ms</span> sharpness and faces</span></span>
+        </div>
+      </figure>
+    </div>
+    <div class="how" data-reveal="rows">
+      <h3>How the processing works</h3>
+      <ol class="how-list">
+        <li>RAW is read from the full-size preview the camera already embeds. No demosaic, so an ARW costs the same as a JPEG.</li>
+        <li>One small on-device vision model, MobileCLIP, embeds every photo and six sampled frames per clip.</li>
+        <li>Scene cuts come from a keyframe pass at reduced size.</li>
+        <li>Faces are found on the preview and matched by a compact face embedding.</li>
+        <li>Everything runs on the M1's GPU and CPU inside 8 GB. Nothing leaves the Mac, no internet needed.</li>
+        <li>The index lives in Application Support. The shoot disk is never written to, unless you press Reorganise, which has Undo.</li>
+      </ol>
+    </div>
+  </div>
+</div></section>
+
+<section class="video" id="video"><div class="block lav wrap">
+  <div class="split">
+    <div class="split-copy">
+      <h2 data-reveal="lines">Photos and videos, together.</h2>
+      <p data-reveal="lines">JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips in one grid. A clip gets a whole-clip label and a scene breakdown: every setup in a B-roll gets its own labelled stretch, and you export the whole clip or just the matching trimmed segment. Interviews longer than ten minutes with people talking are flagged interview on their own.</p>
+      <p data-reveal="lines">Face detection runs on stills. Clips do not get faces yet; they get the breakdown instead. That is the honest state of the beta.</p>
+    </div>
+    <div class="clip" id="clip" data-reveal="unmask">
+      <div class="clip-frame">
+        <i class="clip-layer on" style="--u:url(img/harbour.webp)"></i><i class="clip-layer" style="--u:url(img/hari1.webp)"></i><i class="clip-layer" style="--u:url(img/boatman.webp)"></i><i class="clip-layer" style="--u:url(img/alley.webp)"></i>
+        <span class="clip-time mono" id="clip-time">00:00</span>
+        <span class="clip-name mono">DAY-2/CAM-B/C0031.MP4 · 4K · 2:48</span>
+      </div>
+      <div class="clip-track" id="clip-track">
+        <i class="playhead" id="playhead"></i>
+        <span class="segment on" style="--w:22"><b>wide, harbour</b></span>
+        <span class="segment" style="--w:34"><b>interview, elderly man</b></span>
+        <span class="segment" style="--w:26"><b>fishing boats, close</b></span>
+        <span class="segment" style="--w:18"><b>market street</b></span>
+      </div>
+      <p class="clip-cap">Scene breakdown. Each stretch exports on its own.</p>
+    </div>
+  </div>
+</div></section>
+
+<section class="people" id="people"><div class="block peach wrap">
+  <div class="split split-rev">
+    <div class="split-copy">
+      <h2 data-reveal="lines">Every face, one person.</h2>
+      <p data-reveal="lines">Group faces sorts every detected face in the stills into people. When two groups look alike, the app asks once, Same or Different, and remembers the answer on every regrouping. Drop in one photo of someone and the grid fills with every frame of them. Name them and they are saved with the shoot.</p>
+    </div>
+    <div class="merge-demo" id="merge-demo" data-reveal="unmask">
+      <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered</span></div>
+      <div class="merge-row big" id="big-merge">
+        <div class="merge-side">
+          <div class="merge-faces" id="big-left"><i class="face" style="--u:url(img/hari1.webp);--pos:53% 56%;--z:400%"></i><i class="face" style="--u:url(img/hari2.webp);--pos:50% 30%"></i></div>
+          <span class="merge-name" id="big-name">Hari</span>
+        </div>
+        <span class="merge-sep"></span>
+        <div class="merge-side" id="big-rightside">
+          <div class="merge-faces" id="big-right"><i class="face" style="--u:url(img/hari3.webp);--pos:50% 24%"></i><i class="face" style="--u:url(img/hari4.webp);--pos:50% 30%"></i><i class="face more">+32</i></div>
+          <span class="merge-name">group of 34</span>
+        </div>
+        <span class="merge-act"><span class="merge-sim" id="big-sim">71% alike</span><button type="button" class="btn" id="big-same">Same</button><button type="button" class="btn" id="big-diff">Different</button></span>
+      </div>
+      <p class="merge-cap" id="merge-cap">Press Same. The groups join and the answer is kept.</p>
+    </div>
+  </div>
+</div></section>
+
+<section class="room" id="room"><div class="block mint wrap">
+  <h2 data-reveal="lines">Offline. No data leak. Ever.</h2>
+  <div class="room-grid" data-reveal="rows">
+    <p>Works fully offline. No account needed to sort. No upload, no telemetry. The vision model and the face detector run on the Mac, the index lives next to the shoot, and nothing leaves the Mac, ever. The only bytes that go anywhere are the ones you send to a client's Drive yourself.</p>
+    <p>The shoot disk is opened read-only and stays byte for byte as it was. Search, people, categories and export never write to it.</p>
+    <p>The one exception is Reorganise. It renames files into a sorted folder on the same disk, writes an undo manifest first, never deletes or overwrites anything, and Undo puts every file back where it was.</p>
+  </div>
+</div></section>
+
+<section class="uses wrap" id="uses">
+  <h2 data-reveal="lines">Eleven ways in.</h2>
+  <p class="lede" data-reveal="lines">Editors, designers, agencies, wedding photographers, filmmakers, documentary editors, photographers, and anyone with a pile of cards. One line each: what you type, or what you tick. Hover a word to see what comes back.</p>
+  <div class="uses-grid">
+    <ol class="uc-list" id="uc-list">
+      <li class="uc"><h3>Editors and post houses</h3><p>Search forty hours of rushes in words: <button type="button" class="chip" data-q="interview">interview</button>, <button type="button" class="chip" data-q="market street">market street</button>. Pull the selects, get the scene breakdown per clip, reorganise the drive with Undo.</p></li>
+      <li class="uc"><h3>Designers</h3><p>Open the index bundle the studio sends and the whole shoot is already sorted and searchable on your Mac. Find the frame for the layout by describing it: <button type="button" class="chip" data-q="sunset sea">sunset sea</button>, <button type="button" class="chip" data-q="bride portrait">bride portrait</button>. Export just the picks into the deck folder.</p></li>
+      <li class="uc"><h3>Wedding photographers</h3><p>Every frame of the bride's parents from one photo. Type <button type="button" class="chip" data-q="varmala">varmala</button>, <button type="button" class="chip" data-q="haldi">haldi</button> or <button type="button" class="chip" data-q="couple on the stage">couple on the stage</button>. Cull the soft ones with the sharp slider. Every photo of the couple's parents, in their Drive before the reception ends.</p></li>
+      <li class="uc"><h3>Cinematographers and DOPs</h3><p>A scene breakdown per clip. Tick <button type="button" class="chip" data-q="aerial">drone shots</button>. Type <button type="button" class="chip" data-q="golden hour beach">golden hour beach</button>. Pull selects by look.</p></li>
+      <li class="uc"><h3>Documentary crews</h3><p>Forty hours of interviews and B-roll, interviews flagged automatically. Type <button type="button" class="chip" data-q="market">market</button>, <button type="button" class="chip" data-q="fishing boats">fishing boats</button> or <button type="button" class="chip" data-q="elderly man">elderly man</button>. Find the one sound bite location again.</p></li>
+      <li class="uc"><h3>Corporate and brand shoots</h3><p>Every shot of the client or the CEO from one photo. Type <button type="button" class="chip" data-q="office interior">office interior</button>, <button type="button" class="chip" data-q="handshake">handshake</button> or <button type="button" class="chip" data-q="product on a table">product on a table</button>. The client's own frames, in their folder, same day.</p></li>
+      <li class="uc"><h3>Event and conference photographers</h3><p>Type <button type="button" class="chip" data-q="speaker on stage">speaker on stage</button> or <button type="button" class="chip" data-q="audience">audience</button>. One folder per speaker from one reference photo each.</p></li>
+      <li class="uc"><h3>Travel and lifestyle creators</h3><p>Type <button type="button" class="chip" data-q="sunset">sunset</button>, <button type="button" class="chip" data-q="food">food</button>, <button type="button" class="chip" data-q="temple">temple</button> or <button type="button" class="chip" data-q="street">street</button>. Pick the reel material from a month of cards in minutes.</p></li>
+      <li class="uc"><h3>Real estate and architecture</h3><p>Type <button type="button" class="chip" data-q="kitchen">kitchen</button>, <button type="button" class="chip" data-q="balcony">balcony</button>, <button type="button" class="chip" data-q="pool">pool</button> or <button type="button" class="chip" data-q="facade">facade</button>. One folder per room type per property.</p></li>
+      <li class="uc"><h3>Drone operators</h3><p>Aerials filtered from the metadata. Type <button type="button" class="chip" data-q="coastline">coastline</button> or <button type="button" class="chip" data-q="construction site">construction site</button>. Separate the drone reel from the ground unit.</p></li>
+      <li class="uc"><h3>Archives and studios with old drives</h3><p>Plug in a 2019 disk and search it like it was shot yesterday: <button type="button" class="chip" data-q="harbour morning">harbour morning</button>. Nothing uploaded, nothing moved.</p></li>
+    </ol>
+    <div class="uc-preview" id="uc-preview" aria-live="polite">
+      <div class="uc-bar"><span class="q-wrap"><span class="uc-q" id="uc-q">varmala</span></span><span class="uc-n" id="uc-n"></span></div>
+      <div class="uc-grid" id="uc-grid"></div>
+    </div>
+  </div>
+</section>
+
+<section class="beta" id="join"><div class="block lav wrap">
+  <p class="badge" data-reveal="fade">public beta, testing right now</p>
+  <h2 data-reveal="lines">Runs on a Mac. Write and tell me what you shoot.</h2>
+  <div class="cta-row" data-reveal="fade">
+    <a class="cta magnetic" href="#beta">Join the beta</a>
+    <a class="cta cta-ghost magnetic" href="https://github.com/kirtan-00/photosort" rel="noopener">See it on GitHub</a>
+  </div>
+  <p class="beta-note" data-reveal="fade">A name, an email, what you shoot. The build comes back with what to try first.</p>
+</div></section>
+
+<section id="beta"></section>
+
+</main>
+
+<footer class="foot wrap">
+  <span class="wordmark"></span>
+  <span>made in Ahmedabad</span>
+  <a class="ul foot-credits" href="credits.html">Photos: Pexels photographers, listed here</a>
+  <a class="ul" href="https://github.com/kirtan-00/photosort" rel="noopener">GitHub</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.13.0/ScrollTrigger.min.js"></script>
+<script src="main.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" defer></script>
+<script src="beta.js" defer></script>
+</body>
+</html>

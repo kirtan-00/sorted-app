@@ -1,0 +1,13 @@
+.venv/
+models/*.onnx
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/fixtures/private/
+.photosort/
+photosort-out/
+.DS_Store
+*.egg-info/
+.worktrees/
+docs/ui-screens/
+docs/site-screens/

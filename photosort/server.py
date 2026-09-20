@@ -1,0 +1,1317 @@
+from __future__ import annotations
+import json
+import mimetypes
+import shutil
+import sqlite3
+import subprocess
+import threading
+import time
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from . import db
+from . import classify as classify_mod
+from . import focus as focus_mod
+from . import settings
+from .config import app_home, export_root
+from .search import Index, Filters
+from .export import export_ids, export_bytes
+
+UI = Path(__file__).parent / "ui"
+RECENT_FILE = "recent.json"
+RECENT_MAX = 8
+
+
+class ExportReq(BaseModel):
+    ids: list[int]
+    name: str
+    mode: str = "copy"
+
+
+class NameReq(BaseModel):
+    name: str
+
+
+class RenameReq(BaseModel):
+    old: str
+    new: str
+
+
+class ClusterReq(BaseModel):
+    eps: float | None = None        # None: FACE_CLUSTER_EPS
+
+
+class MergeReq(BaseModel):
+    keep: int
+    drop: int
+
+
+class RejectReq(BaseModel):
+    a: int
+    b: int
+
+
+class IndexReq(BaseModel):
+    faces: bool = True
+    retry_errors: bool = False
+
+
+class ModeReq(BaseModel):
+    mode: str = "copy"
+
+
+class ReorganisePlanReq(BaseModel):
+    by_people: bool = False
+
+
+class ReorganiseApplyReq(BaseModel):
+    plan_id: str
+    confirm: str          # the shoot folder's name, typed back
+
+
+class FolderReq(BaseModel):
+    path: str
+
+
+class FindReq(BaseModel):
+    path: str
+    min_sim: float | None = None
+
+
+class DestinationReq(BaseModel):
+    path: str
+
+
+class CategoriesExportReq(BaseModel):
+    categories: list[str] | None = None     # fixed categories; None = every one that has a photo
+    discovered: list[str] | None = None     # discovered names; None or [] = none
+    mode: str = "copy"
+    include_raw: bool = False
+    include_unsure: bool = False            # also the "less sure" band (score under SURE_MIN, or a guess)
+    videos: str = "clips"                   # or "segments": only the scenes labelled the ticked category, trimmed
+    drone: bool = False                     # every aerial row (any kind, any category) also under categories/drone/
+    hide_bad: bool = False                  # leave out rows the focus pass labelled bad
+
+
+class ReferenceReq(BaseModel):
+    name: str
+    path: str
+
+
+class MinSimReq(BaseModel):
+    min_sim: float | None = None
+
+
+class ReferencesExportReq(BaseModel):
+    names: list[str] | None = None
+    mode: str = "copy"
+    include_raw: bool = False
+    min_sim: float | None = None
+
+
+class BundleImportReq(BaseModel):
+    zip: str
+    root: str | None = None
+
+
+class BundleZipReq(BaseModel):
+    zip: str
+
+
+class DriveLinkReq(BaseModel):
+    link: str
+
+
+class DriveExportReq(BaseModel):
+    link: str
+    what: str                               # "categories", "people" or "selection"
+    categories: list[str] | None = None     # categories: as CategoriesExportReq
+    discovered: list[str] | None = None
+    include_unsure: bool = False
+    videos: str = "clips"                   # "segments" is refused for Drive in this pass
+    drone: bool = False
+    hide_bad: bool = False
+    names: list[str] | None = None          # people: saved names, None = every one
+    min_sim: float | None = None
+    ids: list[int] = []                     # selection
+    name: str = "selection"                 # selection: the subfolder under the Drive folder
+    include_raw: bool = False
+    web_size: int | None = None             # long edge in px for photos; videos and RAW go as is
+    skip_videos: bool = False               # with web_size: leave videos out altogether
+
+
+def _load_recent() -> list[str]:
+    p = app_home() / RECENT_FILE
+    if not p.is_file():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_recent(path_str: str) -> None:
+    p = app_home() / RECENT_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    recent = [r for r in _load_recent() if r != path_str]
+    recent.insert(0, path_str)
+    p.write_text(json.dumps(recent[:RECENT_MAX]))
+
+
+def create_app(root: Path | None = None) -> FastAPI:
+    root = Path(root) if root is not None else None
+    app = FastAPI(title="photosort")
+    state = {
+        "root": root,
+        "index": Index(root) if root is not None else None,
+        "progress": {"stage": "idle", "done": 0, "total": 0},
+        "running": False,
+        "stale": False,
+        "classify": {"running": False, "counts": {}, "discovered": {}, "error": None},
+        "focus": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
+        # Where exports land instead of export_root() (another disk), or None for the default.
+        "export_base": settings.get_export_base(),
+        # Held from the "already running" check through setting running=True, and around a folder
+        # switch, so two rapid export POSTs (or a switch during the preflight) cannot both pass.
+        "export_lock": threading.Lock(),
+        "focus_lock": threading.Lock(),
+    }
+    app.state.photosort = state
+
+    def _folder_info() -> dict:
+        r = state["root"]
+        if r is None:
+            return {"root": None, "name": None, "indexed": False}
+        conn = db.connect(r)
+        n = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
+        return {"root": str(r), "name": r.name or str(r), "indexed": n > 0}
+
+    def _switch_root(new_root: Path) -> dict:
+        if state["running"]:
+            raise HTTPException(409, "cannot switch folders while indexing")
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot switch folders while an export is running")
+            state["root"] = new_root
+            state["index"] = Index(new_root)
+            state["progress"] = {"stage": "idle", "done": 0, "total": 0}
+            state["stale"] = False
+            state["classify"] = {"running": False, "counts": {}, "discovered": {}, "error": None}
+            state["focus"] = {"running": False, "done": 0, "total": 0, "counts": {}, "error": None}
+            state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None}
+        _save_recent(str(new_root))
+        return _folder_info()
+
+    def _auto_classify(root_at_start: Path, stats: dict) -> None:
+        """Categorise at the end of an index run that changed something. A classify failure is
+        recorded on state["classify"] and never marks the index run itself as failed."""
+        if stats.get("indexed", 0) == 0 and stats.get("embedded", 0) == 0 and stats.get("faced", 0) == 0:
+            return
+        if state["classify"]["running"]:          # a manual Categorise is already on it
+            return
+        total = stats.get("total", 0)
+        state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
+        state["progress"] = {"stage": "categorise", "done": 0, "total": 0, "stage_started": time.time()}
+        try:
+            state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
+            state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
+        except Exception as e:
+            state["classify"]["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            state["classify"]["running"] = False
+            state["progress"] = {"stage": "done", "done": total, "total": total, "stage_started": time.time()}
+
+    def _run(root_at_start: Path, faces: bool, retry_errors: bool):
+        from .index import index_folder
+        def prog(d):
+            state["progress"] = d
+        try:
+            stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
+            _auto_classify(root_at_start, stats)
+        except Exception as e:
+            from .index import SourceUnavailable
+            msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
+            state["progress"] = {"stage": "error", "error": msg, "done": 0, "total": 0}
+        finally:
+            state["running"] = False
+            state["stale"] = True
+
+    def ix() -> Index:
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["stale"]:
+            state["index"].refresh()
+            state["stale"] = False
+        return state["index"]
+
+    @app.get("/")
+    def home():
+        return FileResponse(UI / "index.html")
+
+    @app.get("/ui/{name}")
+    def ui(name: str):
+        p = UI / name
+        if not p.is_file():
+            raise HTTPException(404)
+        return FileResponse(p)
+
+    @app.get("/api/folder")
+    def get_folder():
+        return _folder_info()
+
+    @app.post("/api/folder/choose")
+    def choose_folder():
+        # Same gates as _switch_root, checked up front so nobody sits through the picker for a 409.
+        if state["running"]:
+            raise HTTPException(409, "cannot switch folders while indexing")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot switch folders while an export is running")
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Pick the photo folder")'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "folder picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, "folder picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return Response(status_code=204)
+        p = Path(path_str)
+        if not p.is_dir():
+            raise HTTPException(400, f"not a directory: {path_str}")
+        return _switch_root(p)
+
+    @app.post("/api/folder")
+    def set_folder(req: FolderReq):
+        p = Path(req.path).expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"not a directory: {req.path}")
+        return _switch_root(p.resolve())
+
+    @app.get("/api/folder/recent")
+    def recent_folders():
+        out = []
+        for path_str in _load_recent():
+            p = Path(path_str)
+            out.append({"path": path_str, "name": p.name or path_str})
+        return {"recent": out}
+
+    @app.get("/api/stats")
+    def stats():
+        root = state["root"]
+        if root is None:
+            return dict(root=None, photos=0, videos=0, faces=0, people=0, errors=0, last_index=None, indexing=state["running"],
+                        faces_pending=0, focus={"checked": 0, "bad": 0, "soft": 0})
+        conn = db.connect(root)
+        n = lambda q: conn.execute(q).fetchone()[0]
+        last = conn.execute("SELECT value FROM meta WHERE key='last_index'").fetchone()
+        kinds = db.kind_counts(conn)
+        return dict(
+            root=str(root),
+            photos=kinds["photos"],
+            videos=kinds["videos"],
+            faces=n("SELECT count(*) FROM faces"),
+            people=n("SELECT count(*) FROM people"),
+            errors=n("SELECT count(*) FROM photos WHERE status='error'"),
+            last_index=last[0] if last else None,
+            indexing=state["running"],
+            faces_pending=n("SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL"),
+            focus={k: v for k, v in focus_mod.status(root).items() if k != "unchecked"},
+        )
+
+    @app.get("/api/errors")
+    def errors():
+        if state["root"] is None:
+            return {"errors": []}
+        conn = db.connect(state["root"])
+        rows = conn.execute("SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel").fetchall()
+        return {"errors": [{"rel": r[0], "indexed_at": r[1]} for r in rows]}
+
+    @app.post("/api/index")
+    def start_index(req: IndexReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "already indexing")
+        # A reorganise or undo renames files under the root while it runs; an index pass in the
+        # middle would insert sorted/ rows before their old rows are re-keyed.
+        if state["export"]["running"] and state["export"].get("what") in ("reorganise", "undo"):
+            raise HTTPException(409, "cannot index while the disk is being reorganised")
+        if state["focus"]["running"]:
+            raise HTTPException(409, "cannot index while the focus check is running")
+        state["running"] = True
+        threading.Thread(target=_run, args=(state["root"], req.faces, req.retry_errors), daemon=True).start()
+        return {"started": True}
+
+    @app.get("/api/progress")
+    def progress():
+        return dict(state["progress"], running=state["running"])
+
+    def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
+                 hide_bad=0, hide_soft=0) -> Filters:
+        if kind not in (None, "", "photos", "videos"):
+            raise HTTPException(400, "kind must be photos or videos")
+        return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
+                       taken_to=taken_to, category=category or None, kind=kind or None,
+                       cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None,
+                       hide_bad=bool(hide_bad), hide_soft=bool(hide_soft))
+
+    @app.get("/api/search")
+    def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
+               person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
+               category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
+               aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, limit: int = 200, offset: int = 0):
+        """Each result carries kind, duration and aerial, sure and confidence, and focus (None until the focus
+        pass ran, else ok / soft / bad); with a category or cluster filter the sure ones come first, then the
+        "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it).
+        kind=photos|videos keeps one kind; aerial=1 keeps drone shots only; hide_bad=1 drops rows labelled
+        bad, hide_soft=1 drops soft and bad (unchecked rows are never hidden)."""
+        if state["root"] is None:
+            return {"results": [], "total": 0, "offset": 0, "limit": limit}
+        limit = max(1, min(limit, 1000)); offset = max(0, offset)
+        try:
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
+
+    @app.get("/api/search/ids")
+    def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
+                   person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
+                   category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
+                   aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0):
+        if state["root"] is None:
+            return {"ids": [], "total": 0}
+        try:
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft))
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        return {"ids": [p["id"] for p in rows], "total": len(rows)}
+
+    @app.get("/api/thumb/{qhash}")
+    def thumb(qhash: str, size: str = "grid"):
+        if state["root"] is None:
+            raise HTTPException(404)
+        p = db.index_dir(state["root"]) / ("grid" if size == "grid" else "thumbs") / f"{qhash}.jpg"
+        if not p.is_file():
+            raise HTTPException(404)
+        return FileResponse(p, media_type="image/jpeg")
+
+    # Videos: the original file for the lightbox player, and the per-scene breakdown with its frames.
+
+    MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v",
+                   ".mts": "video/mp2t", ".avi": "video/x-msvideo"}
+
+    @app.get("/api/media/{photo_id}")
+    def media(photo_id: int):
+        """The original file, streamed with range support (Starlette's FileResponse), so a <video>
+        can seek. 404 for an unknown id or a file that is not there right now (disk unplugged)."""
+        if state["root"] is None:
+            raise HTTPException(404)
+        r = db.connect(state["root"]).execute("SELECT rel FROM photos WHERE id=?", (photo_id,)).fetchone()
+        if r is None:
+            raise HTTPException(404)
+        p = state["root"] / r[0]
+        if not p.is_file():
+            raise HTTPException(404, "that file is not there right now")
+        mt = MEDIA_TYPES.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        return FileResponse(p, media_type=mt)
+
+    @app.get("/api/segments/{photo_id}")
+    def segments(photo_id: int):
+        if state["root"] is None:
+            raise HTTPException(404)
+        conn = db.connect(state["root"])
+        if conn.execute("SELECT 1 FROM photos WHERE id=?", (photo_id,)).fetchone() is None:
+            raise HTTPException(404)
+        out = [{"idx": s["idx"], "start": s["start"], "end": s["end"], "category": s["category"],
+                "score": s["category_score"], "frame_url": f"/api/frame/{s['frame']}"} for s in db.list_segments(conn, photo_id)]
+        return {"segments": out}
+
+    @app.get("/api/frame/{name}")
+    def frame(name: str):
+        if state["root"] is None:
+            raise HTTPException(404)
+        frames = db.index_dir(state["root"]) / "frames"
+        p = frames / name
+        if "/" in name or name in (".", "..") or p.resolve().parent != frames.resolve() or not p.is_file():
+            raise HTTPException(404)
+        return FileResponse(p, media_type="image/jpeg")
+
+    @app.get("/api/people")
+    def people():
+        if state["root"] is None:
+            return []
+        from .people import list_people
+        return list_people(state["root"])
+
+    @app.post("/api/people/cluster")
+    def cluster(req: ClusterReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        from .people import cluster_faces
+        out = cluster_faces(state["root"], eps=req.eps)
+        state["stale"] = True
+        return out
+
+    @app.post("/api/people/{pid}/name")
+    def name(pid: int, req: NameReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        from .people import name_person
+        name_person(state["root"], pid, req.name)
+        return {"ok": True}
+
+    # "Same person?" merge suggestions. Answers are remembered by face id (db.face_links) and applied on
+    # every re-cluster; a yes merges now, a no hides the pair for good. 409 while indexing: the faces
+    # table is being rewritten under us.
+    @app.get("/api/people/suggestions")
+    def people_suggestions():
+        if state["root"] is None:
+            return {"suggestions": []}
+        if state["running"]:
+            raise HTTPException(409, "indexing")
+        from .people import suggest_merges
+        return {"suggestions": suggest_merges(state["root"])}
+
+    @app.post("/api/people/merge")
+    def people_merge(req: MergeReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "indexing")
+        from .people import merge_people
+        try:
+            out = merge_people(state["root"], req.keep, req.drop)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        state["stale"] = True
+        return out
+
+    @app.post("/api/people/reject")
+    def people_reject(req: RejectReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "indexing")
+        from .people import reject_merge
+        try:
+            reject_merge(state["root"], req.a, req.b)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True}
+
+    def _find_person(p: Path, min_sim: float | None) -> dict:
+        # The reference is only read; results are index rows in the same shape as /api/search
+        # plus score = cosine sim, so the grid can show them unchanged.
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not p.is_file():
+            raise HTTPException(400, f"not a readable file: {p}")
+        from .people import find_by_reference, ReferenceUnreadable
+        from .config import FACE_MATCH_MIN_SIM
+        try:
+            found = find_by_reference(state["root"], p, FACE_MATCH_MIN_SIM if min_sim is None else min_sim, unsure_band=True)
+        except ReferenceUnreadable:
+            raise HTTPException(400, "could not read that image")
+        photos = ix().photos
+        results = [dict(photos[m["photo_id"]], score=m["sim"], sure=m["sure"], confidence=m["sim"])
+                   for m in found["matches"] if m["photo_id"] in photos]
+        out = {"faces_in_reference": found["faces_in_reference"], "person_id": found["person_id"],
+               "total": len(results), "results": results}
+        if found.get("reference_face_too_small"):
+            out["reference_face_too_small"] = True
+        return out
+
+    @app.post("/api/people/find")
+    def find_person(req: FindReq):
+        return _find_person(Path(req.path).expanduser(), req.min_sim)
+
+    @app.post("/api/people/find/choose")
+    def find_person_choose():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose file with prompt "Pick a photo of the person" of type {"public.image"})'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "photo picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, "photo picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return Response(status_code=204)
+        # path rides along so the UI can re-run /api/people/find at another min_sim without the picker.
+        return dict(_find_person(Path(path_str), None), path=path_str)
+
+    # Named people: reference photos saved under a name, matched on demand at the slider's min_sim.
+
+    def _min_sim(v: float | None) -> float:
+        from .config import FACE_MATCH_MIN_SIM
+        return FACE_MATCH_MIN_SIM if v is None else v
+
+    @app.post("/api/people/references")
+    def save_reference_api(req: ReferenceReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        p = Path(req.path).expanduser()
+        if not p.is_file():
+            raise HTTPException(400, f"not a readable file: {p}")
+        from .people import save_reference, ReferenceUnreadable
+        try:
+            out = save_reference(state["root"], req.name, p)
+        except ReferenceUnreadable:
+            raise HTTPException(400, "could not read that image")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"id": out["id"], "name": out["name"], "faces_in_reference": out["faces_in_reference"]}
+
+    @app.get("/api/people/references")
+    def list_references_api(min_sim: float | None = None):
+        if state["root"] is None:
+            return {"people": []}
+        from .people import match_references
+        conn = db.connect(state["root"])
+        groups: dict[str, dict] = {}
+        for r in db.list_references(conn):      # every saved name, even one with no match at this min_sim
+            g = groups.setdefault(r["name"], {"name": r["name"], "reference_ids": [], "sources": [], "count": 0})
+            g["reference_ids"].append(r["id"]); g["sources"].append(r["source"])
+        matched = match_references(state["root"], _min_sim(min_sim))
+        for name, g in groups.items():
+            g["count"] = len(matched.get(name, []))
+        return {"people": sorted(groups.values(), key=lambda g: (-g["count"], g["name"]))}
+
+    def _reference_names() -> set[str]:
+        return {r["name"] for r in db.list_references(db.connect(state["root"]))}
+
+    @app.post("/api/people/references/{name:path}/find")
+    def find_reference_api(name: str, req: MinSimReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if name not in _reference_names():
+            raise HTTPException(404, f"no saved person called {name!r}")
+        from .people import match_references
+        photos = ix().photos
+        matches = match_references(state["root"], _min_sim(req.min_sim), unsure_band=True).get(name, [])
+        results = [dict(photos[m["photo_id"]], score=m["sim"], sure=m["sure"], confidence=m["sim"])
+                   for m in matches if m["photo_id"] in photos]
+        return {"name": name, "total": len(results), "results": results}
+
+    @app.post("/api/people/references/{name:path}/rename")
+    def rename_reference_api(name: str, req: NameReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        new = req.name.strip()
+        if not new:
+            raise HTTPException(400, "give the person a name")
+        from .export import safe_segment
+        try:
+            safe_segment(new)
+        except ValueError:
+            raise HTTPException(400, "that name cannot be used as a folder")
+        moved = db.rename_reference(db.connect(state["root"]), name, new)
+        if moved == 0:
+            raise HTTPException(404, f"no saved person called {name!r}")
+        return {"ok": True, "name": new, "moved": moved}
+
+    @app.delete("/api/people/references/{ref_id}")
+    def delete_reference_api(ref_id: int):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not db.delete_reference(db.connect(state["root"]), ref_id):
+            raise HTTPException(404, "no such reference")
+        return {"ok": True}
+
+    def _fixed_order(counts: dict[str, int]) -> dict[str, int]:
+        """The tile order: CATEGORIES in their calibrated order, then "other", then "unclassified" (SQLite's
+        GROUP BY would hand them back alphabetically)."""
+        order = list(classify_mod.CATEGORIES) + [classify_mod.FALLBACK, "unclassified"]
+        return {k: counts[k] for k in order if k in counts} | {k: v for k, v in counts.items() if k not in order}
+
+    @app.get("/api/categories")
+    def categories():
+        """fixed: the CATEGORIES counts (plus "other" and "unclassified"); discovered: the k-means
+        clusters named from the vocabulary, largest first, empty until Categorise has run; drone: how many
+        rows are flagged aerial (a flag across categories, the last tile of the fixed row)."""
+        if state["root"] is None:
+            return {"fixed": {}, "discovered": {}, "drone": 0}
+        conn = db.connect(state["root"])
+        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn)}
+
+    @app.post("/api/categories/discovered/rename")
+    def rename_discovered(req: RenameReq):
+        """Rename a discovered category (an unnamed "group N", or a wrong name) in place. 409 while
+        indexing or categorising: both rewrite the cluster column underneath the rename."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot rename while indexing")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "cannot rename while categorising")
+        try:
+            moved = classify_mod.rename_cluster(state["root"], req.old, req.new)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if moved == 0:
+            raise HTTPException(404, f"no discovered category called {req.old!r}")
+        state["stale"] = True      # the search Index caches the cluster column
+        return {"ok": True, "name": req.new.strip(), "moved": moved}
+
+    @app.post("/api/classify")
+    def start_classify():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "already categorising")
+        if state["focus"]["running"]:
+            raise HTTPException(409, "cannot categorise while the focus check is running")
+        state["classify"] = {"running": True, "counts": {}, "discovered": {}, "error": None}
+        root_at_start = state["root"]
+
+        def _run_classify():
+            # Both bars fill in one pass: the fixed categories first, then the discovered ones. The Index
+            # is marked stale in finally, after both: a search in between would refresh it and clear the
+            # flag, and the cluster columns written after that would never reach the next search.
+            try:
+                state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
+                state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
+            except Exception as e:
+                state["classify"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["classify"]["running"] = False
+
+        threading.Thread(target=_run_classify, daemon=True).start()
+        return {"started": True}
+
+    @app.get("/api/classify/progress")
+    def classify_progress():
+        return state["classify"]
+
+    # The on-demand focus pass: started from the "hide blurry" filter, never at the end of an index.
+    # Same job shape as classify: one background thread, progress polled, the Index marked stale after.
+
+    @app.post("/api/focus")
+    def start_focus():
+        """Label unchecked rows ok / soft / bad (focus.check_focus). 409 while indexing, categorising or
+        exporting, or while a focus pass is already running. {"started": true, "total": n} with n the rows
+        that will be checked (0 is fine: the job ends at once)."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot check focus while indexing")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "cannot check focus while categorising")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot check focus while an export is running")
+        with state["focus_lock"]:
+            if state["focus"]["running"]:
+                raise HTTPException(409, "already checking focus")
+            root_at_start = state["root"]
+            total = focus_mod.status(root_at_start)["unchecked"]
+            state["focus"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def prog(d):
+            state["focus"].update(done=d.get("done", 0), total=d.get("total", total))
+
+        def _run_focus():
+            try:
+                state["focus"]["counts"] = focus_mod.check_focus(root_at_start, progress=prog)
+            except Exception as e:
+                state["focus"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["focus"]["running"] = False
+
+        threading.Thread(target=_run_focus, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.get("/api/focus/progress")
+    def focus_progress():
+        """{running, done, total, counts, error}; counts is {ok, soft, bad, checked} once the pass ended."""
+        return state["focus"]
+
+    @app.get("/api/focus/status")
+    def focus_status():
+        """{checked, unchecked, bad, soft} over the shoot, for "412 of 955 checked" next to the filter."""
+        if state["root"] is None:
+            return {"checked": 0, "unchecked": 0, "bad": 0, "soft": 0}
+        return focus_mod.status(state["root"])
+
+    EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the destination disk after a copy
+
+    def _is_default_base(base: Path) -> bool:
+        return Path(base).resolve() == export_root().resolve()
+
+    def _resolve_base() -> Path:
+        """The folder exports go under right now. The default is created on demand; a chosen
+        destination (another disk) must already be there or the export is refused."""
+        base = state["export_base"]
+        if base is None:
+            base = export_root(); base.mkdir(parents=True, exist_ok=True)
+            return base
+        if not base.is_dir():
+            raise HTTPException(400, "export destination is not mounted; plug that disk in or reset the destination")
+        return base
+
+    def _check_free(need: int, base: Path, hint: str = "Use links, or export fewer photos.") -> None:
+        """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the disk holding base."""
+        free = shutil.disk_usage(base).free
+        where = "on this Mac" if _is_default_base(base) else "on that disk"
+        if need + EXPORT_HEADROOM > free:
+            raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free {where}. {hint}")
+
+    def _destination_info() -> dict:
+        base = state["export_base"]
+        default = base is None
+        if default:
+            base = export_root(); base.mkdir(parents=True, exist_ok=True)
+        mounted = base.is_dir()
+        free_gb = round(shutil.disk_usage(base).free / 1e9, 1) if mounted else 0.0
+        return {"path": str(base), "default": default, "mounted": mounted, "free_gb": free_gb}
+
+    def _set_destination(p: Path) -> dict:
+        p = p.expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"not a directory: {p}")
+        p = p.resolve()
+        root = state["root"]
+        if root is not None:
+            r = root.resolve()
+            if p == r or p.is_relative_to(r):
+                raise HTTPException(400, "destination is inside the source folder")
+            if r.is_relative_to(p):
+                raise HTTPException(400, "destination contains the source folder; pick a folder that is not above it")
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot change the destination while an export is running")
+            state["export_base"] = p
+        settings.set_export_base(p)
+        return _destination_info()
+
+    @app.get("/api/export/destination")
+    def get_export_destination():
+        return _destination_info()
+
+    @app.post("/api/export/destination")
+    def set_export_destination(req: DestinationReq):
+        return _set_destination(Path(req.path))
+
+    @app.post("/api/export/destination/choose")
+    def choose_export_destination():
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Pick where exports go")'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "folder picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, "folder picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return Response(status_code=204)
+        return _set_destination(Path(path_str))
+
+    @app.delete("/api/export/destination")
+    def reset_export_destination():
+        with state["export_lock"]:
+            if state["export"]["running"]:
+                raise HTTPException(409, "cannot change the destination while an export is running")
+            state["export_base"] = None
+        settings.set_export_base(None)
+        return _destination_info()
+
+    @app.post("/api/export")
+    def export(req: ExportReq):
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            if req.mode == "copy":
+                _check_free(export_bytes(root_at_start, req.ids), base)
+            try:
+                from .export import export_dir
+                export_dir(root_at_start, req.name, base)   # validate now so a bad name or base is a 400, not a background error
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "skipped": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": len(req.ids)}
+
+    @app.get("/api/export/progress")
+    def export_progress():
+        return state["export"]
+
+    @app.post("/api/export/categories")
+    def export_categories_api(req: CategoriesExportReq):
+        """One folder per ticked category under <destination>/<shoot>/categories/. Same job
+        machinery as /api/export: one export at a time, preflight for copies, progress polled
+        from /api/export/progress. total in the reply counts photos; progress counts RAW siblings too."""
+        from .export import export_dir, export_categories, category_rows, cluster_rows, categories_bytes, aerial_rows
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        if req.categories is not None and not req.categories and not req.discovered and not req.drone:
+            raise HTTPException(400, "tick at least one category")
+        if req.videos not in ("clips", "segments"):
+            raise HTTPException(400, "videos must be clips or segments")
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            n_photos = (len(category_rows(root_at_start, req.categories, req.include_unsure, req.hide_bad))
+                        + len(cluster_rows(root_at_start, req.discovered, req.include_unsure, req.hide_bad))
+                        + (len(aerial_rows(root_at_start, req.hide_bad)) if req.drone else 0))
+            # Trimmed segments are always written, so the preflight runs for them even in link mode.
+            if req.mode == "copy" or req.videos == "segments":
+                _check_free(categories_bytes(root_at_start, req.categories, req.include_raw, discovered=req.discovered,
+                                             include_unsure=req.include_unsure, videos=req.videos, drone=req.drone,
+                                             hide_bad=req.hide_bad), base)
+            try:
+                export_dir(root_at_start, "categories", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
+                                                                base=base, progress=prog, discovered=req.discovered,
+                                                                include_unsure=req.include_unsure, videos=req.videos,
+                                                                drone=req.drone, hide_bad=req.hide_bad))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_photos}
+
+    @app.post("/api/export/references")
+    def export_references_api(req: ReferencesExportReq):
+        """One folder per saved (or listed) person under <destination>/<shoot>/people/, matched at
+        min_sim. Same job machinery as /api/export/categories. total in the reply counts photo
+        placements (a frame with two people counts twice); progress counts RAW siblings too."""
+        from .export import export_dir
+        from .people import export_references, export_references_ids, references_bytes
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        if req.names is not None and not req.names:
+            raise HTTPException(400, "tick at least one person")
+        min_sim = _min_sim(req.min_sim)
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            folders = export_references_ids(root_at_start, req.names, min_sim)
+            n_photos = sum(len(ids) for ids in folders.values())
+            if n_photos == 0:
+                raise HTTPException(400, "no saved person matches any photo at this match level")
+            if req.mode == "copy":
+                _check_free(references_bytes(root_at_start, req.names, req.include_raw, min_sim), base)
+            try:
+                export_dir(root_at_start, "people", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(export_references(root_at_start, req.names, req.mode, req.include_raw,
+                                                                base=base, progress=prog, min_sim=min_sim))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_photos}
+
+    # Google Drive as a destination (photosort/drive.py): paste a folder link, the app uploads the
+    # same three exports (ticked categories, saved people, a selection) into it. The upload rides the
+    # export job machinery with what == "drive": one job at a time, progress from /api/export/progress,
+    # path is the folder's web link when done, failures the per-file list. Sign-in opens the browser
+    # from a thread; status says when it is through.
+    from . import drive as drive_mod
+
+    state["drive"] = {"signing_in": False, "error": None}
+
+    def _drive_status() -> dict:
+        prefs = settings.get_drive_prefs()
+        return {"configured": drive_mod.client_path().is_file(), "signed_in": drive_mod.is_signed_in(),
+                "email": drive_mod.signed_in_email(), "client_path": str(drive_mod.client_path()),
+                "signing_in": state["drive"]["signing_in"], "error": state["drive"]["error"],
+                "link": prefs["link"], "web_size": prefs["web_size"]}
+
+    def _drive_folder(link: str) -> str:
+        try:
+            return drive_mod.parse_folder_link(link)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    def _drive_call(fn, *a, **kw):
+        """Run one drive call, mapping its plain errors to HTTP: 401 not signed in, 400 no client
+        file or a refused folder."""
+        try:
+            return fn(*a, **kw)
+        except drive_mod.NotSignedIn as e:
+            raise HTTPException(401, str(e))
+        except (drive_mod.NoClientConfig, ValueError) as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/drive/status")
+    def drive_status():
+        return _drive_status()
+
+    @app.post("/api/drive/signin")
+    def drive_signin():
+        """Start the browser sign-in in a thread and return at once; poll /api/drive/status for
+        signing_in to drop and signed_in (or error) to say how it went. 409 while one is open."""
+        if state["drive"]["signing_in"]:
+            raise HTTPException(409, "a sign-in is already open in the browser")
+        state["drive"] = {"signing_in": True, "error": None}
+
+        def _run():
+            try:
+                drive_mod.sign_in()
+            except Exception as e:
+                state["drive"]["error"] = str(e) if isinstance(e, (drive_mod.NoClientConfig, ValueError)) else f"{type(e).__name__}: {e}"
+            finally:
+                state["drive"]["signing_in"] = False
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True}
+
+    @app.post("/api/drive/signout")
+    def drive_signout():
+        drive_mod.sign_out()
+        return {"signed_in": False}
+
+    @app.post("/api/drive/inspect")
+    def drive_inspect(req: DriveLinkReq):
+        """The folder behind a pasted link: name, owner, whether our quota applies and how much is free."""
+        folder_id = _drive_folder(req.link)
+        info = _drive_call(drive_mod.inspect_folder, folder_id)
+        return dict(info, link=drive_mod.folder_link(folder_id))
+
+    @app.post("/api/drive/export")
+    def drive_export(req: DriveExportReq):
+        """Upload one of the three exports into the Drive folder. The job list comes from the same
+        planners the local exports use (category_jobs, folder_jobs, ids_jobs), prefixed categories/,
+        people/ or <name>/ under the folder. Reply total counts files (RAW siblings included)."""
+        from .export import category_jobs, folder_jobs, ids_jobs, jobs_bytes, safe_segment
+        from .people import export_references_ids
+        folder_id = _drive_folder(req.link)
+        if req.what not in ("categories", "people", "selection"):
+            raise HTTPException(400, "what must be categories, people or selection")
+        if req.what == "categories":
+            if req.categories is not None and not req.categories and not req.discovered and not req.drone:
+                raise HTTPException(400, "tick at least one category")
+            if req.videos == "segments":
+                raise HTTPException(400, "trimmed segments cannot go to Drive yet; export whole clips, or segments to a folder")
+            if req.videos != "clips":
+                raise HTTPException(400, "videos must be clips or segments")
+        if req.what == "people" and req.names is not None and not req.names:
+            raise HTTPException(400, "tick at least one person")
+        if req.what == "selection" and not req.ids:
+            raise HTTPException(400, "nothing selected")
+        if req.web_size is not None and req.web_size < 100:
+            raise HTTPException(400, "web size must be at least 100 px")
+        if not drive_mod.is_signed_in():       # the token carries the client id too; the client file is only for sign-in
+            raise HTTPException(401, str(drive_mod.NotSignedIn()))
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            if req.what == "categories":
+                planned, _segs = category_jobs(root_at_start, req.categories, req.include_raw, req.discovered,
+                                               req.include_unsure, "clips", req.drone, req.hide_bad)
+                jobs = [(pid, rel, "categories/" + sub) for pid, rel, sub in planned]
+            elif req.what == "people":
+                folders = export_references_ids(root_at_start, req.names, _min_sim(req.min_sim))
+                if not any(folders.values()):
+                    raise HTTPException(400, "no saved person matches any photo at this match level")
+                jobs = [(pid, rel, "people/" + sub) for pid, rel, sub in folder_jobs(root_at_start, folders, req.include_raw)]
+            else:
+                try:
+                    top = safe_segment(req.name or "selection")
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+                jobs = [(pid, rel, top) for pid, rel, _ in ids_jobs(root_at_start, req.ids, req.include_raw)]
+            msg = _drive_call(drive_mod.preflight, folder_id, jobs_bytes(root_at_start, jobs))
+            if msg:
+                raise HTTPException(400, msg)
+            settings.set_drive_prefs(req.link, req.web_size)
+            state["export"] = {"running": True, "done": 0, "total": len(jobs), "failed": 0, "skipped": 0, "path": None,
+                               "error": None, "what": "drive", "bytes": 0, "current": None, "failures": []}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                res = drive_mod.upload_files(root_at_start, folder_id, jobs, web_size=req.web_size,
+                                             skip_videos=req.skip_videos, progress=prog)
+                state["export"]["failures"] = res["failures"]
+                state["export"]["path"] = drive_mod.folder_link(folder_id)
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, (ValueError, drive_mod.NotSignedIn)) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": len(jobs)}
+
+    # Reorganise disk: the one guarded exception to the read-only shoot root (photosort/reorganise.py).
+    # Plan first (every guard, the full move list cached under a plan id), then apply with the folder's
+    # name typed back as confirmation. Apply and undo ride the export job machinery: one at a time,
+    # progress from /api/export/progress, "what" says which job it is.
+    from . import reorganise as reorganise_mod
+
+    def _reorganise_gates(root_at_start) -> None:
+        if root_at_start is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot reorganise while indexing")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "cannot reorganise while categorising")
+        if state["export"]["running"]:
+            raise HTTPException(409, "an export is already running")
+
+    def _reorganise_job(root_at_start: Path, what: str, total: int, work) -> dict:
+        """Start `work(progress)` as the export job named `what`; on success the search index is refreshed
+        and state["export"]["path"] is the sorted/ folder."""
+        state["export"] = {"running": True, "done": 0, "total": total, "failed": 0, "skipped": 0, "path": None,
+                           "error": None, "what": what}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run():
+            try:
+                work(prog)
+                state["export"]["path"] = str(root_at_start / reorganise_mod.SORTED_DIR)
+                if state["root"] == root_at_start:
+                    state["index"].refresh(); state["stale"] = False
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True, "total": total, "what": what}
+
+    @app.post("/api/reorganise/plan")
+    def reorganise_plan(req: ReorganisePlanReq):
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            _reorganise_gates(root_at_start)
+            try:
+                return reorganise_mod.plan(root_at_start, by_people=req.by_people)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+
+    @app.post("/api/reorganise/apply")
+    def reorganise_apply(req: ReorganiseApplyReq):
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            _reorganise_gates(root_at_start)
+            if req.confirm != root_at_start.name:
+                raise HTTPException(400, f"type the folder name ({root_at_start.name}) to confirm")
+            cached = reorganise_mod._PLANS.get(req.plan_id)
+            if cached is None or cached["root"] != str(root_at_start):
+                raise HTTPException(400, "run the plan first")
+            total = len(cached["moves"])
+            return _reorganise_job(root_at_start, "reorganise", total,
+                                   lambda prog: reorganise_mod.apply(root_at_start, req.plan_id, progress=prog))
+
+    @app.post("/api/reorganise/undo")
+    def reorganise_undo():
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            _reorganise_gates(root_at_start)
+            st = reorganise_mod.status(root_at_start)
+            if not st["reorganised"]:
+                raise HTTPException(400, "nothing to undo")
+            return _reorganise_job(root_at_start, "undo", st["moves"],
+                                   lambda prog: reorganise_mod.undo(root_at_start, progress=prog))
+
+    @app.get("/api/reorganise/status")
+    def reorganise_status():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        return reorganise_mod.status(state["root"])
+
+    # Index bundles: the whole index (db with saved people, thumbs, grid) as one zip on the export
+    # destination, and the reverse: install such a zip here and open the shoot without re-indexing.
+
+    @app.post("/api/bundle/export")
+    def export_bundle_api():
+        from . import bundle
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["running"]:
+                raise HTTPException(409, "cannot pack the index while indexing")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            base = _resolve_base()
+            try:
+                bundle.bundle_path(root_at_start, base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            n_files = len(bundle.bundle_files(root_at_start))
+            _check_free(bundle.bundle_bytes(root_at_start), base, hint="Free some space there first.")
+            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None}
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                state["export"]["path"] = str(bundle.export_bundle(root_at_start, base, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n_files}
+
+    def _import_gates() -> None:
+        # Same gates as _switch_root, checked up front so nobody sits through a picker for a 409.
+        if state["running"]:
+            raise HTTPException(409, "cannot import an index while indexing")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot import an index while an export is running")
+
+    def _run_picker(script: str, what: str) -> str | None:
+        """POSIX path from a macOS picker, or None when the user cancelled."""
+        try:
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, f"{what} picker timed out")
+        except FileNotFoundError:
+            raise HTTPException(501, f"{what} picker unavailable (osascript not found)")
+        path_str = result.stdout.strip()
+        if result.returncode != 0 or not path_str:
+            return None
+        return path_str
+
+    def _inspect_zip(zip_path: Path) -> dict:
+        from .bundle import inspect_bundle
+        try:
+            return inspect_bundle(zip_path)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    def _import_and_switch(zip_path: Path, root: Path, info: dict) -> dict:
+        """Install the bundle for root, switch to it, and return the folder payload plus what was imported."""
+        from .bundle import import_bundle
+        _import_gates()
+        try:
+            import_bundle(zip_path, root)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except sqlite3.Error:
+            # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
+            raise HTTPException(400, "that bundle's index is not readable")
+        out = _switch_root(root)
+        return dict(out, imported=True, root=str(root), photos=info.get("photos"))
+
+    @app.post("/api/bundle/import/choose")
+    def import_bundle_choose():
+        _import_gates()
+        path_str = _run_picker('POSIX path of (choose file with prompt "Pick a photosort index bundle" of type {"public.zip-archive"})', "bundle")
+        if path_str is None:
+            return Response(status_code=204)
+        zip_path = Path(path_str)
+        info = _inspect_zip(zip_path)
+        root = Path(info["root"])
+        if not root.is_dir():
+            # Made on a Mac where the disk sat elsewhere: the UI asks for the folder, then calls choose-root.
+            return {"needs_root": True, "bundle": info, "zip": str(zip_path)}
+        return _import_and_switch(zip_path, root.resolve(), info)
+
+    @app.post("/api/bundle/import")
+    def import_bundle_api(req: BundleImportReq):
+        _import_gates()
+        zip_path = Path(req.zip).expanduser()
+        info = _inspect_zip(zip_path)
+        root = Path(req.root).expanduser() if req.root else Path(info["root"])
+        if not root.is_dir():
+            if req.root:
+                raise HTTPException(400, f"not a directory: {req.root}")
+            raise HTTPException(400, f"that bundle was made for {info['root']}, which is not here; pick the photo folder")
+        return _import_and_switch(zip_path, root.resolve(), info)
+
+    @app.post("/api/bundle/import/choose-root")
+    def import_bundle_choose_root(req: BundleZipReq):
+        _import_gates()
+        zip_path = Path(req.zip).expanduser()
+        info = _inspect_zip(zip_path)
+        path_str = _run_picker('POSIX path of (choose folder with prompt "Pick the photo folder this index was made for")', "folder")
+        if path_str is None:
+            return Response(status_code=204)
+        root = Path(path_str)
+        if not root.is_dir():
+            raise HTTPException(400, f"not a directory: {path_str}")
+        return _import_and_switch(zip_path, root.resolve(), info)
+
+    # People/groups/solo export stays synchronous in this pass, it is the small-shoot
+    # bundle, not the main Diu-scale export path that /api/export now backgrounds.
+    @app.post("/api/export/people")
+    def export_people_api(req: ModeReq):
+        root_at_start = state["root"]
+        if root_at_start is None:
+            raise HTTPException(400, "no folder open")
+        from .people import export_people, export_people_ids
+        with state["export_lock"]:
+            base = _resolve_base()
+        if req.mode == "copy":
+            # One photo lands in several folders (each person, plus groups or solo) and each is a
+            # separate copy, so size every folder, not the distinct set of photos.
+            _check_free(sum(export_bytes(root_at_start, ids) for ids in export_people_ids(root_at_start).values()), base)
+        try:
+            return {"path": str(export_people(root_at_start, req.mode, base=base))}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    return app

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sorted beta access</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="../beta.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+</head>
+<body class="access-body">
+<main class="access">
+  <a class="top" href="../"><img class="brand-mark" src="../brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span><span class="badge">public beta, testing right now</span></a>
+
+  <section id="signed-out" hidden>
+    <h1>Beta access.</h1>
+    <p>Enter the email you joined with. A six digit code comes back; that is the whole sign-in.</p>
+    <form class="beta-form" id="in-form" novalidate style="max-width:420px">
+      <label><span>Email</span><input name="email" type="email" inputmode="email" autocomplete="email" required></label>
+      <button type="submit" class="cta beta-submit">Send the code</button>
+      <p class="beta-msg" id="in-msg" aria-live="polite"></p>
+    </form>
+    <form class="beta-form beta-code" id="in-code" hidden novalidate style="max-width:420px">
+      <label><span>Six digit code</span><input name="token" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></label>
+      <button type="submit" class="cta beta-submit">Open</button>
+      <p class="beta-msg" id="in-msg2" aria-live="polite"></p>
+    </form>
+    <p class="quiet">Not in yet? <a href="../#beta">Join the beta</a> on the front page.</p>
+  </section>
+
+  <section id="signed-in" hidden>
+    <h1>Hello <span id="who"></span>.</h1>
+    <p id="lead">Your 48 hours of early access are running.</p>
+    <div class="clock" id="clock"><b id="left">48:00:00</b><span>left</span></div>
+
+    <div class="card">
+      <h3>The build</h3>
+      <p id="build-line">The beta build is sent to <b id="mail"></b> the moment it clears our own shoot disk test. One email, with the download and the three things to try first. Nothing to install before that.</p>
+      <p class="quiet">While you wait, have ready: an Apple silicon Mac, a shoot disk with photos or clips on it, and about 20 GB free on the Mac for the index and thumbnails. The disk is only ever read.</p>
+    </div>
+
+    <div class="card">
+      <h3>What the beta does today</h3>
+      <ol>
+        <li>Indexes a whole shoot disk on the Mac. Photos, RAW, 4K clips, drone footage. Nothing is uploaded, ever.</li>
+        <li>Search in plain words. "sunset on the beach", "ring exchange", "drone over the fort".</li>
+        <li>Faces on stills. Group them, name a person, find every frame of them from one photo.</li>
+        <li>Categories it finds itself, a drone filter, an out of focus filter, a scene breakdown for clips.</li>
+        <li>Export to a folder, a plugged-in disk, or straight to a Google Drive folder.</li>
+        <li>Reorganise the disk into sorted folders, with Undo.</li>
+      </ol>
+    </div>
+
+    <p class="quiet">Something broke, or something you wish it did: reply to the build email or write to <a href="mailto:purohit.krick@gmail.com?subject=sorted%20beta">purohit.krick@gmail.com</a>.</p>
+    <button type="button" class="beta-link signout" id="signout">Sign out</button>
+  </section>
+</main>
+<script>
+(function () {
+  var sb = window.supabase.createClient('https://woasffpwdbwavwcrtllz.supabase.co', 'sb_publishable_aAR90Pzf1gza49CP2t7uKQ_xyDhkTZI');
+  var out = document.getElementById('signed-out'), inn = document.getElementById('signed-in');
+  var email = null, timer = null;
+
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function tick(until) {
+    var ms = new Date(until) - Date.now();
+    var el = document.getElementById('left'), clock = document.getElementById('clock');
+    if (ms <= 0) { el.textContent = '00:00:00'; clock.classList.add('over'); document.getElementById('lead').textContent = 'Your 48 hours are up. Write to us if you want to stay on the beta; most people do.'; clearInterval(timer); return; }
+    var s = Math.floor(ms / 1000);
+    el.textContent = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s / 60) % 60) + ':' + pad(s % 60);
+  }
+  function show(row) {
+    out.hidden = true; inn.hidden = false;
+    document.getElementById('who').textContent = (row.name || row.email).split(' ')[0];
+    document.getElementById('mail').textContent = row.email;
+    tick(row.access_until); timer = setInterval(function () { tick(row.access_until); }, 1000);
+  }
+  function load() {
+    sb.auth.getSession().then(function (r) {
+      if (!r.data.session) { out.hidden = false; return; }
+      sb.rpc('claim_access').then(function (q) {
+        if (q.error || !q.data || !q.data.length) { out.hidden = false; return; }
+        show(q.data[0]);
+      });
+    });
+  }
+  var f = document.getElementById('in-form'), c = document.getElementById('in-code');
+  var m = document.getElementById('in-msg'), m2 = document.getElementById('in-msg2');
+  f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    email = f.email.value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(email)) { m.textContent = 'That email does not look right.'; return; }
+    m.textContent = 'Sending the code';
+    sb.auth.signInWithOtp({ email: email, options: { shouldCreateUser: false } }).then(function (r) {
+      if (r.error) { m.textContent = /not allowed|Signups/i.test(r.error.message) ? 'That address is not on the beta yet. Join on the front page first.' : 'Could not send: ' + r.error.message; return; }
+      f.hidden = true; c.hidden = false; c.token.focus();
+    });
+  });
+  c.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var t = c.token.value.replace(/\D/g, '');
+    if (t.length !== 6) { m2.textContent = 'Six digits.'; return; }
+    m2.textContent = 'Checking';
+    sb.auth.verifyOtp({ email: email, token: t, type: 'email' }).then(function (r) {
+      if (r.error) { m2.textContent = 'That code did not match. Codes last ten minutes.'; return; }
+      load();
+    });
+  });
+  document.getElementById('signout').addEventListener('click', function () { sb.auth.signOut().then(function () { location.reload(); }); });
+  load();
+})();
+</script>
+</body>
+</html>

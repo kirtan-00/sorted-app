@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="application-name" content="sorted, formerly photosort">
+<title>sorted</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<header>
+  <div class="toolbar">
+    <h1>sorted</h1>
+    <div class="tb-title">
+      <span id="folder-name" title=""></span>
+      <span id="stats"></span>
+    </div>
+    <span class="tb-spring"></span>
+    <div id="folderbar">
+      <select id="recent-folders" title="open a recent shoot"><option value="">Recent</option></select>
+      <button type="button" id="open-folder" class="btn" title="open a shoot folder on this Mac">Open folder</button>
+    </div>
+    <div id="exportbar">
+      <span id="export-dest"></span>
+      <button type="button" id="export-dest-change" class="link" title="pick another disk for exports">Change</button>
+      <button type="button" id="export-dest-reset" class="link" hidden title="export next to the shoot again">Reset</button>
+    </div>
+    <button type="button" id="help-toggle" class="tb-icon tb-help" title="how sorted works, section by section" aria-expanded="false" aria-controls="help">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.3a2 2 0 1 1 2.8 1.8c-.6.3-.8.7-.8 1.3"/><circle cx="8" cy="11.6" r=".5" fill="currentColor" stroke="none"/></svg><span>How it works</span>
+    </button>
+    <button type="button" id="inspector-toggle" class="tb-icon" title="show or hide the inspector" aria-pressed="false" aria-label="inspector">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
+    </button>
+  </div>
+  <nav>
+    <button type="button" data-view="search" class="on" title="search the shoot">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><span>Search</span>
+    </button>
+    <button type="button" data-view="people" title="people in the shoot">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/><path d="M11 3.5a2.3 2.3 0 0 1 0 4.4M12 9.2c1.6.5 2.5 1.8 2.5 3.8"/></svg><span>People</span>
+    </button>
+    <button type="button" data-view="categories" title="categories found in the shoot">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
+    </button>
+    <button type="button" data-view="index" title="index this folder, move the index">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Index</span>
+    </button>
+    <div class="nav-group">Filters</div>
+    <label class="check nav-row" title="only aerial shots"><input type="checkbox" id="aerial-only" name="aerial" value="1" form="q"> Drone shots</label>
+    <fieldset id="kind-select" class="seg nav-row" title="photos, videos or both">
+      <label><input type="radio" name="kind" value="" form="q" checked><span>All</span></label>
+      <label><input type="radio" name="kind" value="photos" form="q"><span>Photos</span></label>
+      <label><input type="radio" name="kind" value="videos" form="q"><span>Videos</span></label>
+    </fieldset>
+    <label class="check nav-row" title="drop the photos and clips the focus check marked bad"><input type="checkbox" id="hide-bad" name="hide_bad" value="1" form="q"> Hide out of focus</label>
+    <label class="check nav-row" title="also drop the soft ones, the bottom 15 percent"><input type="checkbox" id="hide-soft" name="hide_soft" value="1" form="q"> Hide soft</label>
+    <div class="focus-line nav-row">
+      <span id="focus-status" title="how much of the shoot has been through the focus check">focus not checked</span>
+      <button type="button" id="check-focus" class="link small" title="score every photo and clip once; photos are free, clips take seconds">Check focus</button>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <section id="view-nofolder" hidden>
+    <div class="prompt">
+      <div class="wordmark">sorted</div>
+      <p class="lede">Open a shoot folder. Everything is indexed on this Mac; nothing leaves it.</p>
+      <div class="actions">
+        <button type="button" id="open-folder-main" class="btn primary" title="open a shoot folder on this Mac">Open folder</button>
+        <button type="button" id="bundle-import-main" class="btn" title="install an index bundle made on another Mac">Import index bundle</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-search">
+    <div class="search-head">
+    <form id="q" class="subbar">
+      <span class="q-wrap"><input type="search" name="q" placeholder="Search" title="describe the shot: balcony, dining table, couple laughing" autofocus autocomplete="off"></span>
+      <label class="slider" title="hide anything softer than this">Sharp <input type="range" name="sharp" min="0" max="90" step="5" value="0"><input type="number" id="sharp-out" class="val" min="0" max="90" step="5" value="0" title="minimum sharpness, percent"></label>
+      <select name="faces" title="how many faces in the frame">
+        <option value="">Any faces</option>
+        <option value="none">No people</option>
+        <option value="one">One person</option>
+        <option value="two">Two people</option>
+        <option value="group">Group of 3+</option>
+      </select>
+      <select name="person" id="person-select" title="only a particular person"><option value="">anyone</option></select>
+      <button type="submit" class="btn primary" title="run the search (Enter)">Find</button>
+      <input type="hidden" name="category" id="category-filter" value="">
+      <input type="hidden" name="cluster" id="cluster-filter" value="">
+      <span id="category-chip" class="chip" hidden><span id="category-chip-name"></span><button type="button" id="category-chip-clear" aria-label="clear the category filter" title="clear the category filter"><svg viewBox="0 0 8 8" aria-hidden="true"><path d="M1 1l6 6M7 1L1 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button></span>
+      <span class="spring"></span>
+      <button type="button" id="selectall-top" class="link" hidden title="select every card shown (command-A)">Select all shown</button>
+    </form>
+    <div id="ctxbar" class="ctxbar" hidden>
+      <button type="button" id="ctx-back" class="ctx-back" title="back (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M6.5 1.5L3 5l3.5 3.5"/></svg><span id="ctx-back-label">Back</span></button>
+      <span id="ctx-crumb" class="ctx-crumb" aria-label="where this filter came from"></span>
+      <span class="spring"></span>
+      <button type="button" id="ctx-clear" class="link" title="drop the filter and stay on Search">Clear filter</button>
+    </div>
+    </div>
+    <div id="grid" class="grid" role="grid" aria-label="results"></div>
+    <div id="more-row" class="row more" hidden>
+      <span id="shown-count"></span>
+      <button type="button" id="show-more" class="btn" title="load the next 200">Show more</button>
+      <button type="button" id="select-matching" class="link" title="select every match, shown or not">Select all matching</button>
+    </div>
+    <footer id="selbar" class="actionbar" hidden>
+      <span id="selcount"></span>
+      <button type="button" id="selectall" class="link" title="select every card shown (command-A)">Select all shown</button>
+      <span class="spring"></span>
+      <span class="sel-export export-group">
+        <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
+          <label><input type="radio" name="dest-sel" value="mac" checked><span>This Mac</span></label>
+          <label><input type="radio" name="dest-sel" value="drive"><span>Google Drive</span></label>
+        </fieldset>
+        <input id="exportname" type="text" placeholder="Folder name" autocomplete="off" title="the export folder's name">
+        <select id="exportmode" title="copy the files, link to them, or list them">
+          <option value="copy">Copy</option>
+          <option value="symlink">Links (need the disk plugged in)</option>
+          <option value="csv">CSV</option>
+        </select>
+        <button type="button" id="export" class="btn" title="export the selection">Export</button>
+      </span>
+      <button type="button" id="clearsel" class="link" title="deselect everything">Clear</button>
+      <div id="drive-strip" class="drive-strip" hidden>
+        <div class="drive-line">
+          <input id="drive-link" type="text" placeholder="Paste a Google Drive folder link" autocomplete="off" spellcheck="false" title="the folder the files go into; open it in Drive and copy the address">
+          <span id="drive-folder" class="drive-folder" title=""></span>
+          <span id="drive-account" class="drive-account"></span>
+        </div>
+        <div class="drive-line">
+          <label class="field" title="the long edge for photos; RAW and clips are never resized">Web size <select id="drive-web-size">
+            <option value="">Full size</option>
+            <option value="3000">3000 px</option>
+            <option value="2048">2048 px</option>
+            <option value="1600">1600 px</option>
+          </select></label>
+          <label class="check" id="drive-raw-label" title="also upload the RAW next to each JPEG"><input type="checkbox" id="drive-include-raw"> Include RAW siblings</label>
+          <label class="check" title="leave the clips at home"><input type="checkbox" id="drive-skip-videos"> Skip videos</label>
+          <span class="drive-caption">Full size uploads the originals. A web size re-encodes JPEGs on the way; RAW and clips always go as they are.</span>
+        </div>
+        <div id="drive-msg" class="drive-msg" hidden></div>
+      </div>
+    </footer>
+  </section>
+
+  <section id="view-people" hidden>
+    <div class="subbar">
+      <label class="slider" title="how close a face must be to count as a match">Match <input id="find-sim" type="range" min="0.4" max="0.8" step="0.01" value="0.55"><input type="number" id="find-sim-out" class="val" min="0.4" max="0.8" step="0.01" value="0.55" title="match threshold"></label>
+      <span class="spring"></span>
+      <button type="button" id="cluster" class="btn" title="sort every detected face into people">Group faces</button>
+      <label class="field" title="lower is stricter; leave it unless groups mix people">Tightness <input id="eps" type="number" step="0.01" min="0.1" max="0.9" value="0.32"></label>
+      <button type="button" id="export-people" class="btn" title="export links for every person, group and solo shot">Export people</button>
+    </div>
+    <p id="faces-pending-row" class="hint faces-pending" hidden><span id="faces-pending-text"></span> <button type="button" id="faces-pending-scan" class="link small" title="find faces in the photos that were indexed without them">scan now</button></p>
+    <div id="merge-block" class="panel" data-panel="merge" hidden>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered on every re-grouping</span></button>
+      <div class="panel-body">
+        <div id="merge-list"></div>
+        <p id="merge-empty" class="empty merge-empty">No lookalike groups to confirm</p>
+        <button type="button" id="merge-more" class="link merge-more" hidden title="show the next pairs">Show more</button>
+      </div>
+    </div>
+    <div class="panel" data-panel="find">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Find a person</button>
+      <div class="panel-body">
+        <div class="dropzone">
+          <button type="button" id="find-person" class="btn" title="pick a reference photo of someone">Find a person from a photo</button>
+          <span>Pick a photo of them; matches fill the search grid, then name them in the status bar to save</span>
+        </div>
+      </div>
+    </div>
+    <div id="saved-people-block" class="panel" data-panel="saved">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Saved people</button>
+      <div class="panel-body"><div id="saved-people"></div></div>
+    </div>
+    <div class="panel" data-panel="groups">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Face groups <span class="sub">click a row to see that person</span></button>
+      <div class="panel-body"><div id="people" class="grid people"></div></div>
+    </div>
+
+    <div id="people-export-row" class="actionbar" hidden>
+      <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="people-include-raw"> Include RAW files</label>
+      <span class="spring"></span>
+      <span class="export-group">
+        <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
+          <label><input type="radio" name="dest-people" value="mac" checked><span>This Mac</span></label>
+          <label><input type="radio" name="dest-people" value="drive"><span>Google Drive</span></label>
+        </fieldset>
+        <select id="people-export-mode" title="copy the files or link to them">
+          <option value="copy">Copy</option>
+          <option value="symlink">Links (need the disk plugged in)</option>
+        </select>
+        <button type="button" id="people-export-refs" class="btn" title="export everyone ticked above">Export ticked people</button>
+      </span>
+    </div>
+  </section>
+
+  <section id="view-categories" hidden>
+    <div class="subbar">
+      <button type="button" id="categorise" class="btn" title="sort the shoot into categories with the on-device model">Categorise</button>
+      <span id="cat-progress"></span>
+    </div>
+    <div class="panel" data-panel="cats">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Categories</button>
+      <div class="panel-body"><div id="cat-tiles" class="tiles"></div></div>
+    </div>
+    <div class="panel" data-panel="disc">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Discovered in this shoot <span class="sub">found by the model on its own; names are its best guess</span></button>
+      <div class="panel-body"><div id="disc-tiles" class="tiles"></div></div>
+    </div>
+    <div id="cat-export-row" class="actionbar" hidden>
+      <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="cat-include-raw"> Include RAW files</label>
+      <label class="check" title="also export the less sure matches"><input type="checkbox" id="cat-include-unsure"> Include less sure</label>
+      <span class="spring"></span>
+      <span class="export-group">
+        <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
+          <label><input type="radio" name="dest-cat" value="mac" checked><span>This Mac</span></label>
+          <label><input type="radio" name="dest-cat" value="drive"><span>Google Drive</span></label>
+        </fieldset>
+        <select id="cat-export-mode" title="copy the files or link to them">
+          <option value="copy">Copy</option>
+          <option value="symlink">Links (need the disk plugged in)</option>
+        </select>
+        <select id="cat-videos" title="whole clips, or only the matching segments">
+          <option value="clips">Whole clips</option>
+          <option value="segments">Matching segments only</option>
+        </select>
+        <button type="button" id="cat-export-all" class="btn" title="export every category ticked above">Export ticked categories</button>
+      </span>
+    </div>
+  </section>
+
+  <section id="view-index" hidden>
+    <div class="subbar">
+      <button type="button" id="start-index" class="btn" title="index every photo and clip in this folder">Index this folder</button>
+      <label class="check" title="find faces while indexing; untick to index faster and scan for faces later"><input type="checkbox" id="faces" checked> Detect faces (people tab)</label>
+      <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
+      <button type="button" id="detect-faces-now" class="btn" hidden title="find faces in the photos that were indexed without them">Detect faces now</button>
+      <span class="spring"></span>
+      <button type="button" id="bundle-export" class="btn" title="pack the index into one zip for another Mac">Export index bundle</button>
+      <button type="button" id="bundle-import" class="btn" title="install an index bundle made on another Mac">Import index bundle</button>
+    </div>
+    <div class="panel" data-panel="progress">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Progress</button>
+      <div class="panel-body">
+        <pre id="progress"></pre>
+        <div id="index-errors" hidden>
+          <p id="index-errors-title"></p>
+          <pre id="index-errors-list" class="mono"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="panel" data-panel="bundle">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Move this shoot to another Mac</button>
+      <div class="panel-body"><p class="hint">One zip with the index, thumbs and saved people, so another Mac opens this shoot without re-indexing.</p></div>
+    </div>
+    <div id="reorg-block" class="panel collapsed" data-panel="reorganise">
+      <button type="button" class="panel-head danger" aria-expanded="false" title="the one thing that writes to the shoot disk"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Reorganise disk</button>
+      <div class="panel-body reorg">
+        <p class="hint reorg-warn">This moves files on the shoot disk into sorted/. Nothing is deleted or copied.<br>Undo restores every file to where it was.</p>
+        <div id="reorg-setup">
+          <label class="check" title="a named person's photos go under sorted/photos/people/Name instead of their category"><input type="checkbox" id="reorg-by-people"> by people (named people get their own folders)</label>
+          <label class="check" title="the Preview button stays off until this is ticked"><input type="checkbox" id="reorg-ack"> I understand this writes to the shoot disk</label>
+          <div class="reorg-row">
+            <button type="button" id="reorg-preview" class="btn" disabled title="list every move before anything happens; nothing is written">Preview</button>
+            <span id="reorg-guard" class="reorg-guard" hidden></span>
+          </div>
+        </div>
+        <div id="reorg-plan" hidden>
+          <p id="reorg-summary" class="reorg-summary"></p>
+          <div class="reorg-table-wrap"><table id="reorg-sample" class="reorg-table"><thead><tr><th>from</th><th></th><th>to</th></tr></thead><tbody></tbody></table></div>
+          <div class="reorg-row">
+            <input type="text" id="reorg-confirm" autocomplete="off" spellcheck="false" placeholder="" title="type the shoot folder's name exactly to arm the button">
+            <button type="button" id="reorg-apply" class="btn danger" disabled title="move the files now; Undo puts them back">Reorganise disk</button>
+          </div>
+        </div>
+        <div id="reorg-status" class="reorg-row" hidden>
+          <span id="reorg-status-text"></span>
+          <button type="button" id="reorg-undo" class="btn" title="put every moved file back where it was">Undo</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<aside id="inspector" aria-label="inspector">
+  <div class="insp-inner">
+    <div id="insp-body"><p class="insp-empty">Select a photo or clip</p></div>
+  </div>
+</aside>
+
+<aside id="help" role="dialog" aria-modal="false" aria-labelledby="help-title" hidden>
+  <div class="help-head">
+    <h2 id="help-title">How it works</h2>
+    <button type="button" id="help-close" class="tb-icon" aria-label="close" title="close (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+  </div>
+  <div class="help-body">
+    <div class="panel" data-panel="help-search">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Search and select</button>
+      <div class="panel-body help-lines">
+        <p>Type what you remember seeing ("woman in a sari", "fishing boats") and press Enter. Photos and clips come back together.</p>
+        <p>The Sharp slider hides the soft ones.</p>
+        <p>Click selects. Shift-click takes a range, ⌘-click toggles one, ⌘A takes everything on screen.</p>
+        <p>"Select all matching" takes every result, not just the 200 on screen.</p>
+        <p>Enter or a double-click opens a shot. ← → step through, Esc closes.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-categories">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Categories</button>
+      <div class="panel-body help-lines">
+        <p>The fixed set is always there.</p>
+        <p>"Discovered in this shoot" is what the model found on its own. Its names are a best guess.</p>
+        <p>"Unnamed group N" means it saw a group but would not guess. Rename it with the pencil; those names are lost when you Categorise again.</p>
+        <p>Everything under 50 % sits in the "less sure" band. It is not hidden.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-people">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>People</button>
+      <div class="panel-body help-lines">
+        <p>Group faces once.</p>
+        <p>"Same person?" shows lookalike groups. Same merges them, Different is remembered forever.</p>
+        <p>Name a group by typing in its row.</p>
+        <p>"Find a person from a photo" pulls every frame of them from one reference. Name that result to save the person.</p>
+        <p>Saved people export as their own folders.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-focus">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Focus</button>
+      <div class="panel-body help-lines">
+        <p>"Check focus" scores every photo and clip once. Photos are free, clips take seconds.</p>
+        <p>"Hide out of focus" drops the fully bad ones.</p>
+        <p>"Hide soft" also drops the bottom 15 %.</p>
+        <p>Nothing is deleted.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-export">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Export</button>
+      <div class="panel-body help-lines">
+        <p>Exports COPY or LINK to the destination. Default is ~/Desktop/photosort-out; change it to any disk.</p>
+        <p>One folder per ticked category, per person, or for the current selection.</p>
+        <p>"Videos: only the matching segments" trims clips at keyframes.</p>
+        <p>Google Drive as the destination: paste a folder link and the files go straight from the shoot disk into it; nothing is saved on this Mac on the way. What you upload counts against your own Drive space, unless the folder is on a Shared Drive. Uploads are resumable, and a manifest means a re-run only sends what is missing.</p>
+        <p>The index bundle is a zip a designer imports to get the shoot already sorted.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-reorganise">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Reorganise disk</button>
+      <div class="panel-body help-lines">
+        <p>The only thing that writes to the shoot disk.</p>
+        <p>Moves files into sorted/ by category (and people, drone).</p>
+        <p>RAW pairs and sidecars stay together.</p>
+        <p>Undo puts every file back exactly.</p>
+        <p>Read the guards before you use it.</p>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<p id="status" class="status"><span id="status-text" aria-live="polite"></span><span id="save-person-form" hidden><input id="save-person-name" type="text" placeholder="Name this person" autocomplete="off" title="a name for the person you just found"><button type="button" id="save-person" class="btn" title="save this person for later searches">Save</button></span></p>
+
+<div id="lightbox" hidden>
+  <div id="lb-frame">
+    <button type="button" id="lb-close" aria-label="Close" title="close (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+    <div class="lb-stage">
+      <img id="lb-img" alt="">
+      <video id="lb-video" controls preload="metadata" hidden></video>
+    </div>
+    <div id="lb-segments" class="segments" hidden></div>
+    <div class="lb-bar">
+      <div id="lb-meta"></div>
+      <button type="button" id="lb-like" class="btn" title="find shots that look like this one">More like this</button>
+    </div>
+  </div>
+</div>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>
