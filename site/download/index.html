@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Download sorted for Mac</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
+<link rel="stylesheet" href="../style.css">
+<style>
+  .dl { max-width: 760px; margin: 0 auto; padding: 40px var(--gutter) 80px; }
+  .dl .top { display: flex; align-items: center; gap: 12px; margin-bottom: 44px; text-decoration: none; color: inherit; }
+  .dl h1 { font-size: clamp(36px, 5vw, 52px); margin: 0 0 10px; }
+  .dl .lede { font-size: 18px; color: var(--ink-2); max-width: 52ch; }
+  .dl .small { max-width: none; }
+  .dl .big { display: inline-flex; align-items: center; height: 56px; padding: 0 28px; font-size: 18px; font-weight: 600; border-radius: 28px; background: var(--ink); color: var(--paper-2); text-decoration: none; margin: 22px 0 6px; }
+  .dl .big:hover { background: #3a3d44; }
+  .dl .small { font-size: 14px; color: var(--ink-3); margin: 0 0 36px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 16px; align-items: start; padding: 22px 0; border-top: 1px solid var(--line); }
+  .step .n { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 18px; }
+  .step:nth-of-type(1) .n { background: var(--butter); } .step:nth-of-type(2) .n { background: var(--mint); } .step:nth-of-type(3) .n { background: var(--sky); } .step:nth-of-type(4) .n { background: var(--lav); } .step:nth-of-type(5) .n { background: var(--peach); }
+  .step h3 { margin: 6px 0 6px; font-size: 20px; }
+  .step p { margin: 0 0 6px; color: var(--ink-2); max-width: none; }
+  .step p.note { font-size: 14px; color: var(--ink-3); }
+  kbd { font: 600 14px var(--ui); background: var(--paper-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+  .needs { margin-top: 36px; padding: 20px 22px; border-radius: 16px; background: var(--paper-2); font-size: 15px; color: var(--ink-2); }
+  .cmd { display: flex; gap: 10px; align-items: stretch; margin: 14px 0 10px; }
+  .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; font: 500 15px/1 var(--mono); background: var(--ink); color: var(--paper-2); border-radius: 12px; padding: 16px 18px; }
+  .cmd button { font: 600 15px var(--ui); background: var(--paper-2); border: 1px solid var(--line); border-radius: 12px; padding: 0 18px; cursor: pointer; }
+  .cmd button:hover { background: var(--butter); }
+</style>
+</head>
+<body>
+<main class="dl">
+  <a class="top" href="../"><img class="brand-mark" src="../brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span><span class="badge">public beta, testing right now</span></a>
+
+  <h1>sorted for Mac.</h1>
+  <p class="lede">Public beta. Runs entirely on your Mac; the shoot disk is only read and nothing is uploaded, ever.</p>
+  <h2 style="margin:26px 0 8px;font-size:24px">The quick way: one line</h2>
+  <p class="lede" style="font-size:16px">Open Terminal (press <kbd>⌘ Space</kbd>, type Terminal, Enter), paste this line, press Enter. It downloads the app into a folder called <kbd>sorted</kbd> in your home, installs what it needs, and opens it. Two to five minutes. macOS does not put up its "move to Bin" dialog this way.</p>
+  <div class="cmd"><code id="cmd">curl -fsSL https://kirtan-00.github.io/sorted/install.sh | bash</code><button type="button" id="copy">Copy</button></div>
+  <p class="small">From then on: open the <kbd>sorted</kbd> folder in your home and double-click <kbd>sorted.app</kbd>. Or paste the same line again; it is fast the second time and just opens the app.</p>
+
+  <h2 style="margin:36px 0 8px;font-size:24px">The other way: zip</h2>
+  <a class="big" href="https://github.com/kirtan-00/sorted-app/archive/refs/heads/main.zip">Download sorted for Mac</a>
+  <p class="small">Zip, about 42 MB. Apple silicon Mac, macOS 14 or newer. The installer fetches the rest (about 1.3 GB, once). Because the zip comes through the browser, macOS will refuse the installer the first time and offer to move it to the Bin: click Done, then System Settings, Privacy &amp; Security, scroll down, <kbd>Open Anyway</kbd>, and double-click it again. That happens once; the one-line way above skips it entirely.</p>
+
+  <div class="step"><span class="n">1</span><div>
+    <h3>Unzip it (zip route only)</h3>
+    <p>Double-click the downloaded zip. You get a folder called <kbd>sorted-app-main</kbd>. Keep it somewhere you will not delete, Desktop or Documents is fine; the app lives in that folder.</p>
+  </div></div>
+
+  <div class="step"><span class="n">2</span><div>
+    <h3>Double-click <kbd>Install sorted.command</kbd></h3>
+    <p>A Terminal window opens and does the work: its own Python, ffmpeg and the search model. Two to five minutes on a normal connection. It ends by opening the app.</p>
+    <p class="note">Zip route only. The one-line install already did this step.</p>
+  </div></div>
+
+  <div class="step"><span class="n">3</span><div>
+    <h3>From then on, double-click <kbd>sorted.app</kbd></h3>
+    <p>Same folder. Your browser opens at the app. Give it Full Disk Access the first time it asks, so it can read the SSD.</p>
+  </div></div>
+
+  <div class="step"><span class="n">4</span><div>
+    <h3>Open a shoot</h3>
+    <p><kbd>Open folder</kbd> and pick the disk or folder, then <kbd>Index</kbd>. Photos take about ten minutes per 4,000 on an M1; clips longer. If you were given a <kbd>.photosort-index.zip</kbd>, use Index, <kbd>Import an index</kbd> instead and skip the wait.</p>
+  </div></div>
+
+  <div class="step"><span class="n">5</span><div>
+    <h3>Tell us what happened</h3>
+    <p>Top right, <kbd>How it works</kbd>, then Feedback, <kbd>Save report to Desktop</kbd>. Email that zip to <a href="mailto:purohit.krick@gmail.com?subject=sorted%20beta%20report">purohit.krick@gmail.com</a>. It holds what you clicked, searched and where it broke. No photos, no names, no paths.</p>
+  </div></div>
+
+  <div class="needs">Needs: an Apple silicon Mac (M1 to M4), macOS 14 or newer, about 2 GB free for the app and a further 5 to 20 GB for thumbnails of a big shoot. Intel Macs are not supported in the beta.</div>
+</main>
+<script>document.getElementById("copy").addEventListener("click",function(){var b=this;navigator.clipboard.writeText(document.getElementById("cmd").textContent).then(function(){b.textContent="Copied";setTimeout(function(){b.textContent="Copy";},1500);});});</script>
+</body>
+</html>

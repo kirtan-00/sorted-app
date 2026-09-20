@@ -8,7 +8,7 @@ cd "$HERE"
 find "$PUB" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 git archive HEAD | tar -x -C "$PUB"
 cd "$PUB"
-git add -A
+git add -A && git add -f models/*.onnx
 git commit -q -m "${1:-update}" || { echo "nothing to publish"; exit 0; }
 git push -q origin main
 echo "published: https://github.com/kirtan-00/sorted-app"
