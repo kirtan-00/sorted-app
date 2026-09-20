@@ -5,7 +5,10 @@
 # Files fetched by curl carry no quarantine flag, so macOS does not block the installer or the app.
 set -e
 DEST="$HOME/sorted"
-ZIP="https://github.com/kirtan-00/sorted-app/archive/refs/heads/main.zip"
+# The branch zip is cached by GitHub for a while; ask for the exact latest commit instead so a fresh
+# publish is picked up at once. Falls back to the branch zip if the API is unreachable.
+SHA="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/kirtan-00/sorted-app/commits/main 2>/dev/null | sed -n 's/^  "sha": "\([0-9a-f]*\)",$/\1/p' | head -1)"
+ZIP="https://github.com/kirtan-00/sorted-app/archive/${SHA:-refs/heads/main}.zip"
 printf '\n==> sorted for Mac, public beta\n'
 if [ "$(uname -m)" != "arm64" ]; then echo "    This beta needs an Apple silicon Mac (M1 to M4)."; exit 1; fi
 if [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 14 ]; then echo "    This beta needs macOS 14 or newer."; exit 1; fi
