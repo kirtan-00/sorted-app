@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Share a scan with an editor</title>
+<meta name="description" content="How to hand a sorted scan to another editor: save the scan file, give it with the disk, load it in seconds on the other Mac.">
+<link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
+<link rel="stylesheet" href="../style.css">
+<style>
+  .sh { max-width: 760px; margin: 0 auto; padding: 40px var(--gutter) 80px; }
+  .sh .top { display: flex; align-items: center; gap: 12px; margin-bottom: 40px; text-decoration: none; color: inherit; }
+  .sh h1 { font-size: clamp(34px, 5vw, 48px); margin: 0 0 10px; }
+  .sh h2 { font-size: 24px; margin: 40px 0 6px; }
+  .sh p { color: var(--ink-2); max-width: none; }
+  .sh .lede { font-size: 18px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 16px; align-items: start; padding: 18px 0; border-top: 1px solid var(--line); }
+  .step .n { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 18px; background: var(--mint); }
+  .b .n { background: var(--sky); }
+  .step h3 { margin: 6px 0 6px; font-size: 19px; }
+  .step p { margin: 0 0 4px; }
+  kbd { font: 600 14px var(--ui); background: var(--paper-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+  .shot { margin: 18px 0 6px; border-radius: 14px; overflow: hidden; box-shadow: 0 1px 0 rgba(38,40,45,.06), 0 18px 50px rgba(38,40,45,.12); }
+  .shot img { display: block; width: 100%; height: auto; }
+  .note { margin-top: 32px; padding: 18px 22px; border-radius: 16px; background: var(--butter); color: var(--ink); font-size: 15px; }
+</style>
+</head>
+<body>
+<main class="sh">
+  <a class="top" href="../"><img class="brand-mark" src="../brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span><span class="badge">public beta, testing right now</span></a>
+
+  <h1>Share a scan with an editor.</h1>
+  <p class="lede">A scan file holds everything sorted learned about a shoot: thumbnails, video frames, search, faces, people names, your Same or Different answers. It does not hold the photos and clips. So the editor gets two things: the scan file and the disk.</p>
+
+  <h2>On your Mac</h2>
+  <div class="step"><span class="n">1</span><div>
+    <h3>Open the shoot</h3>
+    <p>It is under <kbd>Recent</kbd> on the welcome screen.</p>
+  </div></div>
+  <div class="step"><span class="n">2</span><div>
+    <h3>Left sidebar <kbd>Scan</kbd>, then <kbd>Save scan file</kbd></h3>
+    <p>A Mac dialog asks where. Best place: a <kbd>sorted</kbd> folder on the shoot disk itself, so the file travels with the footage. It writes <kbd>&lt;shoot name&gt;.photosort-index.zip</kbd>, usually a few hundred MB, about 1 GB for a shoot with many clips. <kbd>Show in Finder</kbd> points at it.</p>
+    <div class="shot"><img src="save-scan-file.png" alt="The Scan tab in sorted with the Save scan file button circled" width="1280" height="760" loading="lazy"></div>
+    <p class="quiet" style="font-size:14px;color:var(--ink-3)">Older build showing <kbd>Export index</kbd> instead? Same thing; it saves into Desktop, photosort-out. Re-run the install line to get the current build.</p>
+  </div></div>
+  <div class="step"><span class="n">3</span><div>
+    <h3>Hand over the disk and the file</h3>
+    <p>Or a copy of the shoot folder plus the zip on Drive. The zip alone lets someone browse and search; cutting needs the footage.</p>
+  </div></div>
+
+  <h2>On the editor's Mac</h2>
+  <div class="step b"><span class="n">1</span><div>
+    <h3>Install sorted</h3>
+    <p>One line in Terminal, on the <a href="../download/">download page</a>. A few minutes.</p>
+  </div></div>
+  <div class="step b"><span class="n">2</span><div>
+    <h3>Plug in the disk, open sorted, <kbd>Load a scan file</kbd></h3>
+    <p>Pick the zip. When it asks for the photo folder, point at the shoot on the disk. Seconds, no rescan. Names, people and categories arrive with it.</p>
+  </div></div>
+  <div class="step b"><span class="n">3</span><div>
+    <h3>Work</h3>
+    <p>Search, people, categories, export selects, Reorganise with Undo, straight to Drive. All on the originals.</p>
+  </div></div>
+
+  <div class="note">One owner per scan file for now. If the editor names more people or answers more Same or Different prompts, that stays on their Mac until they save their own scan file; merging two scans of one shoot is on the roadmap.</div>
+</main>
+</body>
+</html>

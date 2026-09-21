@@ -234,3 +234,91 @@ def test_index_sets_aerial_from_metadata_for_dji_clips(tmp_path, tmp_path_factor
     assert {r[0]: r[1] for r in conn.execute("SELECT rel, aerial FROM photos")} == {"DJI_0001.MP4": 1, "C0001.MP4": 0}
     assert db.aerial_count(conn) == 1
     assert sorted(os.listdir(tmp_path)) == before
+
+
+# ===== resume: pending rows, scan counts, the job row =====
+
+def test_scan_lists_pending_rows_and_counts_track_each_stage(tmp_path):
+    """A scan writes a pending row per file before reading any, so scan_counts says how far it got
+    from the index alone: read but not embedded is not complete; embedded is."""
+    from conftest import make_image
+    for i in range(3):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    conn = db.connect(tmp_path)
+    assert db.scan_counts(conn) == dict(items=0, scanned=0, embedded=0, faced=0, errors=0, pending=0, pending_photos=0,
+                                        pending_clips=0, photos=0, clips=0, scanned_photos=0, scanned_clips=0,
+                                        unembedded=0, complete=True)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = db.scan_counts(conn)
+    assert (c["items"], c["scanned"], c["embedded"], c["faced"], c["pending"], c["unembedded"], c["complete"]) == (3, 3, 0, 0, 0, 3, False)
+    assert db.get_meta(conn, "scan_faces") == "0"
+    job = db.latest_jobs(conn)["scan"]
+    assert job["state"] == "done" and job["progress"]["stage"] == "done" and job["progress"]["faces"] is False and job["finished"]
+    index_folder(tmp_path, faces=False, workers=1, embed=True)
+    c = db.scan_counts(conn)
+    assert (c["scanned"], c["embedded"], c["unembedded"], c["complete"]) == (3, 3, 0, True)
+
+
+def test_unplugged_mid_scan_leaves_pending_rows_then_continue_finishes(tmp_path):
+    """The disk goes away after the first file is read: the scan stops (SourceUnavailable), the rows
+    already read stay ok, the rest stay pending (never error), the job row says interrupted. Plugging the
+    disk back and scanning again reads only what is pending and ends complete."""
+    import shutil, pytest
+    from photosort.index import SourceUnavailable
+    from conftest import make_image
+    shoot = tmp_path / "shoot"; shoot.mkdir()
+    for i in range(6):
+        make_image(shoot, f"p{i}.jpg", seed=i)
+    parked = tmp_path / "parked"
+    def unplug_after_first(d):
+        if d["stage"] == "features" and d["done"] >= 1 and shoot.is_dir():
+            shutil.move(str(shoot), str(parked))
+    with pytest.raises(SourceUnavailable):
+        index_folder(shoot, faces=False, workers=1, embed=False, progress=unplug_after_first)
+    conn = db.connect(shoot)
+    c = db.scan_counts(conn)
+    assert c["items"] == 6 and c["errors"] == 0 and c["scanned"] >= 1 and c["pending"] >= 1 and c["scanned"] + c["pending"] == 6
+    assert c["complete"] is False
+    assert db.latest_jobs(conn)["scan"]["state"] == "interrupted"
+    # still gone: the guard refuses without touching the rows
+    with pytest.raises(SourceUnavailable):
+        index_folder(shoot, faces=False, workers=1, embed=False)
+    assert db.scan_counts(conn) == c
+    shutil.move(str(parked), str(shoot))
+    s = index_folder(shoot, faces=False, workers=1, embed=False)
+    assert s["indexed"] == c["pending"] and s["skipped"] == c["scanned"] and s["errors"] == 0
+    c2 = db.scan_counts(conn)
+    assert c2["scanned"] == 6 and c2["pending"] == 0 and db.latest_jobs(conn)["scan"]["state"] == "done"
+    assert sorted(r[0] for r in conn.execute("SELECT DISTINCT status FROM photos")) == ["ok"]
+
+
+def test_pending_rows_for_clips_are_counted_apart_and_dropped_when_the_file_goes(tmp_path):
+    """add_pending keeps the kind so the UI can say '579 clips not scanned yet'; a pending row whose
+    file is gone at the next scan is dropped, not marked missing (it never held anything)."""
+    from photosort.walk import ImageFile
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", seed=1)
+    conn = db.connect(tmp_path)
+    fake = [ImageFile(tmp_path / "c.mp4", "c.mp4", 10, 1.0, False, is_video=True),
+            ImageFile(tmp_path / "d.mov", "d.mov", 10, 1.0, False, is_video=True)]
+    assert db.add_pending(conn, fake) == 2
+    c = db.scan_counts(conn)
+    assert (c["items"], c["clips"], c["pending_clips"], c["pending_photos"]) == (2, 2, 2, 0)
+    assert db.known_files(conn) == {}                       # pending rows are never "already indexed"
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = db.scan_counts(conn)
+    assert (c["items"], c["scanned"], c["pending"], c["clips"]) == (1, 1, 0, 0)
+    assert conn.execute("SELECT count(*) FROM photos").fetchone()[0] == 1
+
+
+def test_running_job_rows_are_marked_interrupted_when_the_shoot_opens(tmp_path):
+    import pytest
+    conn = db.connect(tmp_path)
+    jid = db.start_job(conn, "scan", {"stage": "features", "done": 12, "total": 40, "faces": True})
+    db.job_progress(conn, jid, {"stage": "features", "done": 20, "total": 40, "faces": True})
+    assert db.latest_jobs(conn)["scan"]["state"] == "running"
+    assert db.interrupt_running_jobs(conn) == 1 and db.interrupt_running_jobs(conn) == 0
+    j = db.latest_jobs(conn)["scan"]
+    assert j["state"] == "interrupted" and j["progress"]["done"] == 20 and j["finished"]
+    with pytest.raises(ValueError):
+        db.finish_job(conn, jid, "running")

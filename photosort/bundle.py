@@ -1,7 +1,9 @@
 """Index bundles: everything the app knows about a shoot (index.db with its saved people, thumbs,
 grid thumbs) in one <shoot>.photosort-index.zip, so a ready index can be handed to another Mac and
 opened there without re-indexing. Format "photosort-index/1": bundle.json, index.db, thumbs/*.jpg,
-grid/*.jpg, frames/*.jpg (sampled video frames). The shoot root is only ever read; a bundle never lands under it."""
+grid/*.jpg, frames/*.jpg (sampled video frames). bundle.json also carries "scan", how far the scan had got
+(db.scan_counts plus faces), so a bundle of a half-scanned shoot says so before it is loaded; the key is
+optional, an older bundle without it loads the same. The shoot root is only ever read; a bundle never lands under it."""
 from __future__ import annotations
 import json, os, shutil, sqlite3, tempfile, time, zipfile
 from pathlib import Path
@@ -71,6 +73,7 @@ def export_bundle(root: Path, out_dir: Path, progress=None) -> Path:
             "photos": n("SELECT count(*) FROM photos WHERE status='ok'"),
             "faces": n("SELECT count(*) FROM faces"),
             "references": n("SELECT count(*) FROM ref_faces"),
+            "scan": dict(db.scan_counts(s), faces=db.get_meta(s, "scan_faces") != "0"),
             "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "note": NOTE,
         }

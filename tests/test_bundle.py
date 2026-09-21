@@ -221,3 +221,36 @@ def test_export_bundle_carries_video_frames(tmp_path, tmp_path_factory, monkeypa
     monkeypatch.setenv("PHOTOSORT_HOME", str(fresh))
     target = import_bundle(z)
     assert len(list((target / "frames").glob("*.jpg"))) == 6
+
+
+# ===== a bundle says how far its scan got =====
+
+def test_bundle_json_carries_the_scan_counts(tmp_path, tmp_path_factory):
+    from photosort.bundle import export_bundle, inspect_bundle
+    _three_photo_shoot(tmp_path)                                           # read, not embedded, faces off
+    z = export_bundle(tmp_path, tmp_path_factory.mktemp("out"))
+    scan = inspect_bundle(z)["scan"]
+    assert (scan["items"], scan["scanned"], scan["embedded"], scan["unembedded"], scan["pending"]) == (3, 3, 0, 3, 0)
+    assert scan["complete"] is False and scan["faces"] is False
+    index_folder(tmp_path, faces=False, workers=1, embed=True)
+    z2 = export_bundle(tmp_path, tmp_path_factory.mktemp("out2"))
+    scan = inspect_bundle(z2)["scan"]
+    assert scan["complete"] is True and scan["embedded"] == 3
+
+
+def test_older_bundle_without_scan_still_loads(tmp_path, tmp_path_factory, monkeypatch):
+    from photosort.bundle import export_bundle, inspect_bundle, import_bundle
+    _three_photo_shoot(tmp_path)
+    out = tmp_path_factory.mktemp("out")
+    z = export_bundle(tmp_path, out)
+    old = out / "old.photosort-index.zip"
+    with zipfile.ZipFile(z) as src, zipfile.ZipFile(old, "w") as dst:
+        for i in src.infolist():
+            data = src.read(i.filename)
+            if i.filename == "bundle.json":
+                info = json.loads(data); info.pop("scan"); data = json.dumps(info)
+            dst.writestr(i, data)
+    assert "scan" not in inspect_bundle(old)
+    target = import_bundle(old, tmp_path)
+    assert (target / "index.db").is_file()
+    assert db.scan_counts(db.connect(tmp_path))["scanned"] == 3            # the counts come from the index itself

@@ -4,6 +4,7 @@ sharp_max and sharp_eye are in the row); clips are scored from the sample frames
 over frames, so one whip-pan does not condemn a clip). Nothing here reads a source photo, and a clip is
 only decoded when its frames are gone. Thresholds are relative to the shoot (see config.FOCUS_*)."""
 from __future__ import annotations
+import time
 from pathlib import Path
 from typing import Callable
 import numpy as np
@@ -62,12 +63,32 @@ def check_focus(root: Path, only_unchecked: bool = True, progress: Callable[[dic
     every ok row of that kind (a late batch is judged against the whole shoot, not against itself).
     Photos and clips get separate distributions: frames are softer by nature."""
     root = Path(root); conn = db.connect(root)
-    notify = progress or (lambda d: None)
     rows = [dict(r) for r in conn.execute(
         "SELECT id, rel, qhash, kind, duration, sharp_tile, sharp_max, sharp_eye, focus, focus_score FROM photos WHERE status='ok' ORDER BY id")]
     todo = [r for r in rows if not only_unchecked or r["focus"] is None]
     todo_ids = {r["id"] for r in todo}
-    total = len(todo); done = 0
+    total = len(todo)
+    # The job row (db.jobs): a pass the server never finished shows as interrupted when the shoot next
+    # opens; a second pass only labels what is still unchecked, so Continue is simply another pass.
+    job = db.start_job(conn, "focus", {"stage": "focus", "done": 0, "total": total})
+    written = [0.0]
+    emit = progress or (lambda d: None)
+    def notify(d: dict) -> None:
+        emit(d)
+        now = time.time()
+        if now - written[0] >= 2.0 or d["done"] >= d["total"]:
+            written[0] = now
+            db.job_progress(conn, job, {"stage": "focus", "done": d["done"], "total": d["total"]})
+    try:
+        counts = _check_focus(root, conn, rows, todo, todo_ids, total, notify)
+    except BaseException as e:
+        db.finish_job(conn, job, "failed", error=f"{type(e).__name__}: {e}")
+        raise
+    db.finish_job(conn, job, "done")
+    return counts
+
+def _check_focus(root: Path, conn, rows, todo, todo_ids, total: int, notify) -> dict:
+    done = 0
     notify({"stage": "focus", "done": 0, "total": total})
     # One measurement per row: a photo's numbers are already in the row; a clip's come from its frames.
     # A checked row keeps its stored score for the distribution when it is not being relabelled.

@@ -1950,3 +1950,190 @@ def test_usage_summary_and_report_endpoints(tmp_path, monkeypatch):
         assert str(tmp_path) not in z.read("usage/events.jsonl").decode()
     assert c.get("/api/usage/summary").json()["counters"]["report_saved"] == 1
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+# ===== resume: the scan block on /api/stats, interrupted jobs, Continue, the pause, the health line, the sleep guard =====
+
+def _wait_progress(c, n=200):
+    for _ in range(n):
+        p = c.get("/api/progress").json()
+        if not p["running"]: return p
+        time.sleep(0.05)
+    return p
+
+
+def test_stats_scan_block_empty_without_a_folder_and_counted_with_one(tmp_path):
+    from photosort import db
+    none = TestClient(create_app(None)).get("/api/stats").json()["scan"]
+    assert none["items"] == 0 and none["complete"] is True and none["faces"] is True and none["interrupted"] is None
+    c = _shoot_client(tmp_path, n=3)                       # features read, no embeddings, faces off
+    s = c.get("/api/stats").json()["scan"]
+    assert (s["items"], s["scanned"], s["embedded"], s["pending"], s["unembedded"], s["complete"]) == (3, 3, 0, 0, 3, False)
+    assert s["faces"] is False                             # what the last scan was asked for, from meta scan_faces
+    assert s["interrupted"] is None                        # the scan finished, it was just asked for less
+    assert db.get_meta(db.connect(tmp_path), "scan_faces") == "0"
+    assert c.get("/api/folder").json()["scan"]["complete"] is False   # the welcome reads it from here while the disk is away
+
+
+def test_running_job_is_marked_interrupted_when_the_shoot_opens_and_stats_says_so(tmp_path):
+    from photosort import db
+    from photosort.walk import ImageFile
+    c = _shoot_client(tmp_path, n=2)
+    conn = db.connect(tmp_path)
+    # A scan cut short after listing two more files: the job row is still 'running' (the app died mid-scan).
+    db.add_pending(conn, [ImageFile(tmp_path / "x.jpg", "x.jpg", 10, 1.0, False), ImageFile(tmp_path / "y.jpg", "y.jpg", 10, 1.0, False)])
+    jid = db.start_job(conn, "scan", {"stage": "features", "done": 2, "total": 4, "faces": True})
+    db.job_progress(conn, jid, {"stage": "features", "done": 2, "total": 4, "faces": True})
+    # Opening the shoot (a fresh app, or POST /api/folder) marks it interrupted and /api/stats carries it.
+    fresh = TestClient(create_app(tmp_path))
+    s = fresh.get("/api/stats").json()["scan"]
+    assert db.latest_jobs(conn)["scan"]["state"] == "interrupted"
+    assert s["interrupted"] == dict(kind="scan", stage="features", done=2, total=4, started=s["interrupted"]["started"], error=None)
+    assert (s["items"], s["scanned"], s["pending"], s["complete"]) == (4, 2, 2, False)
+    jid2 = db.start_job(conn, "focus", {"stage": "focus", "done": 1, "total": 2})
+    assert c.post("/api/folder", json={"path": str(tmp_path)}).status_code == 200
+    assert db.latest_jobs(conn)["focus"]["state"] == "interrupted"
+    assert c.get("/api/stats").json()["scan"]["interrupted"]["kind"] == "focus"    # the most recent one wins
+    # The pending rows belong to files that are not there: a scan drops them, and the finished scan is history.
+    conn.execute("DELETE FROM photos WHERE status='pending'"); conn.commit()
+    db.finish_job(conn, jid2, "done")
+    index_folder(tmp_path, faces=False, workers=1, embed=True)
+    s = c.get("/api/stats").json()["scan"]
+    assert s["complete"] is True and s["interrupted"] is None
+
+
+def test_index_resume_uses_the_interrupted_scans_own_faces_choice(tmp_path, monkeypatch):
+    from photosort import db
+    seen = []
+    def fake_index(root, faces=True, progress=None, retry_errors=False, **kw):
+        seen.append(dict(faces=faces, retry_errors=retry_errors))
+        return dict(total=1, indexed=0, skipped=1, faced=0, errors=0, embedded=0, seconds=0.0)
+    monkeypatch.setattr("photosort.index.index_folder", fake_index)
+    c = _shoot_client(tmp_path, n=1)                       # scan_faces is "0" from the faces=False index
+    r = c.post("/api/index", json={"faces": True, "resume": True})
+    assert r.status_code == 200 and r.json() == {"started": True, "faces": False}
+    _wait_progress(c)
+    assert seen[-1] == dict(faces=False, retry_errors=False)
+    db.set_meta(db.connect(tmp_path), "scan_faces", "1")
+    r = c.post("/api/index", json={"faces": False, "resume": True})
+    assert r.status_code == 200 and r.json()["faces"] is True
+    _wait_progress(c)
+    assert seen[-1]["faces"] is True
+    r = c.post("/api/index", json={"faces": False})        # a plain scan takes the box
+    assert r.json()["faces"] is False
+    _wait_progress(c)
+    assert seen[-1]["faces"] is False
+
+
+def test_index_409_while_the_disk_is_away_and_a_mid_scan_unplug_is_a_pause(tmp_path, monkeypatch):
+    import shutil
+    from photosort.index import SourceUnavailable
+    from conftest import make_image
+    shoot = tmp_path / "shoot"; shoot.mkdir()
+    make_image(shoot, "a.jpg")
+    index_folder(shoot, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(shoot))
+    parked = tmp_path / "parked"
+    shutil.move(str(shoot), str(parked))
+    r = c.post("/api/index", json={"faces": False})
+    assert r.status_code == 409 and "not connected" in r.json()["detail"]
+    assert c.get("/api/progress").json()["running"] is False
+    shutil.move(str(parked), str(shoot))
+    def unplugged(root, faces=True, progress=None, retry_errors=False, **kw):
+        progress({"stage": "features", "done": 3, "total": 9, "stage_started": time.time()})
+        raise SourceUnavailable(f"{root} went away during the scan. Plug the disk in and continue; 3 photos are scanned so far.")
+    monkeypatch.setattr("photosort.index.index_folder", unplugged)
+    assert c.post("/api/index", json={"faces": False}).status_code == 200
+    p = _wait_progress(c)
+    assert p["stage"] == "paused" and "went away" in p["error"] and (p["done"], p["total"]) == (3, 9)
+    assert p["running"] is False and p["awake"] is False
+    assert c.post("/api/index", json={"faces": False, "resume": True}).status_code == 200   # not wedged
+    _wait_progress(c)
+
+
+def test_scan_health_names_the_one_fix(tmp_path, monkeypatch):
+    from photosort import db
+    from conftest import make_image
+    assert TestClient(create_app(None)).get("/api/scan/health").status_code == 400
+    c = _shoot_client(tmp_path, n=2)
+    h = c.get("/api/scan/health").json()
+    assert (h["on_disk"], h["new_on_disk"], h["scanned"], h["unembedded"], h["faces_pending"]) == (2, 0, 2, 2, 2)
+    assert h["fix"] == "continue" and h["mounted"] is True and h["running"] is False
+    index_folder(tmp_path, faces=False, workers=1, embed=True)
+    assert c.get("/api/scan/health").json()["fix"] == "faces"          # scanned without faces: the one gap left
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET n_faces=0"); conn.commit()
+    assert c.get("/api/scan/health").json()["fix"] is None
+    make_image(tmp_path, "new.jpg", seed=9)
+    h = c.get("/api/scan/health").json()
+    assert (h["on_disk"], h["new_on_disk"], h["fix"]) == (3, 1, "rescan")
+    jid = db.start_job(conn, "focus", {"stage": "focus", "done": 1, "total": 2})
+    db.finish_job(conn, jid, "interrupted")
+    assert c.get("/api/scan/health").json()["fix"] == "focus"          # a cut-short focus pass is not a scan
+    db.finish_job(conn, db.start_job(conn, "focus"), "done")
+    assert c.get("/api/scan/health").json()["fix"] == "rescan"
+    # While a scan runs the walk would only race it: on_disk is None and the counts come from the index.
+    def slow(root, faces=True, progress=None, retry_errors=False, **kw):
+        time.sleep(0.4)
+        return dict(total=3, indexed=1, skipped=2, faced=0, errors=0, embedded=1, seconds=0.4)
+    monkeypatch.setattr("photosort.index.index_folder", slow)
+    assert c.post("/api/index", json={"faces": False}).status_code == 200
+    h = c.get("/api/scan/health").json()
+    assert h["running"] is True and h["on_disk"] is None and h["new_on_disk"] == 0
+    _wait_progress(c)
+
+
+def test_awake_is_held_for_a_scan_and_reported_on_every_progress_endpoint(tmp_path, monkeypatch):
+    from photosort import awake
+    held = []
+    def fake_index(root, faces=True, progress=None, retry_errors=False, **kw):
+        held.append(awake.held())
+        time.sleep(0.3)
+        return dict(total=1, indexed=0, skipped=1, faced=0, errors=0, embedded=0, seconds=0.3)
+    monkeypatch.setattr("photosort.index.index_folder", fake_index)
+    c = _shoot_client(tmp_path, n=1)
+    for path in ("/api/progress", "/api/classify/progress", "/api/focus/progress", "/api/export/progress"):
+        assert c.get(path).json()["awake"] is False, path
+    assert c.post("/api/index", json={"faces": False}).status_code == 200
+    seen_true = False
+    for _ in range(100):
+        p = c.get("/api/progress").json()
+        if p["awake"]: seen_true = True
+        if not p["running"]: break
+        time.sleep(0.02)
+    assert held == [True] and seen_true and p["awake"] is False and awake.held() is False
+
+
+def test_bundle_import_reply_says_how_far_the_scan_got(tmp_path, tmp_path_factory):
+    """A scan file of a half-scanned shoot: the import reply carries the scan block (complete False), so the UI
+    says so and offers Continue instead of quietly showing fewer items. After Continue the same shoot's
+    stats say complete."""
+    import zipfile, json
+    from photosort import db
+    from photosort.walk import ImageFile
+    from photosort.bundle import export_bundle
+    c = _shoot_client(tmp_path, n=2)
+    conn = db.connect(tmp_path)
+    db.add_pending(conn, [ImageFile(tmp_path / "later.jpg", "later.jpg", 10, 1.0, False)])   # listed, never read
+    jid = db.start_job(conn, "scan", {"stage": "features", "done": 2, "total": 3, "faces": False})
+    db.finish_job(conn, jid, "interrupted", error="unplugged")
+    out = tmp_path_factory.mktemp("out")
+    z = export_bundle(tmp_path, out)
+    other = TestClient(create_app(None))
+    r = other.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path)})
+    assert r.status_code == 200, r.text
+    scan = r.json()["scan"]
+    assert scan["complete"] is False and (scan["items"], scan["scanned"], scan["pending"], scan["unembedded"]) == (3, 2, 1, 2)
+    assert scan["interrupted"]["kind"] == "scan" and scan["interrupted"]["done"] == 2 and scan["faces"] is False
+    assert other.get("/api/stats").json()["scan"]["pending"] == 1
+    # An older scan file without "scan" in bundle.json gets the same reply, from the installed index.
+    old = out / "old.photosort-index.zip"
+    with zipfile.ZipFile(z) as src, zipfile.ZipFile(old, "w") as dst:
+        for i in src.infolist():
+            data = src.read(i.filename)
+            if i.filename == "bundle.json":
+                info = json.loads(data); info.pop("scan"); data = json.dumps(info)
+            dst.writestr(i, data)
+    r = other.post("/api/bundle/import", json={"zip": str(old), "root": str(tmp_path)})
+    assert r.status_code == 200 and r.json()["scan"]["pending"] == 1 and r.json()["scan"]["complete"] is False
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]

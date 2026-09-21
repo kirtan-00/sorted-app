@@ -108,20 +108,32 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     t0 = time.time(); root = Path(root)
     _raw = progress or (lambda d: None)
     stage = {"name": None, "t": t0}
+    job = {"id": None, "written": 0.0}
     def notify(d: dict) -> None:
         if d["stage"] != stage["name"]:
             stage["name"], stage["t"] = d["stage"], time.time()
         _raw(dict(d, stage_started=stage["t"]))
+        # The job row keeps the last progress, written at most every 2 s (the features pass already commits per file).
+        now = time.time()
+        if job["id"] is not None and (now - job["written"] >= 2.0 or d["stage"] == "done"):
+            job["written"] = now
+            db.job_progress(conn, job["id"], {"stage": d["stage"], "done": d["done"], "total": d["total"], "faces": faces})
     if faces and not (YUNET_PATH.exists() and SFACE_PATH.exists()):
         raise FileNotFoundError("face models missing; run scripts/fetch_models.sh")
     conn = db.connect(root)
     notify({"stage": "scan", "done": 0, "total": 0})
-    n_ok = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
+    # Rows the index already holds, pending ones included: a scan cut short after listing its files and
+    # before reading any of them still has a shoot worth protecting from an empty mount point.
+    n_ok = conn.execute("SELECT count(*) FROM photos WHERE status IN ('ok', 'pending')").fetchone()[0]
     if not root.is_dir():
         raise SourceUnavailable(f"{root} is not there. Plug the disk in; the saved index ({n_ok} photos) was left untouched.")
     files = find_images(root)
     if not files and n_ok > 0:
         raise SourceUnavailable(f"{root} has no photos right now. Is the disk mounted? The saved index ({n_ok} photos) was left untouched.")
+    if not root.is_dir():
+        # Unplugged during the walk: os.walk swallows the errors and hands back a partial list, which
+        # must not mark the rest of the shoot missing.
+        raise SourceUnavailable(f"{root} went away while its files were being listed. Plug the disk in; the saved index ({n_ok} photos) was left untouched.")
     known = db.known_files(conn, retry_errors=retry_errors)
     missing = db.missing_files(conn)
     idx = db.index_dir(root)
@@ -138,7 +150,33 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     changed = {f.rel for f in todo}
     face_todo = [f for f in files if f.rel in need_faces and f.rel not in changed]
     stats = dict(total=len(files), skipped=len(files) - len(todo) - len(face_todo), indexed=0, faced=0, errors=0, embedded=0)
+    # Every file still to read gets its pending row now, so the index knows the whole shoot before the first
+    # decode: a scan cut short (disk unplugged, app quit) reports "2,080 of 4,315 scanned" and a Continue
+    # does the rest. db.scan_counts reads it back.
+    db.add_pending(conn, todo)
     db.mark_missing(conn, {f.rel for f in files})
+    db.set_meta(conn, "scan_faces", "1" if faces else "0")
+    # The job row: found again as 'interrupted' when the shoot is next opened if this run never finishes.
+    job["id"] = db.start_job(conn, "scan", {"stage": "scan", "done": 0, "total": len(todo), "faces": faces})
+    try:
+        _run_stages(root, conn, todo, face_todo, faces, workers, embed, stats, notify, idx)
+    except SourceUnavailable as e:
+        db.finish_job(conn, job["id"], "interrupted", error=str(e))
+        raise
+    except BaseException as e:
+        db.finish_job(conn, job["id"], "failed", error=f"{type(e).__name__}: {e}")
+        raise
+    stats["seconds"] = round(time.time() - t0, 1)
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))"); conn.commit()
+    db.finish_job(conn, job["id"], "done", progress={"stage": "done", "done": stats["total"], "total": stats["total"], "faces": faces})
+    job["id"] = None
+    notify({"stage": "done", "done": stats["total"], "total": stats["total"]})
+    return stats
+
+def _run_stages(root: Path, conn, todo, face_todo, faces: bool, workers: int | None, embed: bool,
+                stats: dict, notify, idx: Path) -> None:
+    """The three passes of index_folder (faces on stored thumbs, features from the disk, embeddings from
+    the thumbs), each resumable: a pass only ever touches rows that lack its result."""
     if face_todo:
         qh = {r[0]: r[1] for r in conn.execute("SELECT rel, qhash FROM photos WHERE n_faces IS NULL AND status='ok'")}
         ctx = mp.get_context("spawn")
@@ -159,6 +197,11 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         done = 0
         def _store(res):
             nonlocal done
+            if res["error"] and not root.is_dir():
+                # The disk went away mid-scan. Stop here, before this file is written down as an error: its
+                # row stays pending, the ones already read stay ok, and Continue picks up from this point.
+                n_ok = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
+                raise SourceUnavailable(f"{root} went away during the scan. Plug the disk in and continue; {n_ok} photos are scanned so far.")
             if res["error"]:
                 stats["errors"] += 1
                 db.mark_error(conn, res["rel"], meta[res["rel"]][0], meta[res["rel"]][1])
@@ -223,7 +266,3 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
             conn.commit()
             done += len(batch)
             notify({"stage": "embed", "done": done, "total": total})
-    stats["seconds"] = round(time.time() - t0, 1)
-    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))"); conn.commit()
-    notify({"stage": "done", "done": stats["total"], "total": stats["total"]})
-    return stats

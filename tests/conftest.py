@@ -25,6 +25,14 @@ def _isolated_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PHOTOSORT_EXPORT_DIR", str(tmp_path_factory.mktemp("out")))
     # the launcher log: never the real ~/Library/Logs/photosort.log, whose content is whatever ran on this Mac
     monkeypatch.setenv("PHOTOSORT_LOG", str(tmp_path_factory.mktemp("log") / "photosort.log"))
+    # the sleep guard: a python child that sleeps stands in for caffeinate, so no test touches the Mac's power state
+    import sys
+    from photosort import awake
+    monkeypatch.setattr(awake, "AWAKE_CMD", [sys.executable, "-c", "import time; time.sleep(600)", "{pid}"])
+    monkeypatch.setattr(awake, "_proc", None)
+    monkeypatch.setattr(awake, "_holders", 0)
+    yield
+    awake._stop(awake._proc)       # a job thread still running when the test ended must not leave a sleeper behind
 
 FFMPEG = shutil.which("ffmpeg") or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg") if os.path.exists(p)), None)
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")

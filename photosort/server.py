@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from . import usage
+from . import awake
 from . import classify as classify_mod
 from . import focus as focus_mod
 from . import settings
@@ -60,6 +61,7 @@ class RejectReq(BaseModel):
 class IndexReq(BaseModel):
     faces: bool = True
     retry_errors: bool = False
+    resume: bool = False          # Continue scan: faces as the interrupted scan had it (meta scan_faces), not the box
 
 
 class ModeReq(BaseModel):
@@ -244,11 +246,44 @@ def create_app(root: Path | None = None) -> FastAPI:
         conn = db.connect(r)
         n = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
         # mounted: the folder is reachable right now; false once the shoot disk is unplugged.
+        # scan: how far the scan got (the welcome needs it while the disk is away, before any stats call).
         return {"root": str(r), "name": r.name or str(r), "indexed": n > 0, "items": n,
-                "mounted": r.is_dir(), "disk": _disk_name(r)}
+                "mounted": r.is_dir(), "disk": _disk_name(r), "scan": _scan_block(conn)}
 
     def _public_folder_info() -> dict:
         return {k: v for k, v in _folder_info().items() if k != "items"}
+
+    # ===== resume: what the index says about its own scan, and the jobs cut short =====
+    def _open_root(r: Path) -> None:
+        """Housekeeping when a shoot is opened: nothing can be running for it yet, so a job row still
+        'running' was cut short (the app quit, the Mac died) and is marked interrupted."""
+        try:
+            db.interrupt_running_jobs(db.connect(r))
+        except Exception:
+            pass
+
+    EMPTY_SCAN = dict(items=0, scanned=0, embedded=0, faced=0, errors=0, pending=0, pending_photos=0, pending_clips=0,
+                      photos=0, clips=0, scanned_photos=0, scanned_clips=0, unembedded=0, complete=True,
+                      faces=True, interrupted=None)
+
+    def _scan_block(conn) -> dict:
+        """The scan: {items, scanned, embedded, faced, complete, ...counts, faces, interrupted}. faces is what
+        the last scan was asked for (Continue reuses it). interrupted is the most recent scan or focus job
+        that never finished, with its last progress, or None."""
+        out = db.scan_counts(conn)
+        out["faces"] = db.get_meta(conn, "scan_faces") != "0"
+        jobs = db.latest_jobs(conn)
+        cut = [j for j in jobs.values() if j["state"] == "interrupted" and j["kind"] in ("scan", "focus")]
+        # An interrupted scan whose work is all done by now (Continue ran, counts say complete) is history.
+        cut = [j for j in cut if not (j["kind"] == "scan" and out["complete"])]
+        if cut:
+            j = max(cut, key=lambda j: j["id"])
+            out["interrupted"] = {"kind": j["kind"], "stage": j["progress"].get("stage"), "done": j["progress"].get("done", 0),
+                                  "total": j["progress"].get("total", 0), "started": j["started"], "error": j["error"]}
+        else:
+            out["interrupted"] = None
+        return out
+    # ===== end resume =====
 
     def _log_folder_open(imported: bool = False) -> None:
         info = _folder_info()
@@ -256,6 +291,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             usage.log("folder_open", shoot=info["name"], items=info["items"], indexed=info["indexed"], imported=imported)
 
     if root is not None:
+        _open_root(root)
         _log_folder_open()
 
     def _switch_root(new_root: Path) -> dict:
@@ -271,6 +307,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             state["classify"] = {"running": False, "counts": {}, "discovered": {}, "error": None}
             state["focus"] = {"running": False, "done": 0, "total": 0, "counts": {}, "error": None}
             state["export"] = {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None}
+        _open_root(new_root)
         _save_recent(str(new_root))
         _log_folder_open()
         return _public_folder_info()
@@ -305,13 +342,20 @@ def create_app(root: Path | None = None) -> FastAPI:
         from .index import index_folder
         def prog(d):
             state["progress"] = d
+        from .index import SourceUnavailable
         t0 = time.time(); stats = {}; err = None
         try:
-            stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
-            _auto_classify(root_at_start, stats)
+            with awake.hold():
+                stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
+                _auto_classify(root_at_start, stats)
+        except SourceUnavailable as e:
+            # The disk went away: not a failure, a pause. What was scanned is kept; Continue does the rest
+            # once the disk is back (the UI reads mounted from /api/stats).
+            err = str(e)
+            last = state["progress"] if isinstance(state["progress"], dict) else {}
+            state["progress"] = {"stage": "paused", "error": err, "done": last.get("done", 0), "total": last.get("total", 0)}
         except Exception as e:
-            from .index import SourceUnavailable
-            msg = str(e) if isinstance(e, SourceUnavailable) else f"{type(e).__name__}: {e}"
+            msg = f"{type(e).__name__}: {e}"
             err = msg
             state["progress"] = {"stage": "error", "error": msg, "done": 0, "total": 0}
         finally:
@@ -393,7 +437,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         root = state["root"]
         if root is None:
             return dict(root=None, photos=0, videos=0, faces=0, people=0, errors=0, last_index=None, indexing=state["running"],
-                        faces_pending=0, focus={"checked": 0, "bad": 0, "soft": 0})
+                        faces_pending=0, focus={"checked": 0, "bad": 0, "soft": 0}, scan=dict(EMPTY_SCAN))
         conn = db.connect(root)
         n = lambda q: conn.execute(q).fetchone()[0]
         last = conn.execute("SELECT value FROM meta WHERE key='last_index'").fetchone()
@@ -410,7 +454,49 @@ def create_app(root: Path | None = None) -> FastAPI:
             faces_pending=n("SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL"),
             focus={k: v for k, v in focus_mod.status(root).items() if k != "unchecked"},
             mounted=root.is_dir(),
+            scan=_scan_block(conn),
         )
+
+    @app.get("/api/scan/health")
+    def scan_health():
+        """The Scan tab's health line, recomputed when the tab opens: the scan block plus on_disk, a fresh
+        count of the items in the folder right now (None while the disk is away or a scan is running, when
+        the walk would only race it), new_on_disk (items the index has no row for), faces_pending, and fix:
+        the one thing that closes the gap ("continue" a scan, "rescan" for files the index has not seen,
+        "faces" for photos never checked, "focus" when the last focus check was cut short, None when there
+        is nothing to do)."""
+        root = state["root"]
+        if root is None:
+            raise HTTPException(400, "no folder open")
+        conn = db.connect(root)
+        scan = _scan_block(conn)
+        mounted = root.is_dir()
+        on_disk = None; new_on_disk = 0
+        if mounted and not state["running"]:
+            from .walk import find_images
+            try:
+                files = find_images(root)
+            except OSError:
+                files = []
+            if files or scan["items"] == 0:      # an empty walk on a shoot with rows is the unmounted guard's case, not a count
+                on_disk = len(files)
+                have = set(db.known_files(conn)) | set(db.missing_files(conn))
+                have |= {r[0] for r in conn.execute("SELECT rel FROM photos WHERE status='pending'")}
+                new_on_disk = sum(1 for f in files if f.rel not in have)
+        faces_pending = int(conn.execute("SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL").fetchone()[0])
+        cut = scan["interrupted"]
+        if scan["pending"] or scan["unembedded"] or (cut and cut["kind"] == "scan"):
+            fix = "continue"
+        elif cut and cut["kind"] == "focus":
+            fix = "focus"                     # Continue for a focus pass is POST /api/focus, not a scan
+        elif new_on_disk:
+            fix = "rescan"
+        elif faces_pending:
+            fix = "faces"
+        else:
+            fix = None
+        return dict(scan, on_disk=on_disk, new_on_disk=new_on_disk, faces_pending=faces_pending, mounted=mounted,
+                    running=state["running"], fix=fix)
 
     @app.get("/api/errors")
     def errors():
@@ -432,14 +518,23 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(409, "cannot scan while the disk is being reorganised")
         if state["focus"]["running"]:
             raise HTTPException(409, "cannot scan while the focus check is running")
+        faces = req.faces
+        if req.resume:
+            # Continue scan: the interrupted scan's own faces choice, so a scan started with faces off does
+            # not grow a faces pass (and one started with faces on does not lose it) on the way back.
+            faces = db.get_meta(db.connect(state["root"]), "scan_faces") != "0"
+        if not state["root"].is_dir():
+            raise HTTPException(409, f"{_disk_name(state['root'])} is not connected; plug it in first")
         state["running"] = True
-        usage.log("index_start", shoot=state["root"].name, faces=req.faces, retry_errors=req.retry_errors)
-        threading.Thread(target=_run, args=(state["root"], req.faces, req.retry_errors), daemon=True).start()
-        return {"started": True}
+        state["progress"] = {"stage": "scan", "done": 0, "total": 0, "stage_started": time.time()}
+        usage.log("index_start", shoot=state["root"].name, faces=faces, retry_errors=req.retry_errors, resume=req.resume)
+        threading.Thread(target=_run, args=(state["root"], faces, req.retry_errors), daemon=True).start()
+        return {"started": True, "faces": faces}
 
     @app.get("/api/progress")
     def progress():
-        return dict(state["progress"], running=state["running"])
+        """The scan's progress plus running and awake (caffeinate is holding the Mac awake for a job)."""
+        return dict(state["progress"], running=state["running"], awake=awake.held())
 
     def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
                  hide_bad=0, hide_soft=0) -> Filters:
@@ -789,8 +884,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             # is marked stale in finally, after both: a search in between would refresh it and clear the
             # flag, and the cluster columns written after that would never reach the next search.
             try:
-                state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
-                state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
+                with awake.hold():
+                    state["classify"]["counts"] = classify_mod.classify_and_store(root_at_start)
+                    state["classify"]["discovered"] = classify_mod.discover_and_store(root_at_start)
             except Exception as e:
                 state["classify"]["error"] = f"{type(e).__name__}: {e}"
             finally:
@@ -803,7 +899,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/classify/progress")
     def classify_progress():
-        return state["classify"]
+        return dict(state["classify"], awake=awake.held())
 
     # The on-demand focus pass: started from the "hide blurry" filter, never at the end of an index.
     # Same job shape as classify: one background thread, progress polled, the Index marked stale after.
@@ -835,7 +931,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_focus():
             try:
-                state["focus"]["counts"] = focus_mod.check_focus(root_at_start, progress=prog)
+                with awake.hold():
+                    state["focus"]["counts"] = focus_mod.check_focus(root_at_start, progress=prog)
             except Exception as e:
                 state["focus"]["error"] = f"{type(e).__name__}: {e}"
             finally:
@@ -850,8 +947,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/focus/progress")
     def focus_progress():
-        """{running, done, total, counts, error}; counts is {ok, soft, bad, checked} once the pass ended."""
-        return state["focus"]
+        """{running, done, total, counts, error, awake}; counts is {ok, soft, bad, checked} once the pass ended."""
+        return dict(state["focus"], awake=awake.held())
 
     @app.get("/api/focus/status")
     def focus_status():
@@ -981,7 +1078,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base))
+                with awake.hold():
+                    state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -993,7 +1091,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 
     @app.get("/api/export/progress")
     def export_progress():
-        return state["export"]
+        return dict(state["export"], awake=awake.held())
 
     @app.post("/api/export/categories")
     def export_categories_api(req: CategoriesExportReq):
@@ -1035,10 +1133,11 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
-                                                                base=base, progress=prog, discovered=req.discovered,
-                                                                include_unsure=req.include_unsure, videos=req.videos,
-                                                                drone=req.drone, hide_bad=req.hide_bad))
+                with awake.hold():
+                    state["export"]["path"] = str(export_categories(root_at_start, req.categories, req.mode, req.include_raw,
+                                                                    base=base, progress=prog, discovered=req.discovered,
+                                                                    include_unsure=req.include_unsure, videos=req.videos,
+                                                                    drone=req.drone, hide_bad=req.hide_bad))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -1085,8 +1184,9 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                state["export"]["path"] = str(export_references(root_at_start, req.names, req.mode, req.include_raw,
-                                                                base=base, progress=prog, min_sim=min_sim))
+                with awake.hold():
+                    state["export"]["path"] = str(export_references(root_at_start, req.names, req.mode, req.include_raw,
+                                                                    base=base, progress=prog, min_sim=min_sim))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -1223,8 +1323,9 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                res = drive_mod.upload_files(root_at_start, folder_id, jobs, web_size=req.web_size,
-                                             skip_videos=req.skip_videos, progress=prog)
+                with awake.hold():
+                    res = drive_mod.upload_files(root_at_start, folder_id, jobs, web_size=req.web_size,
+                                                 skip_videos=req.skip_videos, progress=prog)
                 state["export"]["failures"] = res["failures"]
                 state["export"]["path"] = drive_mod.folder_link(folder_id)
             except Exception as e:
@@ -1264,7 +1365,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run():
             try:
-                work(prog)
+                with awake.hold():
+                    work(prog)
                 state["export"]["path"] = str(root_at_start / reorganise_mod.SORTED_DIR)
                 if state["root"] == root_at_start:
                     state["index"].refresh(); state["stale"] = False
@@ -1362,7 +1464,8 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         def _run_export():
             try:
-                state["export"]["path"] = str(bundle.export_bundle(root_at_start, base, progress=prog))
+                with awake.hold():
+                    state["export"]["path"] = str(bundle.export_bundle(root_at_start, base, progress=prog))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -1447,8 +1550,11 @@ def create_app(root: Path | None = None) -> FastAPI:
             # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
             raise HTTPException(400, "that scan file is not readable")
         out = _switch_root(root)
-        usage.log("bundle_import", photos=info.get("photos"))
-        return dict(out, imported=True, root=str(root), photos=info.get("photos"))
+        # scan: from the installed index itself (an older bundle has no "scan" in its bundle.json), so the
+        # UI can say "2,080 of 4,315 scanned, continue?" instead of quietly showing fewer items.
+        scan = _scan_block(db.connect(root))
+        usage.log("bundle_import", photos=info.get("photos"), complete=scan["complete"])
+        return dict(out, imported=True, root=str(root), photos=info.get("photos"), scan=scan)
 
     @app.post("/api/bundle/import/choose")
     def import_bundle_choose():

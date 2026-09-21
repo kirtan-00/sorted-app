@@ -72,6 +72,7 @@
       <p class="welcome-lede">sorted scans every photo and clip on a shoot disk and keeps what it learns on this Mac. Search the shoot in plain words, pull every frame of one person, sort it into categories, export what you pick. Nothing leaves the Mac.</p>
       <p class="welcome-ask">Connect the shoot disk, then:</p>
       <p id="welcome-unmounted" class="welcome-unmounted" hidden>Connect <span id="welcome-disk"></span> or scan another folder.</p>
+      <p id="welcome-scanleft" class="welcome-scanleft" hidden><span id="welcome-scanleft-text"></span> The scan continues from where it stopped once the disk is back.</p>
       <div class="welcome-actions">
         <button type="button" id="welcome-scan" class="btn welcome-btn" title="pick a disk or folder; a folder not scanned yet starts scanning straight away">
           <span class="l">Scan a disk or folder</span>
@@ -116,6 +117,14 @@
       <span id="ctx-crumb" class="ctx-crumb" aria-label="where this filter came from"></span>
       <span class="spring"></span>
       <button type="button" id="ctx-clear" class="link" title="drop the filter and stay on Search">Clear filter</button>
+    </div>
+    <div id="scanbar" class="scanbar" hidden>
+      <span class="scanbar-dot" aria-hidden="true"></span>
+      <span id="scanbar-text" class="scanbar-text"></span>
+      <span id="scanbar-awake" class="scanbar-awake" hidden title="caffeinate holds the Mac awake until the scan ends">keeping the Mac awake</span>
+      <span class="spring"></span>
+      <button type="button" id="scanbar-continue" class="btn small primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
+      <button type="button" id="scanbar-tab" class="link" title="the Scan tab (command-4)">Scan tab</button>
     </div>
     </div>
     <div id="grid" class="grid" role="grid" aria-label="results"></div>
@@ -256,7 +265,6 @@
       <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder">Scan this folder</button>
       <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
       <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
-      <button type="button" id="detect-faces-now" class="btn" hidden title="find faces in the photos that were scanned without them">Detect faces now</button>
       <span class="spring"></span>
       <button type="button" id="bundle-export" class="btn" title="save this shoot's scan file (one zip) wherever you like">Save scan file</button>
       <button type="button" id="bundle-import" class="btn" title="open a scan file made on another Mac">Load scan file</button>
@@ -264,7 +272,16 @@
     <div class="panel" data-panel="progress">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Progress</button>
       <div class="panel-body">
+        <div id="scan-resume" class="scan-resume" hidden>
+          <p id="scan-resume-text" class="scan-resume-text"></p>
+          <button type="button" id="scan-continue" class="btn primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
+        </div>
         <pre id="progress"></pre>
+        <p id="scan-awake" class="hint scan-awake" hidden>Keeping the Mac awake until this finishes. Closing the lid still puts it to sleep.</p>
+        <div id="scan-health" class="scan-health">
+          <span id="scan-health-text" class="scan-health-text">Checking the folder…</span>
+          <button type="button" id="scan-fix" class="btn small" hidden></button>
+        </div>
         <div id="index-errors" hidden>
           <p id="index-errors-title"></p>
           <pre id="index-errors-list" class="mono"></pre>
@@ -322,7 +339,8 @@
     <div class="panel" data-panel="help-scan">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, or load a scan file</button>
       <div class="panel-body help-lines">
-        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The disk is only ever read.</p>
+        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The disk is only ever read. The Mac stays awake until the scan ends.</p>
+        <p>If the disk is unplugged or the Mac dies mid-scan, nothing is lost: the shoot opens with "2,080 of 4,315 scanned" and a Continue scan button that reads only what is missing. The Scan tab's last line says what is on the disk, what is scanned and what is searchable, with one button for the gap.</p>
         <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort. "Save scan file" packs it into one zip, wherever you like.</p>
         <p>Hand that zip to an editor with the disk and "Load a scan file" opens the shoot on their Mac in seconds, already searchable, with the saved people.</p>
         <p>Nothing leaves the Mac, ever.</p>

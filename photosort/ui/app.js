@@ -24,6 +24,9 @@
     caps: { focus: false },     // true once /api/stats carries "focus": the server has the focus and reorganise endpoints
     facesPending: 0,            // ok rows with n_faces NULL (indexed with faces off)
     // ===== end server capabilities =====
+    // ===== resume: how far the scan got, from /api/stats.scan or /api/folder.scan (null before the first read) =====
+    scan: null,                 // {items, scanned, embedded, pending, unembedded, complete, faces, interrupted: {kind, stage, done, total} | null}
+    // ===== end resume =====
     // ===== navigation: where the Search filter came from, and each list's scroll position =====
     ctx: null,                  // null, or {from: "people"|"categories", kind: "person"|"saved"|"category"|"cluster"|"drone", key}
     scroll: {},                 // view name -> main.scrollTop when the user left it
@@ -206,6 +209,7 @@
     if (name === "people" && state.people.length === 0) loadPeople();
     if (name === "people") { loadReferences(); loadSuggestions(); }   // loadSuggestions: the "same person?" block below
     if (name === "categories") loadCategories();
+    if (name === "index") loadScanHealth();            // ===== resume: the health line walks the disk when the tab opens =====
     mountDriveStrip();                                 // ===== Google Drive: the strip sits under whichever export row is showing =====
   }
   $$("header nav button[data-view]").forEach(function (b) {   // ===== nav selector (see showView) =====
@@ -423,6 +427,7 @@
       // ===== end welcome =====
       // ===== after stats: capabilities, the faces-pending controls, the focus line and the reorganise status =====
       state.caps.focus = !!(s && typeof s.focus === "object");   // an older server has no focus or reorganise endpoints
+      if (s && s.scan) { state.scan = s.scan; renderScanBar(); }   // ===== resume =====
       renderFacesPending(s);
       loadFocusStatus();
       loadReorganiseStatus();
@@ -451,6 +456,8 @@
 
   function applyFolderInfo(info) {
     state.folder = info || { root: null, name: null, indexed: false };
+    if (info && info.scan) state.scan = info.scan;   // ===== resume =====
+    else if (!info || !info.root) state.scan = null;
     folderNameEl.textContent = state.folder.name || "no folder open";
     folderNameEl.title = state.folder.root || "";
   }
@@ -468,6 +475,11 @@
     welcomeUnmounted.hidden = !out;
     $(".welcome-ask").hidden = out;
     if (out) welcomeDisk.textContent = state.folder.disk || state.folder.name || "the disk";
+    // ===== resume: a shoot whose scan was cut short says so under the connect line =====
+    var left = out && state.scan && !state.scan.complete;
+    $("#welcome-scanleft").hidden = !left;
+    if (left) $("#welcome-scanleft-text").textContent = scanSummary(state.scan) + ".";
+    // ===== end resume =====
   }
   // ===== end welcome =====
 
@@ -531,6 +543,7 @@
     renderFocusLine(null);
     renderFacesPending(null);
     resetReorganise();
+    renderScanBar(); renderScanHealth(null);          // ===== resume: state.scan came with the folder reply =====
     // ===== end per-folder reset =====
     // ===== navigation: a filter from the previous shoot means nothing here; the lists start at the top =====
     setCtx(null);
@@ -2349,6 +2362,9 @@
     if (p.stage === "error") return "scan failed: " + (p.error || "unknown error");
     var done = p.done || 0, total = p.total || 0;
     var n = function (x) { return Number(x).toLocaleString("en-US"); };
+    // ===== resume: the disk went away mid-scan; what was read is kept and Continue does the rest =====
+    if (p.stage === "paused") return "Scan paused at " + n(done) + " of " + n(total) + ": the disk went away. Plug it in and press Continue scan; nothing already scanned is read again.";
+    // ===== end resume =====
     if (p.stage === "done") return "Scanned " + n(total) + " of " + n(total) + (p.running ? "" : "  finished");
     var line = (total || p.stage !== "scan") ? "Scanning " + n(done) + " of " + n(total) : "Scanning";
     line += "  " + (STAGE_TEXT[p.stage] || p.stage);
@@ -2369,15 +2385,19 @@
       api("/api/progress").then(function (p) {
         progressEl.textContent = formatProgress(p);
         progressEl.style.setProperty("--p", p.total ? (p.done || 0) / p.total : 0);   // the 4 px bar under the readout
+        renderAwake(p);                                // ===== resume: "keeping the Mac awake" while caffeinate holds =====
+        renderScanBar(p);                              // ===== resume: the search head shows the same readout =====
         if (!p.running) {
           stopProgressPoll();
           if (p.stage === "error") {
             setStatus("scan failed: " + (p.error || "unknown error"), true);
+          } else if (p.stage === "paused") {
+            setStatus("scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
           } else {
             setStatus("scan finished");
           }
           // the index changed under us: refresh everything that shows it
-          loadStats();
+          loadStats().then(function () { if (state.view === "index") loadScanHealth(); });   // ===== resume: the health line after a scan =====
           loadPeople();
           runSearch();
         }
@@ -2397,11 +2417,13 @@
       pollProgress();
       loadStats();
     }).catch(function (err) {
-      if (err.status === 409) {
-        setStatus(err.message || "already scanning");
+      if (err.status === 409 && /already scanning/.test(err.message || "")) {
+        setStatus(err.message);
         pollProgress();
       } else {
-        setStatus("could not start the scan: " + err.message);
+        // a 409 with another reason (the disk is not connected, a reorganise or focus check is running) is
+        // shown as it is; polling here would overwrite it with "scan finished" on the first idle tick
+        setStatus("could not start the scan: " + err.message, true);
       }
     });
   }
@@ -2409,6 +2431,123 @@
     startIndexJob({ faces: $("#faces").checked, retry_errors: $("#retry-errors").checked }, "scan started…");
   });
   // ===== end index job starter =====
+
+  // ===== resume: the scan bar, the welcome line, the Scan tab's resume / awake / health lines, Continue =====
+  // state.scan (from /api/stats and /api/folder) says how far the scan got from the index alone: items listed,
+  // rows read (scanned), rows searchable (embedded), rows listed but never read (pending), and the job cut short
+  // (interrupted: {kind scan|focus, stage, done, total}). The bar under the search head shows it while the shoot
+  // is not fully scanned, and the same readout as the Scan tab while a scan runs; the welcome shows it while the
+  // disk is away. Continue is POST /api/index {resume: true}: the server reuses the interrupted scan's own faces
+  // choice and only reads what is missing. The health line (GET /api/scan/health, when the Scan tab opens) adds
+  // what is on the disk right now and the one fix that closes the gap.
+  var scanBar = $("#scanbar");
+  var scanBarText = $("#scanbar-text");
+  var scanBarAwake = $("#scanbar-awake");
+  var scanBarContinue = $("#scanbar-continue");
+  var scanResume = $("#scan-resume");
+  var scanResumeText = $("#scan-resume-text");
+  var scanAwake = $("#scan-awake");
+  var scanHealthText = $("#scan-health-text");
+  var scanFix = $("#scan-fix");
+  var fmtN = function (x) { return Number(x || 0).toLocaleString("en-US"); };
+  var STAGE_AT = { scan: "listing the files", features: "reading photos and clips", faces: "finding faces", embed: "learning what is in each shot", focus: "checking focus" };
+  var lastProgress = null;                             // the last /api/progress reply while a scan runs
+
+  // "2,080 of 4,315 scanned" / "4,315 read, 2,235 not searchable yet": the one-line state of an unfinished scan.
+  function scanSummary(sc) {
+    if (!sc) return "";
+    if (sc.pending) return fmtN(sc.scanned) + " of " + fmtN(sc.items) + " scanned";
+    if (sc.unembedded) return fmtN(sc.items) + " read, " + fmtN(sc.unembedded) + " not searchable yet";
+    return fmtN(sc.items) + " scanned";
+  }
+  // Where the last scan stopped, in words, as the lead-in to the summary: "The last scan stopped while reading
+  // photos and clips: 2,080 of 4,315 scanned." A focus pass cut short is its own sentence.
+  function interruptedLine(sc) {
+    var j = sc && sc.interrupted;
+    if (!j) return "";
+    if (j.kind === "focus") return "The last focus check stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
+    return "The last scan stopped while " + (STAGE_AT[j.stage] || j.stage || "scanning") + ": ";
+  }
+
+  function continueScan() {
+    startIndexJob({ resume: true }, "continuing the scan…");
+    track("scan_continue");
+  }
+  scanBarContinue.addEventListener("click", continueScan);
+  $("#scan-continue").addEventListener("click", continueScan);
+  $("#scanbar-tab").addEventListener("click", function () { goView("index"); });
+
+  // The bar under the search head. Running: the progress readout (p) and the awake note. Not running and the
+  // scan short: the summary with Continue. Complete: hidden.
+  function renderScanBar(p) {
+    if (p && p.running) lastProgress = p;
+    else if (p && !p.running) lastProgress = null;
+    var sc = state.scan;
+    var running = !!(lastProgress && lastProgress.running);
+    var open = !!(state.folder && state.folder.root);
+    // the Scan tab's own resume block mirrors the bar's idle state
+    var showResume = open && !running && !!sc && !sc.complete;
+    scanResume.hidden = !showResume;
+    if (showResume) {
+      scanResumeText.textContent = interruptedLine(sc) + scanSummary(sc) + (sc.pending ? ", " + fmtN(sc.pending) + " still to read" : "") + ". Continue reads only what is missing.";
+    }
+    if (showResume && healthFix === "continue") scanFix.hidden = true;   // the block above already carries Continue
+    if (!open || (!running && (!sc || sc.complete))) { scanBar.hidden = true; scanBar.classList.remove("running"); return; }
+    scanBar.hidden = false;
+    scanBar.classList.toggle("running", running);
+    if (running) {
+      scanBarText.textContent = formatProgress(lastProgress);
+      scanBarAwake.hidden = !lastProgress.awake;
+      scanBarContinue.hidden = true;
+    } else {
+      scanBarText.textContent = interruptedLine(sc) + scanSummary(sc) + ". Search covers only what is scanned so far.";
+      scanBarAwake.hidden = true;
+      scanBarContinue.hidden = !!(sc.interrupted && sc.interrupted.kind === "focus" && !sc.pending && !sc.unembedded);
+    }
+  }
+  function renderAwake(p) {
+    scanAwake.hidden = !(p && p.running && p.awake);
+  }
+
+  // The health line: items on disk vs scanned vs searchable vs checked for faces, and one button for the gap.
+  var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Detect faces now", focus: "Finish the focus check" };
+  var healthFix = null;
+  function renderScanHealth(h) {
+    if (!h) { scanHealthText.textContent = state.folder && state.folder.root ? "Checking the folder…" : ""; scanFix.hidden = true; healthFix = null; return; }
+    if (h.running) { scanHealthText.textContent = ""; scanFix.hidden = true; healthFix = null; return; }   // the readout above says it all
+    var bits = [];
+    if (h.on_disk !== null && h.on_disk !== undefined) bits.push(fmtN(h.on_disk) + " on the disk");
+    else if (!h.mounted) bits.push("disk not connected");
+    bits.push(fmtN(h.scanned) + " scanned");
+    bits.push(fmtN(h.embedded) + " searchable");
+    if (h.faces || h.faced) bits.push(fmtN(h.faced) + " checked for faces");
+    else if (h.faces_pending) bits.push(fmtN(h.faces_pending) + " not checked for faces");
+    var text = bits.join(" · ");
+    if (h.new_on_disk) text += ". " + fmtN(h.new_on_disk) + " new " + (h.new_on_disk === 1 ? "file" : "files") + " on the disk the scan has not seen";
+    else if (h.errors) text += ". " + fmtN(h.errors) + " could not be read";
+    if (!h.fix) text += ". Everything on the disk is scanned and searchable";
+    scanHealthText.textContent = text + ".";
+    healthFix = h.fix;
+    scanFix.hidden = !healthFix || (healthFix === "continue" && !scanResume.hidden)    // the resume block already carries Continue
+      || (healthFix === "rescan" && !h.scanned);                                       // a never-scanned folder has Scan this folder right above
+    scanFix.textContent = FIX_LABEL[healthFix] || "";
+    scanFix.classList.toggle("primary", healthFix === "continue");
+  }
+  function loadScanHealth() {
+    if (!(state.folder && state.folder.root)) { renderScanHealth(null); return Promise.resolve(); }
+    renderScanHealth(null);
+    return api("/api/scan/health").then(function (h) {
+      if (h && typeof h.complete === "boolean") { state.scan = h; renderScanBar(); }
+      renderScanHealth(h);
+    }).catch(function () { scanHealthText.textContent = ""; scanFix.hidden = true; });
+  }
+  scanFix.addEventListener("click", function () {
+    if (healthFix === "continue") return continueScan();
+    if (healthFix === "rescan") return startIndexJob({ faces: $("#faces").checked, retry_errors: false }, "scanning the new files…");
+    if (healthFix === "faces") return scanFacesNow();
+    if (healthFix === "focus") return checkFocusBtn.click();
+  });
+  // ===== end resume =====
 
   // index bundles: pack the index into one zip, or install one picked from disk
   // A POST to a picker endpoint: null on 204 (cancelled), the JSON body otherwise, an Error on failure.
@@ -2466,7 +2605,13 @@
     }).then(function (info) {
       if (!info) return;
       applyFolderInfo(info);
-      setStatus("loaded " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
+      // ===== resume: a scan file of a half-scanned shoot says so, and the bar under the search offers Continue =====
+      if (info.scan && !info.scan.complete) {
+        setStatus("loaded " + (info.name || info.root) + ": " + scanSummary(info.scan) + ". This scan file is incomplete; press Continue scan with the disk connected.", true);
+      } else {
+        setStatus("loaded " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
+      }
+      // ===== end resume =====
       settleFolder(info);
     }).catch(function (err) {
       setStatus("could not load the scan file: " + err.message, true);
@@ -2615,15 +2760,13 @@
   });
   // ===== end focus =====
 
-  // ===== optional faces: "N need faces" in the title, "Detect faces now" on Index, the People tab link =====
+  // ===== optional faces: "N need faces" in the title, the Scan tab's health line ("Detect faces now"), the People tab link =====
   // /api/stats.faces_pending counts rows indexed with faces off. POST /api/index {faces: true} runs faces
   // only on those rows (the server skips everything else), with the usual index progress.
-  var detectFacesNow = $("#detect-faces-now");
   var facesPendingRow = $("#faces-pending-row");
   function renderFacesPending(s) {
     var n = (s && s.faces_pending) || 0;
     state.facesPending = n;
-    detectFacesNow.hidden = !(n > 0 && !(s && s.indexing));
     facesPendingRow.hidden = !(n > 0);
     $("#faces-pending-text").textContent = n + (n === 1 ? " photo" : " photos") + " not scanned for faces yet,";
   }
@@ -2631,7 +2774,6 @@
     startIndexJob({ faces: true }, "finding faces in " + state.facesPending + " photo(s)…");
     goView("index");                                   // ===== navigation: a tab switch, so a history entry =====
   }
-  detectFacesNow.addEventListener("click", scanFacesNow);
   $("#faces-pending-scan").addEventListener("click", scanFacesNow);
   // ===== end optional faces =====
 

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import sqlite3
+import json, sqlite3
 from pathlib import Path
 import numpy as np
 from .config import DB_NAME, EMBED_DIM, app_home, shoot_slug
@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS ref_faces(
 CREATE TABLE IF NOT EXISTS face_links(
   a INTEGER NOT NULL, b INTEGER NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('same','different')),
   created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(a, b));
+CREATE TABLE IF NOT EXISTS jobs(
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'running',
+  started TEXT DEFAULT (datetime('now')), finished TEXT, progress TEXT, error TEXT);
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 CREATE INDEX IF NOT EXISTS segments_photo ON segments(photo_id);
@@ -238,8 +241,9 @@ def set_meta(conn, key: str, value: str) -> None:
 
 def known_files(conn, retry_errors: bool = False) -> dict[str, tuple[int, float]]:
     """rel -> (size, mtime) for rows that count as already indexed. Missing rows are excluded here
-    and handled by missing_files() so a returning file can be restored without a re-decode."""
-    q = "SELECT rel, size, mtime FROM photos WHERE status != 'missing'"
+    and handled by missing_files() so a returning file can be restored without a re-decode. Pending rows
+    (listed by a scan that never got to them) are excluded too: they are the work a resumed scan does."""
+    q = "SELECT rel, size, mtime FROM photos WHERE status NOT IN ('missing', 'pending')"
     if retry_errors:
         q += " AND status != 'error'"
     return {r[0]: (r[1], r[2]) for r in conn.execute(q)}
@@ -286,4 +290,95 @@ def mark_missing(conn, present: set[str]) -> None:
     for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='ok'").fetchall():
         if rel not in present:
             conn.execute("UPDATE photos SET status='missing' WHERE rel=?", (rel,))
+    # A pending row holds nothing but the listing; one whose file is gone is simply dropped.
+    for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='pending'").fetchall():
+        if rel not in present:
+            conn.execute("DELETE FROM photos WHERE rel=? AND status='pending'", (rel,))
     conn.commit()
+
+# ===== scan progress per file, and the jobs table =====
+# A scan lists every file it found before it reads any of them: one row per file to do, status='pending'.
+# The row moves to 'ok' when its features are stored (upsert_photo), 'error' when the read failed. From
+# there the existing NULL columns say how far it got: embed NULL means not searchable yet, n_faces NULL
+# means never checked for faces. So "how much of this shoot is scanned" is one query over the index,
+# with or without the disk, and a resumed scan does exactly the rows that are not there yet.
+
+def add_pending(conn, files) -> int:
+    """List the files a scan is about to read: a row per (rel, size, mtime, is_video) with status='pending'.
+    A known row for a changed or failed file goes back to pending with its new size and mtime; its old
+    features stay until the re-read replaces them. Returns how many rows are pending now."""
+    conn.executemany(
+        "INSERT INTO photos(rel, size, mtime, status, kind) VALUES(?, ?, ?, 'pending', ?) "
+        "ON CONFLICT(rel) DO UPDATE SET status='pending', size=excluded.size, mtime=excluded.mtime, kind=excluded.kind",
+        [(f.rel, f.size, f.mtime, "video" if f.is_video else "photo") for f in files])
+    conn.commit()
+    return int(conn.execute("SELECT count(*) FROM photos WHERE status='pending'").fetchone()[0])
+
+def scan_counts(conn) -> dict:
+    """How far the shoot's scan got, from the index alone (no disk needed):
+    items: rows the last scan listed (pending, ok and error; missing rows are not on the disk any more),
+    scanned: rows read (status ok), embedded: scanned rows that are searchable, faced: scanned photos
+    checked for faces (n_faces set; clips never are), errors: rows that could not be read,
+    pending / pending_photos / pending_clips: listed but not read yet, unembedded: read but not searchable,
+    photos / clips and scanned_photos / scanned_clips split the items and the scanned rows by kind,
+    complete: nothing pending and every scanned row searchable (faces are optional and reported apart)."""
+    r = conn.execute("""SELECT
+        SUM(status IN ('pending','ok','error')), SUM(status='ok'),
+        SUM(status='ok' AND embed IS NOT NULL),
+        SUM(status='ok' AND COALESCE(kind,'photo') != 'video' AND n_faces IS NOT NULL),
+        SUM(status='error'),
+        SUM(status='pending'), SUM(status='pending' AND COALESCE(kind,'photo') != 'video'), SUM(status='pending' AND kind='video'),
+        SUM(status IN ('pending','ok','error') AND COALESCE(kind,'photo') != 'video'), SUM(status IN ('pending','ok','error') AND kind='video'),
+        SUM(status='ok' AND COALESCE(kind,'photo') != 'video'), SUM(status='ok' AND kind='video')
+        FROM photos""").fetchone()
+    n = [int(x or 0) for x in r]
+    out = dict(items=n[0], scanned=n[1], embedded=n[2], faced=n[3], errors=n[4],
+               pending=n[5], pending_photos=n[6], pending_clips=n[7],
+               photos=n[8], clips=n[9], scanned_photos=n[10], scanned_clips=n[11])
+    out["unembedded"] = out["scanned"] - out["embedded"]
+    out["complete"] = out["pending"] == 0 and out["unembedded"] == 0
+    return out
+
+# jobs: one row per background job (scan, focus) with its state and last progress, so a job that the
+# server never finished (the app quit, the Mac died) is found again as 'interrupted' the next time the
+# shoot opens, instead of being forgotten. States: running, done, failed, interrupted.
+
+def start_job(conn, kind: str, progress: dict | None = None) -> int:
+    cur = conn.execute("INSERT INTO jobs(kind, state, progress) VALUES(?, 'running', ?)",
+                       (kind, json.dumps(progress or {})))
+    conn.commit()
+    return int(cur.lastrowid)
+
+def job_progress(conn, job_id: int, progress: dict) -> None:
+    conn.execute("UPDATE jobs SET progress=? WHERE id=?", (json.dumps(progress), job_id)); conn.commit()
+
+def finish_job(conn, job_id: int, state: str, error: str | None = None, progress: dict | None = None) -> None:
+    if state not in ("done", "failed", "interrupted"):
+        raise ValueError(f"not a final job state: {state!r}")
+    if progress is not None:
+        conn.execute("UPDATE jobs SET state=?, error=?, finished=datetime('now'), progress=? WHERE id=?",
+                     (state, error, json.dumps(progress), job_id))
+    else:
+        conn.execute("UPDATE jobs SET state=?, error=?, finished=datetime('now') WHERE id=?", (state, error, job_id))
+    conn.commit()
+
+def interrupt_running_jobs(conn) -> int:
+    """Called when a shoot is opened: nothing can be running for it yet, so any 'running' row was cut
+    short by a quit or a crash. Returns how many rows were marked interrupted."""
+    cur = conn.execute("UPDATE jobs SET state='interrupted', finished=datetime('now') WHERE state='running'")
+    conn.commit()
+    return cur.rowcount
+
+def latest_jobs(conn) -> dict[str, dict]:
+    """kind -> the most recent job row of that kind (id, kind, state, started, finished, progress dict, error)."""
+    out: dict[str, dict] = {}
+    for r in conn.execute("SELECT id, kind, state, started, finished, progress, error FROM jobs ORDER BY id DESC"):
+        if r[1] in out:
+            continue
+        try:
+            prog = json.loads(r[5]) if r[5] else {}
+        except ValueError:
+            prog = {}
+        out[r[1]] = dict(id=r[0], kind=r[1], state=r[2], started=r[3], finished=r[4], progress=prog, error=r[6])
+    return out
+# ===== end scan progress and jobs =====

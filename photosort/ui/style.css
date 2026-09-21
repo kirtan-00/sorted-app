@@ -22,6 +22,7 @@
   --ring: #4b9cf5;
   --red: #e34850;
   --green: #2d9d78;
+  --notice: #d9a441;    /* the scan bar dot and the resume block edge: a scan that is not done yet */
   --ui: "Source Sans 3", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
   --ease: 130ms ease-out;
@@ -570,6 +571,27 @@ body.nofolder #inspector { display: none; }
 .ctx-back svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ctx-back:hover { background: var(--g200); color: var(--g800); }
 .ctx-back:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+/* the scan bar: under the context bar while the shoot is not fully scanned (Continue) or while a scan runs (the readout) */
+.scanbar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px 4px 12px;
+  background: var(--g100);
+  border-bottom: 1px solid var(--g50);
+  min-width: 0;
+  font-size: 13px;
+  color: var(--g700);
+}
+.scanbar .spring { flex: 1; min-width: 4px; }
+.scanbar-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--notice); }
+.scanbar.running .scanbar-dot { background: var(--blue); animation: scan-pulse 1.4s ease-in-out infinite; }
+@keyframes scan-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.scanbar-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scanbar-awake { flex: none; color: var(--g500); font-size: 12px; padding-left: 10px; border-left: 1px solid var(--g300); }
+.scanbar .btn.small { height: 26px; padding: 0 10px; font-size: 13px; flex: none; }
+.scanbar .link { flex: none; }
 .ctx-crumb { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; color: var(--g600); overflow: hidden; }
 .ctx-crumb .crumb-seg { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .ctx-crumb .crumb-seg.last { color: var(--g800); font-weight: 500; flex: 1 1 auto; }
@@ -972,6 +994,16 @@ body.nofolder #inspector { display: none; }
   background-repeat: no-repeat;
   background-size: calc(var(--p, 0) * 100%) 100%;
 }
+/* the Scan tab's resume block (above the readout), the awake note and the health line (below it) */
+.scan-resume { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; background: var(--g100); border: 1px solid var(--g300); border-left: 3px solid var(--notice); border-radius: 4px; }
+.scan-resume-text { flex: 1 1 320px; min-width: 0; font-size: 14px; line-height: 1.4; color: var(--g800); }
+.scan-resume .btn { flex: none; }
+.scan-awake { margin-top: 8px; color: var(--g500); }
+.scan-health { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--g100); }
+.scan-health-text { font-size: 13px; color: var(--g600); line-height: 1.4; }
+.scan-health-text:empty { display: none; }
+.scan-health .btn.small { height: 26px; padding: 0 10px; font-size: 13px; flex: none; }
+.welcome-scanleft { font-size: 13px; line-height: 1.4; color: var(--g600); margin-top: -12px; }
 .bundle-out { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; }
 .bundle-out .filename { color: var(--g600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #index-errors { margin-top: 12px; }

@@ -225,3 +225,29 @@ def test_video_without_stored_frames_decodes_three(tmp_path, tmp_path_factory, m
     monkeypatch.setattr(video, "frame_at", spy)
     assert focus.score_video(tmp_path, row) > FOCUS_BAD_ABS
     assert len(calls) == 3
+
+
+# ===== the job row: a focus pass the server never finished is found again as interrupted =====
+
+def test_focus_pass_keeps_a_job_row_done_or_failed(tmp_path, monkeypatch):
+    from conftest import make_image
+    for i in range(3):
+        make_image(tmp_path, f"s{i}.jpg", kind="sharp", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    assert "focus" not in db.latest_jobs(conn)
+    focus.check_focus(tmp_path)
+    j = db.latest_jobs(conn)["focus"]
+    assert j["state"] == "done" and j["progress"] == {"stage": "focus", "done": 3, "total": 3} and j["finished"]
+    # A pass that blows up leaves a failed row with the reason, and the exception still reaches the caller.
+    def boom(*a, **k):
+        raise RuntimeError("frames unreadable")
+    monkeypatch.setattr(focus, "_check_focus", boom)
+    with pytest.raises(RuntimeError):
+        focus.check_focus(tmp_path, only_unchecked=False)
+    j = db.latest_jobs(conn)["focus"]
+    assert j["state"] == "failed" and "frames unreadable" in j["error"]
+    # A row still 'running' when the shoot is next opened (the app died mid-pass) is marked interrupted.
+    jid = db.start_job(conn, "focus", {"stage": "focus", "done": 1, "total": 3})
+    assert db.interrupt_running_jobs(conn) == 1
+    assert db.latest_jobs(conn)["focus"]["state"] == "interrupted" and db.latest_jobs(conn)["focus"]["id"] == jid
