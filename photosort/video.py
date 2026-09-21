@@ -2,12 +2,13 @@
 Only ever reads the source file. Every call goes through subprocess with a timeout, so a broken clip
 costs a wait, never a hang."""
 from __future__ import annotations
-import io, json, os, platform, re, shutil, subprocess, time
+import io, json, os, platform, re, shutil, subprocess, tempfile, time
 from pathlib import Path
 import numpy as np
 from PIL import Image
+from . import config as _cfg
 from .config import (PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S,
-                     SCENE_MAX_DURATION_S, LONG_SEGMENT_S, FFMPEG_HWACCEL)
+                     SCENE_MAX_DURATION_S, LONG_SEGMENT_S, FFMPEG_HWACCEL, SCENE_STEP_S, FRAME_STEP_S, INTRA_PROBE_PACKETS)
 
 class VideoUnreadable(RuntimeError):
     """ffmpeg/ffprobe is missing, or the file gave no usable frame."""
@@ -106,6 +107,7 @@ def probe(path: Path) -> dict:
         except (TypeError, ValueError): return 0.0
     duration = _f(fmt.get("duration")) or _f(v.get("duration"))
     w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+    fps = _fps(v.get("avg_frame_rate")) or _fps(v.get("r_frame_rate"))
     rot = 0
     for sd in v.get("side_data_list", []) or []:
         if "rotation" in sd:
@@ -123,8 +125,28 @@ def probe(path: Path) -> dict:
     aerial = any(_dji(low.get(k)) for k in ("encoder", "make", "model", "comment")) or aerial_by_name(path)
     if camera is None and _dji(low.get("encoder")):
         camera = low["encoder"].strip()
-    return dict(duration=duration, width=w, height=h, codec=v.get("codec_name"), pix_fmt=v.get("pix_fmt"),
+    return dict(duration=duration, width=w, height=h, codec=v.get("codec_name"), pix_fmt=v.get("pix_fmt"), fps=fps,
                 taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial)
+
+def _fps(rate: str | None) -> float:
+    """ffprobe's "60/1" or "30000/1001" as a float; 0.0 when missing or "0/0"."""
+    try:
+        num, den = (rate or "0/0").split("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+def is_all_intra(path: Path, packets: int = INTRA_PROBE_PACKETS) -> bool:
+    """True when the first `packets` video packets are every one a keyframe: an all-intra clip (Sony XAVC S-I,
+    ProRes). A long-GOP clip shows its first P/B frame within a GOP, well inside `packets`. Reads only those
+    packets (about 50 ms). False when ffprobe fails or finds no video packet."""
+    try:
+        out = _run([_bin("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags",
+                    "-read_intervals", f"%+#{int(packets)}", "-of", "csv=p=0", str(path)], timeout=60)
+    except (subprocess.TimeoutExpired, VideoUnreadable):
+        return False
+    flags = [ln.strip() for ln in (out.stdout or b"").decode(errors="replace").splitlines() if ln.strip()]
+    return out.returncode == 0 and bool(flags) and all("K" in f for f in flags)
 
 def sample_times(duration: float, n: int = VIDEO_FRAMES) -> list[float]:
     """n instants evenly spaced between 5% and 95% of the clip (the ends are often slates, black or a shaky start)."""
@@ -211,21 +233,89 @@ def fixed_segments(duration: float, window: float = LONG_SEGMENT_S, max_segments
         cuts.append(t); t += step
     return segments_from_cuts(cuts, duration, max_segments=max_segments)
 
-def sample_frames(path: Path, duration: float, key: tuple[str, str] | None = None) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
+_SHOWINFO = re.compile(rb"\[showinfo@(cuts|frames)[^\]]*\]\s+n:\s*(\d+)\s+pts:\s*-?\d+\s+pts_time:\s*(-?[0-9]+(?:\.[0-9]+)?)")
+
+def single_pass(path: Path, fps: float, edge: int = PREVIEW_EDGE, threshold: float = SCENE_THRESHOLD,
+                key: tuple[str, str] | None = None, scene_step: float = SCENE_STEP_S,
+                frame_step: float = FRAME_STEP_S) -> tuple[list[float], list[tuple[float, Image.Image]]] | None:
+    """ONE ffmpeg pass over an all-intra clip: a noise bitstream filter drops every packet but one per
+    scene_step BEFORE the decoder (an all-intra stream has no references to break, and a decoder cannot skip
+    a frame it never sees any other way), the decoded frames are scored for cuts at 320 px exactly like
+    scene_cuts, and one frame per frame_step is kept at `edge` px. Returns (cuts, [(t, frame)]) with t the
+    kept frame's own pts, or None when the pass fails or times out (the caller falls back to the two-pass
+    path). Measured on a 10 s 4K60 4:2:2 10-bit intra clip on an M1: 2.5 s (scene pass 1.8 s plus seven
+    seeks) became 0.2 s. Frames land in a temp dir of our own that is removed before returning; the clip is
+    only read."""
+    n = max(1, int(round((fps or 0.0) * scene_step)))
+    graph = (f"[0:v]split=2[a][b];[a]scale=320:-2,select='gt(scene,{threshold})',showinfo@cuts[sc];"
+             f"[b]select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{frame_step})',scale='min({int(edge)},iw)':-2,showinfo@frames[fr]")
+    work = Path(tempfile.mkdtemp(prefix="photosort-pass-"))
+    try:
+        try:
+            out = _decode(["-skip_frame", "nokey", "-bsf:v", f"noise=drop=not(eq(mod(n\\,{n})\\,0))"], path,
+                          ["-v", "info", "-filter_complex", graph, "-map", "[sc]", "-an", "-f", "null", "-",
+                           "-map", "[fr]", "-fps_mode", "passthrough", "-q:v", "3", "-start_number", "0", "-f", "image2", str(work / "%06d.jpg")],
+                          timeout=SCENE_TIMEOUT, key=key)
+        except subprocess.TimeoutExpired:
+            return None
+        if out.returncode != 0:
+            return None
+        cuts: list[float] = []; frames: list[tuple[float, Image.Image]] = []
+        for which, idx, t in _SHOWINFO.findall(out.stderr or b""):
+            if which == b"cuts":
+                cuts.append(float(t))
+            else:
+                fp = work / f"{int(idx):06d}.jpg"
+                if fp.is_file():
+                    try:
+                        im = Image.open(fp); im.load(); frames.append((float(t), im.convert("RGB")))
+                    except Exception:
+                        pass
+        if not frames:
+            return None
+        return sorted(set(cuts)), sorted(frames, key=lambda f: f[0])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+def _nearest(frames: list[tuple[float, Image.Image]], targets: list[float]) -> list[tuple[float, Image.Image]]:
+    """The kept frame nearest each target, each frame once, sorted by time."""
+    chosen: dict[int, tuple[float, Image.Image]] = {}
+    for tgt in targets:
+        k = min(range(len(frames)), key=lambda i: abs(frames[i][0] - tgt))
+        chosen[k] = frames[k]
+    return [chosen[k] for k in sorted(chosen)]
+
+def sample_frames(path: Path, duration: float, key: tuple[str, str] | None = None,
+                  fps: float | None = None) -> tuple[list[tuple[float, Image.Image]], list[tuple[float, float]]]:
     """The evenly spaced frames plus one frame at each segment midpoint (skipped when an even sample sits
     within DEDUP_S of it), sorted by time, and the segment list. A clip shorter than SCENE_MIN_DURATION_S
-    skips the scene pass and is one segment. A clip longer than SCENE_MAX_DURATION_S skips it too and gets
-    fixed_segments: the keyframe pass is decode-bound (41 s per 87 s Sony 4K clip on an M1, 11 min for a
-    24-minute take), long takes are interviews and static B-roll where cuts are rare, and a full decode of
-    a 35 GB file to find them is not worth it; the window midpoints are plain seeks like any other frame.
-    key is probe()'s (codec, pix_fmt), passed to every decode for hardware acceleration. Raises
+    skips the scene pass and is one segment. A clip longer than SCENE_MAX_DURATION_S (both read from config
+    at call time) skips it too and gets fixed_segments: the keyframe pass is decode-bound (41 s per 87 s Sony
+    4K clip on an M1, 11 min for a 24-minute take), long takes are interviews and static B-roll where cuts
+    are rare, and a full decode of a 35 GB file to find them is not worth it; the window midpoints are plain
+    seeks like any other frame. In between, an all-intra clip (is_all_intra) takes single_pass: one decode
+    feeds the cuts and the frames, and each wanted instant gets the nearest kept frame (within FRAME_STEP_S/2);
+    a long-GOP clip keeps the keyframe scene pass and exact seeks. key is probe()'s (codec, pix_fmt), passed
+    to every decode for hardware acceleration; fps is probe()'s, read again here when not given. Raises
     VideoUnreadable when not one frame decodes."""
     _bin("ffmpeg")
-    if duration > SCENE_MAX_DURATION_S:
+    if duration > _cfg.SCENE_MAX_DURATION_S:
         segs = fixed_segments(duration)
-    else:
-        cuts = scene_cuts(path, key=key) if duration >= SCENE_MIN_DURATION_S else []
+    elif duration >= _cfg.SCENE_MIN_DURATION_S:
+        got = None
+        if is_all_intra(path):
+            if fps is None:
+                fps = probe(path)["fps"]
+            got = single_pass(path, fps, key=key)
+        if got is not None:
+            cuts, kept = got
+            segs = segments_from_cuts(cuts, duration)
+            targets = list(sample_times(duration)) + [(a + b) / 2 for a, b in segs]
+            return _nearest(kept, targets), segs
+        cuts = scene_cuts(path, key=key)
         segs = segments_from_cuts(cuts, duration)
+    else:
+        segs = segments_from_cuts([], duration)
     times = list(sample_times(duration))
     for a, b in segs:
         mid = (a + b) / 2

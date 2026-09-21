@@ -57,10 +57,14 @@ All five shipped 21 September (docs/scan-resume-report.md).
   option.
 
 ## 6. Speed and formats
-- [M] Sony 10-bit 4:2:2 clips: software decode is 40x slower than DJI hardware decode. Proxy
-  path: decode once at 540p in the background, index from that.
-- [S] Scan the RAW's embedded preview only when there is no JPEG twin (saves half the time on
-  RAW+JPEG shoots).
+- DONE 2026-09-21: all-intra clips (Sony XAVC S-I) take one ffmpeg pass with a packet-dropping
+  bitstream filter in front of the decoder (8x on a 4K60 4:2:2 10-bit clip); RAW twins pair per
+  day folder so a rolled-over counter no longer decodes every RAW; thumbnail pool is cores minus
+  one; covering indexes for every per-render count. Report: .superpowers/sdd/task-speed-report.md.
+- [M] Sony long-GOP 10-bit 4:2:2 (XAVC S): still the keyframe pass plus exact seeks in software.
+  If a real card shows it slow, extend the single pass to keyframes (drop non-key packets, take the
+  nearest keyframe as the frame). The pass still reads the whole file once: a 6.5 GB S-I clip on a
+  400 MB/s SSD floors at about 16 s.
 - [S] HEIC and ProRes coverage check on real cards (iPhone shoots, FX3 ProRes).
 - [M] Large-shoot mode above 20k items: paged grids, lazy thumbs, index in chunks.
 

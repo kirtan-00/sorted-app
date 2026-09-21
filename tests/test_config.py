@@ -34,3 +34,13 @@ def test_settings_save_is_atomic(tmp_path, monkeypatch):
     assert os.path.dirname(written[-1][0]) == str(settings_path().parent)
     assert settings.load() == {"export_base": "/b"}
     assert sorted(os.listdir(settings_path().parent)) == ["settings.json"]     # no temp file left behind
+
+
+def test_thumbnail_pool_is_sized_to_the_mac():
+    """Cores minus one for the thumbnail pass (the main process stores rows), never under 2, capped at
+    JPEG_WORKERS_MAX; RAW and video pools keep their memory-bound sizes."""
+    import os
+    assert config.thumb_workers(8) == 7 and config.thumb_workers(10) == 8 and config.thumb_workers(16) == 8
+    assert config.thumb_workers(2) == 2 and config.thumb_workers(1) == 2 and config.thumb_workers(None) == 3
+    assert config.JPEG_WORKERS == config.thumb_workers(os.cpu_count())
+    assert config.RAW_WORKERS == 2 and config.VIDEO_WORKERS == 3

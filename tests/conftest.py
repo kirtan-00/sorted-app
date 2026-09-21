@@ -37,19 +37,24 @@ def _isolated_dirs(tmp_path_factory, monkeypatch):
 FFMPEG = shutil.which("ffmpeg") or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg") if os.path.exists(p)), None)
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")
 
-def make_video(dst, scenes=2, work=None):
+def make_video(dst, scenes=2, work=None, intra=False, pix_fmt="yuv420p"):
     """A small h264 mp4 at dst: scenes=1 is 3 s of testsrc; scenes=2 is 5 s of testsrc followed by 5 s of
-    plain blue (one hard cut at 5.0 s), built with the concat demuxer. Intermediates go in `work`
-    (default: a temp dir next to nowhere in the shoot) so the shoot folder only ever gains dst."""
+    plain blue (one hard cut at 5.0 s), built with the concat demuxer. intra=True makes every frame a keyframe
+    (the Sony XAVC S-I shape); pix_fmt="yuv422p10le" makes it 10-bit 4:2:2 (a few hundred KB at 320x240).
+    Intermediates go in `work` (default: a temp dir next to nowhere in the shoot) so the shoot folder only
+    ever gains dst."""
     dst = Path(dst)
     work = Path(work or tempfile.mkdtemp(prefix="photosort-video-")); work.mkdir(parents=True, exist_ok=True)
+    enc = ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", pix_fmt]
+    if intra:
+        enc += ["-g", "1", "-x264-params", "keyint=1:min-keyint=1:scenecut=0"]
     run = lambda *a: subprocess.run([FFMPEG, "-v", "error", "-y", *a], check=True, capture_output=True)
     if scenes == 1:
-        run("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=3,format=yuv420p", str(dst))
+        run("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=3", *enc, str(dst))
         return dst
     a = work / "a.mp4"; b = work / "b.mp4"; lst = work / "list.txt"
-    run("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=5,format=yuv420p", str(a))
-    run("-f", "lavfi", "-i", "color=c=blue:size=320x240:rate=10:duration=5,format=yuv420p", str(b))
+    run("-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=5", *enc, str(a))
+    run("-f", "lavfi", "-i", "color=c=blue:size=320x240:rate=10:duration=5", *enc, str(b))
     lst.write_text(f"file '{a}'\nfile '{b}'\n")
     run("-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(dst))
     return dst

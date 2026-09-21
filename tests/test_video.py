@@ -391,3 +391,106 @@ def test_sample_frames_skips_the_scene_pass_on_long_clips(one_scene, monkeypatch
         v.sample_frames(one_scene, 100.0)
     with pytest.raises(AssertionError, match="scene pass ran"):
         v.sample_frames(one_scene, 300.0)
+
+
+# All-intra clips (Sony XAVC S-I): one ffmpeg pass feeds the cuts and the frames
+
+@pytest.fixture
+def intra_422(tmp_path_factory):
+    """Two scenes, every frame a keyframe, 10-bit 4:2:2: the Sony A7S III shape at 320x240."""
+    d = tmp_path_factory.mktemp("clips")
+    return make_video(d / "C0001.MP4", scenes=2, work=d / "work", intra=True, pix_fmt="yuv422p10le")
+
+
+def test_is_all_intra_tells_the_sony_shape_from_long_gop(intra_422, two_scene, tmp_path):
+    from photosort.video import is_all_intra, probe
+    assert is_all_intra(intra_422) is True
+    assert is_all_intra(two_scene) is False                                  # keyframes at 0 and 5 s only
+    (tmp_path / "junk.mp4").write_bytes(b"not a video")
+    assert is_all_intra(tmp_path / "junk.mp4") is False                      # never raises
+    info = probe(intra_422)
+    assert (info["codec"], info["pix_fmt"]) == SONY422 and info["fps"] == pytest.approx(10.0)
+
+
+def test_intra_clip_takes_one_decode_for_cuts_and_frames(intra_422, monkeypatch):
+    """Before: a keyframe scene pass that decoded every frame of an all-intra clip, then one seek per sampled
+    frame. Now: one ffmpeg run with the packet-dropping bitstream filter in front of the decoder, both the
+    scene scores and the kept frames coming out of it. Each wanted instant gets the kept frame nearest to it."""
+    import os, subprocess as sp
+    import photosort.video as v
+    calls = []; real_run = sp.run
+    def spy(cmd, **kw):
+        calls.append(list(cmd)); return real_run(cmd, **kw)
+    monkeypatch.setattr(v.subprocess, "run", spy)
+    made = []; real_mkdtemp = v.tempfile.mkdtemp
+    def spy_mkdtemp(**kw):
+        d = real_mkdtemp(**kw); made.append(d); return d
+    monkeypatch.setattr(v.tempfile, "mkdtemp", spy_mkdtemp)
+    before = sorted(os.listdir(intra_422.parent))
+    d = v.probe(intra_422)["duration"]
+    frames, segs = v.sample_frames(intra_422, d, key=SONY422, fps=10.0)
+    assert len(segs) == 2 and segs[0][0] == 0.0 and abs(segs[0][1] - 5.0) < 0.2 and abs(segs[1][1] - d) < 1e-6
+    ff = [c for c in calls if c[0].endswith("ffmpeg")]
+    assert len(ff) == 1, [c[:6] for c in ff]                                # ONE decode, no seeks
+    cmd = ff[0]
+    assert "-bsf:v" in cmd and cmd[cmd.index("-bsf:v") + 1] == "noise=drop=not(eq(mod(n\\,5)\\,0))"   # 10 fps x 0.5 s
+    assert cmd.index("-bsf:v") < cmd.index("-i") and "-skip_frame" in cmd
+    assert "-filter_complex" in cmd and "select='gt(scene,0.4)',showinfo@cuts" in cmd[cmd.index("-filter_complex") + 1]
+    times = [t for t, _ in frames]
+    assert times == sorted(times) and len(set(times)) == len(times)
+    for tgt in list(v.sample_times(d)) + [(a + b) / 2 for a, b in segs]:
+        assert min(abs(t - tgt) for t in times) <= v.FRAME_STEP_S / 2 + 1e-6   # nearest kept frame
+    assert all(isinstance(im, Image.Image) and im.mode == "RGB" and im.size == (320, 240) for _, im in frames)
+    assert sorted(os.listdir(intra_422.parent)) == before                   # the shoot folder gains nothing
+    assert len(made) == 1 and os.path.basename(made[0]).startswith("photosort-pass-") and not os.path.exists(made[0])
+
+
+def test_intra_pass_falls_back_to_two_passes_when_it_fails(intra_422, monkeypatch):
+    """An ffmpeg without the input bitstream filter (older than 7.0), or a pass that dies: the clip still
+    indexes through the keyframe scene pass and exact seeks, frames at the exact sample instants."""
+    import subprocess as sp
+    import photosort.video as v
+    real_run = sp.run
+    def fail_pass(cmd, **kw):
+        if "-filter_complex" in cmd:
+            return sp.CompletedProcess(cmd, 1, b"", b"Unrecognized option 'bsf:v'")
+        return real_run(cmd, **kw)
+    monkeypatch.setattr(v.subprocess, "run", fail_pass)
+    frames, segs = v.sample_frames(intra_422, 10.0, fps=10.0)
+    assert len(segs) == 2 and abs(segs[0][1] - 5.0) < 0.2
+    for t in v.sample_times(10.0):
+        assert t in [x for x, _ in frames]
+    monkeypatch.setattr(v, "single_pass", lambda *a, **k: None)
+    frames2, _ = v.sample_frames(intra_422, 10.0, fps=10.0)
+    assert [t for t, _ in frames2] == [t for t, _ in frames]
+
+
+def test_long_gop_clips_keep_the_keyframe_pass_and_exact_seeks(two_scene, monkeypatch):
+    import photosort.video as v
+    def boom(*a, **k):
+        raise AssertionError("single pass ran on a long-GOP clip")
+    monkeypatch.setattr(v, "single_pass", boom)
+    frames, segs = v.sample_frames(two_scene, 10.0)
+    assert len(segs) == 2 and all(t in [x for x, _ in frames] for t in v.sample_times(10.0))
+
+
+def test_scene_caps_are_read_from_config_at_call_time(one_scene, monkeypatch):
+    """The scan-length caps are settings, not constants baked into the module: changing config changes the
+    next call. A 6 s clip is above a 5 s cap: fixed windows, no scene pass; a 3 s clip is under a 2 s floor:
+    the scene pass runs."""
+    import photosort.config as cfg
+    import photosort.video as v
+    def boom(*a, **k):
+        raise AssertionError("scene pass ran")
+    monkeypatch.setattr(v, "scene_cuts", boom); monkeypatch.setattr(v, "single_pass", boom)
+    stub = Image.new("RGB", (32, 24), (1, 2, 3))
+    monkeypatch.setattr(v, "frame_at", lambda path, t, edge=1024, key=None: stub)
+    monkeypatch.setattr(cfg, "SCENE_MAX_DURATION_S", 5.0)
+    _, segs = v.sample_frames(one_scene, 6.0)
+    assert segs == v.fixed_segments(6.0)
+    monkeypatch.setattr(cfg, "SCENE_MIN_DURATION_S", 2.0)
+    with pytest.raises(AssertionError, match="scene pass ran"):
+        v.sample_frames(one_scene, 3.0)
+    monkeypatch.setattr(cfg, "SCENE_MIN_DURATION_S", 4.0)
+    _, segs = v.sample_frames(one_scene, 3.0)
+    assert segs == [(0.0, 3.0)]

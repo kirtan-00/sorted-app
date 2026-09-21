@@ -322,3 +322,27 @@ def test_running_job_rows_are_marked_interrupted_when_the_shoot_opens(tmp_path):
     assert j["state"] == "interrupted" and j["progress"]["done"] == 20 and j["finished"]
     with pytest.raises(ValueError):
         db.finish_job(conn, jid, "running")
+
+def test_raw_twins_are_recorded_never_opened(tmp_path):
+    """A RAW+JPEG shoot: only the JPEG is decoded for thumbs, features and embeds; its RAW is recorded as the
+    sibling. The RAWs here are junk bytes, so opening one would make an error row: none may appear, in the
+    same-folder layout, the JPG/ + RAW/ sibling layout, and the sibling layout with the counter rolled over
+    between days (the layout that used to decode every RAW)."""
+    from conftest import make_image
+    n = 0
+    (tmp_path / "same").mkdir()
+    for i in range(4):
+        make_image(tmp_path / "same", f"DSC{i:05d}.JPG", size=(400, 300), seed=i); n += 1
+        (tmp_path / "same" / f"DSC{i:05d}.ARW").write_bytes(b"\x00" * 4096)
+    for day in ("day1", "day2"):
+        for i in range(4):                                   # DSC00000..3 in BOTH days
+            (tmp_path / day / "RAW").mkdir(parents=True, exist_ok=True); (tmp_path / day / "JPG").mkdir(exist_ok=True)
+            make_image(tmp_path / day / "JPG", f"DSC{i:05d}.JPG", size=(400, 300), seed=10 + i); n += 1
+            (tmp_path / day / "RAW" / f"DSC{i:05d}.ARW").write_bytes(b"\x00" * 4096)
+    stats = index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert stats["indexed"] == n == 12 and stats["errors"] == 0 and stats["total"] == 12
+    conn = db.connect(tmp_path)
+    rows = {r[0]: r[1] for r in conn.execute("SELECT rel, sibling FROM photos")}
+    assert len(rows) == 12 and all(r.endswith(".JPG") for r in rows)
+    assert rows["same/DSC00001.JPG"] == "same/DSC00001.ARW"
+    assert rows["day1/JPG/DSC00002.JPG"] == "day1/RAW/DSC00002.ARW" and rows["day2/JPG/DSC00002.JPG"] == "day2/RAW/DSC00002.ARW"

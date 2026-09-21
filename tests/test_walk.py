@@ -85,3 +85,27 @@ def test_dji_clip_with_srt_sidecar_is_listed_once(tmp_path):
     files = find_images(tmp_path)
     assert [f.rel for f in files] == ["DJI_0001.MP4", "DJI_0002.JPG"]
     assert files[0].is_video and files[1].sibling == "DJI_0002.DNG"
+
+
+def test_pairs_raw_in_sibling_folder_when_the_counter_rolled_over(tmp_path):
+    """Day1/RAW/DSC00001.ARW and Day2/RAW/DSC00001.ARW (two cards, or a counter that wrapped) each pair with
+    the JPEG under their own day's JPG/ folder. Before, a stem seen twice was left loose on both sides and
+    every one of those RAWs was decoded on top of its JPEG. A stem that is unique across the tree still pairs
+    across days; a stem repeated within one day with no same-day JPEG stays a RAW entry."""
+    for day in ("Day1", "Day2"):
+        (tmp_path / day / "JPG").mkdir(parents=True); (tmp_path / day / "RAW").mkdir()
+        for i in range(3):
+            (tmp_path / day / "JPG" / f"DSC0000{i}.JPG").write_bytes(b"x")
+            (tmp_path / day / "RAW" / f"DSC0000{i}.ARW").write_bytes(b"y")
+    (tmp_path / "Day1" / "RAW" / "DSC00009.ARW").write_bytes(b"y")        # its JPEG sits under another day
+    (tmp_path / "Day2" / "JPG" / "DSC00009.JPG").write_bytes(b"x")
+    (tmp_path / "Day2" / "RAW" / "DSC00007.ARW").write_bytes(b"y")        # no JPEG anywhere
+    files = {f.rel: f for f in find_images(tmp_path)}
+    assert sorted(files) == ["Day1/JPG/DSC00000.JPG", "Day1/JPG/DSC00001.JPG", "Day1/JPG/DSC00002.JPG",
+                             "Day2/JPG/DSC00000.JPG", "Day2/JPG/DSC00001.JPG", "Day2/JPG/DSC00002.JPG",
+                             "Day2/JPG/DSC00009.JPG", "Day2/RAW/DSC00007.ARW"]
+    for day in ("Day1", "Day2"):
+        for i in range(3):
+            assert files[f"{day}/JPG/DSC0000{i}.JPG"].sibling == f"{day}/RAW/DSC0000{i}.ARW"
+    assert files["Day2/JPG/DSC00009.JPG"].sibling == "Day1/RAW/DSC00009.ARW"
+    assert files["Day2/RAW/DSC00007.ARW"].is_raw and files["Day2/RAW/DSC00007.ARW"].sibling is None

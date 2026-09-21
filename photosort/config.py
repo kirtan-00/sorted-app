@@ -39,12 +39,29 @@ VIDEO_WORKERS = 3           # each worker runs its own ffmpeg, which is multi-th
 SCENE_THRESHOLD = 0.4       # ffmpeg scene score above which two keyframes are a cut
 SCENE_MIN_DURATION_S = 8.0  # shorter clips skip the scene pass and are one segment
 SCENE_MAX_DURATION_S = 300.0  # longer clips skip it too and get fixed windows: the keyframe pass is decode-bound
+# An all-intra clip (Sony XAVC S-I: every frame is a keyframe, so -skip_frame nokey skips nothing and the scene
+# pass was a full decode, 41 s per 87 s 4K clip on an M1) is read in ONE ffmpeg pass that drops every packet but
+# one per SCENE_STEP_S before the decoder, scores those frames for cuts, and keeps one 1024 px frame per
+# FRAME_STEP_S; the sampled frames and the segment midpoints are the nearest kept frames (within FRAME_STEP_S/2).
+SCENE_STEP_S = 0.5          # decode cadence of the single pass (keyframes of a long-GOP clip sit 0.5 to 2 s apart)
+FRAME_STEP_S = 1.0          # cadence of the frames the single pass keeps for thumbs, grid, frames/ and the embedder
+INTRA_PROBE_PACKETS = 40    # packets read to call a clip all-intra: every one a keyframe (a GOP is 12 to 120)
 LONG_SEGMENT_S = 120.0      # the window on a long clip (widened evenly when MAX_SEGMENTS would be exceeded)
 FFMPEG_HWACCEL = "videotoolbox"   # macOS hardware decode; retried without it once if a codec is not accelerated
 MAX_SEGMENTS = 24           # longest segments kept when a clip has more cuts than this
 MIN_SEGMENT_S = 1.0         # a cut that would leave a shorter segment is merged into the previous one
 
-JPEG_WORKERS = 4
+# The thumbnail pass (JPEG/HEIC decode, thumbs, sharpness, faces) runs one process per core but one, capped:
+# the main process stores rows and drives progress. RAW stays at 2 (a rawpy decode holds ~10x the memory of
+# a JPEG preview); videos stay at 3 (each drives a multi-threaded ffmpeg). The CLIP pass is not here: it
+# runs in the main process under the single MPS lock. Measured over 1,050 24 MP JPEGs on an M1 (4P + 4E
+# cores, on battery): 4 -> 7 workers is 19.5 s -> 16.1 s with faces off and 35.3 s -> 29.9 s with faces on,
+# about what four efficiency cores add; 8 workers gave 15.4 s and were not worth starving the main process.
+JPEG_WORKERS_MAX = 8
+def thumb_workers(ncpu: int | None) -> int:
+    """cores minus one, at least 2, at most JPEG_WORKERS_MAX; an unknown core count reads as 4."""
+    return max(2, min((ncpu or 4) - 1, JPEG_WORKERS_MAX))
+JPEG_WORKERS = thumb_workers(os.cpu_count())
 RAW_WORKERS = 2
 EMBED_BATCH = 32
 

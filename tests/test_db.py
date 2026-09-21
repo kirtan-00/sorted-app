@@ -80,3 +80,64 @@ def test_aerial_defaults_to_zero_and_is_counted(tmp_path):
     assert db.aerial_count(conn) == 1
     db.upsert_photo(conn, dict(base, rel="DJI_0001.MP4", kind="video", size=2))   # re-indexed without the key: back to 0
     assert conn.execute("SELECT aerial FROM photos WHERE id=?", (b,)).fetchone()[0] == 0
+
+
+def _plan(conn, q: str) -> str:
+    return " | ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + q))
+
+
+def _fill(conn, n: int) -> None:
+    """n synthetic ok rows with a 1 KB embed each (the row shape of a real index), straight into photos."""
+    emb = np.ones(512, np.float16).tobytes()
+    conn.executemany("INSERT INTO photos(rel, size, mtime, qhash, status, category, category_guess, cluster, kind, aerial, n_faces, focus, embed) "
+                     "VALUES(?, 1, 1.0, ?, 'ok', ?, ?, ?, 'photo', ?, 0, ?, ?)",
+                     [(f"d/{i:05d}.jpg", f"{i:040x}"[-40:], ["beach", "people", "other"][i % 3], "beach" if i % 3 else None,
+                       f"group {i % 4}", int(i % 40 == 0), ["ok", "soft", "bad", None][i % 4], emb) for i in range(n)])
+    conn.commit(); db.analyze(conn)
+
+
+def test_per_render_counts_walk_covering_indexes_and_wide_reads_still_scan(tmp_path):
+    """Every count the UI renders (categories, kind, drone, focus, faces pending, the folder count, the error
+    list) walks a covering index, never the table with its 1 KB embeds; the whole-table reads in id order
+    (Index.refresh, load_embeds) still scan, which is faster than an index plus a sort. Measured at 20k rows:
+    /api/categories 34 -> 7 ms, /api/stats 33 -> 8 ms, /api/errors 24 -> 1 ms, Index.refresh unchanged."""
+    conn = db.connect(tmp_path); _fill(conn, 3000)
+    counts = [
+        "SELECT COALESCE(category, 'unclassified') AS c, COUNT(*) FROM photos WHERE status='ok' GROUP BY c",
+        "SELECT category_guess, COUNT(*) FROM photos WHERE status='ok' AND category='people' AND category_guess IS NOT NULL AND category_guess != 'people' GROUP BY category_guess",
+        "SELECT cluster, COUNT(*) AS n FROM photos WHERE status='ok' AND cluster IS NOT NULL GROUP BY cluster ORDER BY n DESC, cluster",
+        "SELECT COUNT(*) FROM photos WHERE status='ok' AND aerial=1",
+        "SELECT COALESCE(kind, 'photo') AS k, COUNT(*) FROM photos WHERE status='ok' GROUP BY k",
+        "SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL",
+        "SELECT SUM(focus IS NOT NULL), SUM(focus IS NULL), SUM(focus='bad'), SUM(focus='soft') FROM photos WHERE status='ok'",
+        "SELECT count(*) FROM photos WHERE status='ok'",
+        "SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel",
+    ]
+    for q in counts:
+        plan = _plan(conn, q)
+        assert "SCAN photos" not in plan and "INDEX photos_status_" in plan, (q, plan)
+    wide = [
+        "SELECT id, rel, qhash, sharp, n_faces, taken_at, category, cluster, kind, aerial, focus FROM photos WHERE status='ok' ORDER BY id",
+        "SELECT id, embed FROM photos WHERE embed IS NOT NULL AND status='ok' ORDER BY id",
+    ]
+    for q in wide:
+        assert _plan(conn, q) == "SCAN photos", (q, _plan(conn, q))
+    assert db.category_counts(conn) == {"beach": 2000, "people": 1000, "other": 1000} and db.aerial_count(conn) == 75
+    # the counts are right through the indexes after rows change
+    conn.execute("UPDATE photos SET status='error' WHERE rel='d/00000.jpg'"); conn.commit()
+    assert db.kind_counts(conn) == {"photos": 2999, "videos": 0}
+
+
+def test_connect_analyses_an_index_that_never_was(tmp_path):
+    """An index.db from before the covering indexes existed gets them and one ANALYZE on open, so the planner
+    stops routing whole-table reads through the new indexes; a DB with statistics is left alone."""
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'photos_status_%'").fetchall()
+    _fill(conn, 200)
+    conn.execute("DROP TABLE sqlite_stat1"); conn.commit(); conn.close()
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] > 0
+    conn.execute("DELETE FROM sqlite_stat1"); conn.commit()
+    conn.execute("INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES('photos', 'photos_status_rel', '200 1 1')"); conn.commit(); conn.close()
+    conn = db.connect(tmp_path)
+    assert conn.execute("SELECT count(*) FROM sqlite_stat1").fetchone()[0] == 1          # not re-run when stats exist

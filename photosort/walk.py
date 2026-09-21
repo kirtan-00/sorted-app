@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, SONY_CARD_DIRS, SONY_CARD_ROOT
 
 @dataclass
@@ -53,24 +54,33 @@ def find_images(root: Path) -> list[ImageFile]:
             out.append(keep)
         else:
             out.extend(group)
-    # second pass: a RAW whose JPEG lives in a sibling folder (Day1/RAW + Day1/JPG layouts).
-    # Pair by stem across the whole tree only when the stem is unique on both sides.
-    loose_raw = [f for f in out if f.is_raw]
-    loose_std = [f for f in out if not f.is_raw and not f.is_video and f.sibling is None]
-    if loose_raw and loose_std:
-        std_by_stem: dict[str, list[ImageFile]] = {}
+    # second pass: a RAW whose JPEG lives in a sibling folder (Day1/RAW + Day1/JPG layouts). First within one
+    # parent (Day1/RAW/x.ARW and Day1/JPG/x.JPG share Day1), so a counter that rolled over between days
+    # (DSC00001 in day1 and again in day2) still pairs each RAW with its own day's JPEG; then across the
+    # whole tree for what is left, only when the stem is unique on both sides. Before the per-parent pass a
+    # repeated stem left every RAW unpaired and the index decoded all of them (200 RAW decodes on a 200-pair
+    # two-day shoot, measured on a synthetic set; 0 after).
+    def _pair(scope: Callable[[ImageFile], object]) -> None:
+        nonlocal out
+        loose_raw = [f for f in out if f.is_raw]
+        loose_std = [f for f in out if not f.is_raw and not f.is_video and f.sibling is None]
+        if not (loose_raw and loose_std):
+            return
+        std_by_key: dict[object, list[ImageFile]] = {}
         for f in loose_std:
-            std_by_stem.setdefault(f.path.stem.lower(), []).append(f)
-        raw_by_stem: dict[str, list[ImageFile]] = {}
+            std_by_key.setdefault((scope(f), f.path.stem.lower()), []).append(f)
+        raw_by_key: dict[object, list[ImageFile]] = {}
         for f in loose_raw:
-            raw_by_stem.setdefault(f.path.stem.lower(), []).append(f)
+            raw_by_key.setdefault((scope(f), f.path.stem.lower()), []).append(f)
         drop: set[str] = set()
-        for stem, raws in raw_by_stem.items():
-            stds = std_by_stem.get(stem)
+        for key, raws in raw_by_key.items():
+            stds = std_by_key.get(key)
             if stds and len(stds) == 1 and len(raws) == 1:
                 stds[0].sibling = raws[0].rel
                 drop.add(raws[0].rel)
         out = [f for f in out if f.rel not in drop]
+    _pair(lambda f: str(f.path.parent.parent))
+    _pair(lambda f: None)
     return sorted(out, key=lambda f: f.rel)
 
 def quick_hash(path: Path, chunk: int = 65536) -> str:

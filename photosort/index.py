@@ -29,7 +29,7 @@ def _process_video(root: str, rel: str, out: dict) -> None:
     path = Path(root) / rel
     qh = quick_hash(path)
     info = video.probe(path)
-    frames, segs = video.sample_frames(path, info["duration"], key=(info["codec"], info["pix_fmt"]))
+    frames, segs = video.sample_frames(path, info["duration"], key=(info["codec"], info["pix_fmt"]), fps=info["fps"])
     # A clip whose Sony sidecar says S-Log3 gets every sampled frame converted to Rec.709 before anything
     # is saved: thumb, grid and frames/ all show (and embed) a normal-contrast picture. Display only.
     if video.is_slog3(video.capture_gamma(path)):
@@ -169,6 +169,7 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     stats["seconds"] = round(time.time() - t0, 1)
     conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))"); conn.commit()
     db.finish_job(conn, job["id"], "done", progress={"stage": "done", "done": stats["total"], "total": stats["total"], "faces": faces})
+    db.analyze(conn)      # row counts changed: the planner's statistics follow (14 ms at 20k rows)
     job["id"] = None
     notify({"stage": "done", "done": stats["total"], "total": stats["total"]})
     return stats

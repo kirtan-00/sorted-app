@@ -35,6 +35,19 @@ CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 CREATE INDEX IF NOT EXISTS segments_photo ON segments(photo_id);
 """
+# Covering indexes for every per-render count: a photos row carries a 1 KB embedding, so a "SCAN photos" for
+# a count reads the whole table (24 MB at 20k rows, 6 to 10 ms per query, 34 ms for /api/categories); with
+# these each count walks a narrow index instead (under 1 ms). Kept out of SCHEMA so they are created after
+# the column migrations below (an old index.db predates category, cluster, aerial and focus).
+INDEXES = """
+CREATE INDEX IF NOT EXISTS photos_status_category ON photos(status, category, category_guess);
+CREATE INDEX IF NOT EXISTS photos_status_cluster ON photos(status, cluster);
+CREATE INDEX IF NOT EXISTS photos_status_aerial ON photos(status, aerial);
+CREATE INDEX IF NOT EXISTS photos_status_kind ON photos(status, kind);
+CREATE INDEX IF NOT EXISTS photos_status_faces ON photos(status, n_faces);
+CREATE INDEX IF NOT EXISTS photos_status_focus ON photos(status, focus);
+CREATE INDEX IF NOT EXISTS photos_status_rel ON photos(status, rel);
+"""
 
 PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
               "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration","aerial"]
@@ -84,8 +97,21 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN focus TEXT")
     if "focus_score" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN focus_score REAL")
+    conn.executescript(INDEXES)
     conn.commit()
+    # Without statistics the planner takes a (status, ...) index for EVERY status='ok' query, including the
+    # wide reads (Index.refresh, load_embeds, the face join) that want the whole table in id order: those
+    # went 158 -> 247 ms at 20k rows through the index plus a sort. With ANALYZE run once (14 ms at 20k
+    # rows) it knows status='ok' is nearly every row and scans for those while the counts keep their
+    # covering indexes. Run here when the DB has never been analysed; index_folder runs it after every scan.
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'").fetchone() \
+            or not conn.execute("SELECT 1 FROM sqlite_stat1 LIMIT 1").fetchone():
+        analyze(conn)
     return conn
+
+def analyze(conn) -> None:
+    """Refresh the query planner's statistics (sqlite_stat1) after a bulk change in row counts."""
+    conn.execute("ANALYZE"); conn.commit()
 
 def upsert_photo(conn, row: dict) -> int:
     # Every column is bound explicitly, so a row without a kind (or aerial) would store NULL, not the
