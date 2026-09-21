@@ -2,7 +2,8 @@
 # Install sorted.command: one double-click sets up everything sorted needs.
 #
 # What it does, in order (each step is skipped when already done, so a second run is fast):
-#   1. refuses Intel Macs and macOS older than 14
+#   1. refuses Intel Macs and macOS older than 14, and writes BUILD (the git short sha next to VERSION,
+#      the app's build stamp) when it is missing and git can say
 #   2. installs uv (the Python package manager) into ~/.local/bin if it is missing
 #   3. makes .venv here with uv's own arm64 Python 3.11 (never the Mac's python.org universal one,
 #      which LaunchServices can start as x86_64 and then no wheel loads)
@@ -17,7 +18,7 @@
 #   9. counts the install: one anonymous ping (random id in .install-id, macOS version, chip)
 #  10. opens sorted.app
 #
-# Touches only: this folder (.venv, .uv, .install-id, install.log), ~/.local/bin (uv), the Hugging Face
+# Touches only: this folder (.venv, .uv, .install-id, install.log, BUILD), ~/.local/bin (uv), the Hugging Face
 # cache (~/.cache/huggingface) and ~/Desktop/sorted.app. uv's own download cache and its Python
 # live in .uv/ here, not in your home folder. Nothing is added to your shell profile.
 #
@@ -68,6 +69,13 @@ if [ "${OS_MAJOR:-0}" -lt 14 ] 2>/dev/null; then
   fail "sorted needs macOS 14 or newer. This Mac runs macOS $OS_VER."
 fi
 note "Apple silicon, macOS $OS_VER"
+# The build stamp: VERSION is the number, BUILD the git short sha of this tree. app-publish.sh stamps BUILD for
+# the published copy; a checkout without one gets it here when git can say.
+if [ ! -s "$REPO/BUILD" ]; then
+  SHA="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
+  if [ -n "$SHA" ]; then printf '%s\n' "$SHA" > "$REPO/BUILD"; fi
+fi
+note "sorted $(cat "$REPO/VERSION" 2>/dev/null || echo '?')$( [ -s "$REPO/BUILD" ] && printf ' (%s)' "$(cat "$REPO/BUILD")" )"
 
 # 2. uv ------------------------------------------------------------------------------------------
 step "uv (Python package manager)"

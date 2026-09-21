@@ -1,0 +1,4 @@
+{
+  "version": "0.3.0",
+  "notes": "Filters combine as chips, the last 20 searches are one arrow down away and a star saves one, duplicates and bursts fold into one tile, export presets and an export history, and the app shows its version here."
+}

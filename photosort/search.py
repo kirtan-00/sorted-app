@@ -1,9 +1,11 @@
 from __future__ import annotations
+import datetime as _dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from . import db
-from .config import GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN
+from .config import GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN, BURST_SIM, BURST_GAP_S
 
 @dataclass
 class Filters:
@@ -19,6 +21,7 @@ class Filters:
     aerial: bool | None = None      # True: drone shots only (photos.aerial), False: none of them, None: both
     hide_bad: bool = False          # drop rows the focus pass labelled bad (photos.focus); unchecked rows stay
     hide_soft: bool = False         # drop soft and bad
+    fold: bool = False              # one tile per duplicate set and per burst (the first in order shows; see Index.groups)
 
 def category_match(p, cat: str) -> tuple[bool, float] | None:
     """(sure, confidence) for a photo row against fixed category cat, or None when it is not there at all.
@@ -50,9 +53,100 @@ def cluster_match(p, name: str) -> tuple[bool, float] | None:
     s = p.get("cluster_score")
     return (True, 1.0) if s is None else (float(s) >= SURE_MIN, float(s))
 
+_NUM_RE = re.compile(r"(\d+)(?!.*\d)")     # the last run of digits in a filename stem: DSC01234 -> 1234, IMG_0007 -> 7
+
+def _frame_no(rel: str) -> int | None:
+    m = _NUM_RE.search(Path(rel).stem)
+    return int(m.group(1)) if m else None
+
+def _taken(p: dict) -> _dt.datetime | None:
+    t = p.get("taken_at")
+    if not t:
+        return None
+    try:
+        return _dt.datetime.fromisoformat(str(t)[:19])
+    except ValueError:
+        return None
+
 class Index:
     def __init__(self, root: Path):
         self.root = Path(root); self.refresh()
+
+    # ===== duplicates and bursts: computed once per refresh over the whole shoot, folded per query =====
+    def _find_groups(self) -> None:
+        """Marks every photo dict with dup (the qhash, when the same file sits on the disk more than once) and
+        burst (an int id, when a run of photos in one folder was shot as a burst: consecutive frame numbers,
+        each within BURST_GAP_S of the last, and, where both have embeddings, cosine BURST_SIM or closer).
+        Clips never burst; a clip can be a duplicate."""
+        by_hash: dict[str, list[int]] = {}
+        for p in self.photos.values():
+            p["dup"] = None; p["burst"] = None
+            if p.get("qhash"):
+                by_hash.setdefault(p["qhash"], []).append(p["id"])
+        for qh, ids in by_hash.items():
+            if len(ids) > 1:
+                for i in ids: self.photos[i]["dup"] = qh
+        stills = [p for p in self.photos.values() if p.get("kind") != "video" and _taken(p) is not None and _frame_no(p["rel"]) is not None]
+        stills.sort(key=lambda p: (str(Path(p["rel"]).parent), _taken(p), p["rel"]))
+        gid = 0; run: list[dict] = []
+        def close():
+            nonlocal gid
+            if len(run) > 1:
+                gid += 1
+                for p in run: p["burst"] = gid
+            run.clear()
+        prev = None
+        for p in stills:
+            if prev is not None and self._burst_pair(prev, p):
+                run.append(p)
+            else:
+                close(); run.append(p)
+            prev = p
+        close()
+
+    def _burst_pair(self, a: dict, b: dict) -> bool:
+        if Path(a["rel"]).parent != Path(b["rel"]).parent: return False
+        if a.get("camera") != b.get("camera"): return False
+        ta, tb = _taken(a), _taken(b)
+        if ta is None or tb is None or (tb - ta).total_seconds() > BURST_GAP_S: return False
+        na, nb = _frame_no(a["rel"]), _frame_no(b["rel"])
+        if na is None or nb is None or nb != na + 1: return False
+        ia, ib = self.pos.get(a["id"]), self.pos.get(b["id"])
+        if ia is not None and ib is not None:
+            va, vb = self.M[ia], self.M[ib]
+            den = float(np.linalg.norm(va) * np.linalg.norm(vb)) or 1.0
+            if float(va @ vb) / den < BURST_SIM: return False
+        return True
+
+    @staticmethod
+    def _fold(cands: list[dict], fold: bool) -> list[dict]:
+        """Every row that shares a duplicate set or a burst with another row in cands gets group = {kind, n,
+        members, sharpest}; with fold on only the first of each set (in the order given) is kept."""
+        sets: dict[tuple, list[dict]] = {}
+        for p in cands:
+            p["group"] = None
+            key = ("burst", p["burst"]) if p.get("burst") else (("dup", p["dup"]) if p.get("dup") else None)
+            if key is not None:
+                sets.setdefault(key, []).append(p)
+        for key, members in sets.items():
+            if len(members) < 2:
+                continue
+            best = max(members, key=lambda m: (m.get("sharp") or 0.0, -m["id"]))
+            info = {"kind": "burst" if key[0] == "burst" else "copies", "n": len(members),
+                    "members": [{"id": m["id"], "rel": m["rel"], "qhash": m["qhash"], "sharp_pct": round(m["sharp_pct"], 1)} for m in members],
+                    "sharpest": best["id"]}
+            for m in members: m["group"] = info
+        if not fold:
+            return cands
+        seen: set = set(); out = []
+        for p in cands:
+            g = p["group"]
+            if g is None: out.append(p); continue
+            key = ("burst", p["burst"]) if p.get("burst") else ("dup", p["dup"])
+            if key in seen: continue
+            seen.add(key); out.append(p)
+        return out
+    # ===== end duplicates and bursts =====
 
     def refresh(self):
         # Open a connection local to the calling thread: sqlite3 connections
@@ -68,6 +162,7 @@ class Index:
             self.photos[r["id"]]["sharp_pct"] = float(rank) / max(len(rows) - 1, 1) * 100
         self.ids, self.M = db.load_embeds(conn)
         self.pos = {pid: i for i, pid in enumerate(self.ids.tolist())}
+        self._find_groups()
 
     def _person_photo_ids(self, person_id: int) -> set[int]:
         conn = db.connect(self.root)
@@ -110,7 +205,8 @@ class Index:
     def query(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters()) -> list[dict]:
         """Every photo that passes the filters, sorted by similarity (text or image query) or by capture time.
         With a category or cluster filter the sure ones come first in that order, then the "less sure"
-        band (sure=False) sorted by confidence desc; sure_only drops the band."""
+        band (sure=False) sorted by confidence desc; sure_only drops the band. Every row in a duplicate set
+        or a burst carries group (see _fold); fold keeps the first of each set only."""
         person_ids = self._person_photo_ids(filters.person_id) if filters.person_id is not None else None
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         for p in cands: self._confidence(p, filters)
@@ -136,7 +232,7 @@ class Index:
         if unsure:
             unsure.sort(key=lambda p: -p["confidence"])     # stable: ties keep the order above
             cands = [p for p in cands if p["sure"]] + unsure
-        return cands
+        return self._fold(cands, filters.fold)
 
     def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
                limit: int = 200, offset: int = 0) -> list[dict]:

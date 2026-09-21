@@ -23,7 +23,6 @@ CHUNK = 8 * 1024 * 1024
 RETRIES = 3                      # after the first attempt
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 QUOTA_HEADROOM = 512 * 1024 * 1024
-WEB_QUALITY = 90
 
 try:
     from googleapiclient.http import MediaFileUpload
@@ -272,30 +271,11 @@ def _mime(name: str) -> str:
 
 
 def _web_copy(src: Path, dst_dir: Path, web_size: int) -> Path | None:
-    """A copy of a photo at most web_size px on its long edge, orientation applied, the rest of the
-    EXIF kept, saved in the photo's own format (JPEG at quality 90). None when Pillow cannot read it,
-    in which case the original goes up as is."""
-    from PIL import Image, ImageOps
-    try:
-        import pillow_heif; pillow_heif.register_heif_opener()
-    except Exception:
-        pass
-    try:
-        with Image.open(src) as im:
-            fmt = im.format or "JPEG"
-            im = ImageOps.exif_transpose(im)
-            im.thumbnail((web_size, web_size), Image.LANCZOS)
-            exif = im.info.get("exif")
-            if fmt == "JPEG" and im.mode not in ("RGB", "L"):
-                im = im.convert("RGB")
-            out = dst_dir / src.name
-            kw = {"quality": WEB_QUALITY} if fmt in ("JPEG", "WEBP") else {}
-            if exif:
-                kw["exif"] = exif
-            im.save(out, format=fmt, **kw)
-            return out
-    except Exception:
-        return None
+    """A copy of a photo at most web_size px on its long edge (export.web_copy), or None when Pillow cannot
+    read it, in which case the original goes up as is."""
+    from .export import web_copy
+    out = dst_dir / src.name
+    return out if web_copy(src, out, web_size) else None
 
 
 def _upload_once(svc, parent_id: str, name: str, path: Path) -> str:

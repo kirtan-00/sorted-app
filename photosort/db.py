@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS face_links(
 CREATE TABLE IF NOT EXISTS jobs(
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'running',
   started TEXT DEFAULT (datetime('now')), finished TEXT, progress TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS searches(
+  id INTEGER PRIMARY KEY, q TEXT NOT NULL UNIQUE, filters TEXT, saved INTEGER DEFAULT 0, n INTEGER DEFAULT 1,
+  used_at TEXT DEFAULT (datetime('now')), saved_at TEXT);
+CREATE TABLE IF NOT EXISTS exports(
+  id INTEGER PRIMARY KEY, at TEXT DEFAULT (datetime('now')), what TEXT, dest TEXT, route TEXT, req TEXT,
+  path TEXT, count INTEGER, done INTEGER, failed INTEGER, skipped INTEGER, error TEXT);
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
 CREATE INDEX IF NOT EXISTS segments_photo ON segments(photo_id);
@@ -311,6 +317,76 @@ def cluster_counts(conn) -> dict[str, int]:
     """discovered category name -> count for status='ok' photos, largest first. Empty until discover_and_store ran."""
     rows = conn.execute("SELECT cluster, COUNT(*) AS n FROM photos WHERE status='ok' AND cluster IS NOT NULL GROUP BY cluster ORDER BY n DESC, cluster").fetchall()
     return {r[0]: r[1] for r in rows}
+
+# ===== search history and saved searches: one row per query text, per shoot (the table travels in the scan file) =====
+RECENT_SEARCHES = 20
+
+def _search_row(r) -> dict:
+    try: filters = json.loads(r["filters"]) if r["filters"] else {}
+    except Exception: filters = {}
+    return {"id": r["id"], "q": r["q"], "filters": filters if isinstance(filters, dict) else {}, "saved": bool(r["saved"]),
+            "n": r["n"], "used_at": r["used_at"], "saved_at": r["saved_at"]}
+
+def record_search(conn, q: str, filters: dict | None = None) -> None:
+    """A search with text was run: the row for that exact text moves to the top of the recent list with
+    the filters it ran with (a saved row keeps its saved flag). Unsaved rows past RECENT_SEARCHES go."""
+    q = (q or "").strip()
+    if not q:
+        return
+    f = json.dumps(filters or {}, sort_keys=True)
+    conn.execute("""INSERT INTO searches(q, filters) VALUES(?, ?)
+                    ON CONFLICT(q) DO UPDATE SET n=n+1, used_at=datetime('now'), filters=excluded.filters""", (q, f))
+    conn.execute("""DELETE FROM searches WHERE saved=0 AND id NOT IN
+                    (SELECT id FROM searches ORDER BY used_at DESC, id DESC LIMIT ?)""", (RECENT_SEARCHES,))
+    conn.commit()
+
+def list_searches(conn) -> dict:
+    """{recent: the last RECENT_SEARCHES queries newest first (saved ones included), saved: the starred ones, oldest star first}."""
+    recent = [_search_row(r) for r in conn.execute("SELECT * FROM searches ORDER BY used_at DESC, id DESC LIMIT ?", (RECENT_SEARCHES,))]
+    saved = [_search_row(r) for r in conn.execute("SELECT * FROM searches WHERE saved=1 ORDER BY saved_at, id")]
+    return {"recent": recent, "saved": saved}
+
+def save_search(conn, sid: int, saved: bool) -> dict | None:
+    """Star or unstar one row; None when there is no such row. A row saved from the dropdown keeps its filters."""
+    cur = conn.execute("UPDATE searches SET saved=?, saved_at=CASE WHEN ? THEN datetime('now') ELSE NULL END WHERE id=?",
+                       (1 if saved else 0, 1 if saved else 0, sid))
+    conn.commit()
+    if cur.rowcount == 0:
+        return None
+    return _search_row(conn.execute("SELECT * FROM searches WHERE id=?", (sid,)).fetchone())
+
+def delete_search(conn, sid: int) -> bool:
+    cur = conn.execute("DELETE FROM searches WHERE id=?", (sid,)); conn.commit()
+    return cur.rowcount > 0
+# ===== end search history =====
+
+# ===== export history: one row per export of this shoot (selection, categories, people; local or Drive) =====
+EXPORT_HISTORY = 10
+
+def _export_row(r) -> dict:
+    try: req = json.loads(r["req"]) if r["req"] else {}
+    except Exception: req = {}
+    return {"id": r["id"], "at": r["at"], "what": r["what"], "dest": r["dest"], "route": r["route"], "req": req if isinstance(req, dict) else {},
+            "path": r["path"], "count": r["count"], "done": r["done"], "failed": r["failed"], "skipped": r["skipped"], "error": r["error"]}
+
+def record_export(conn, what: str, dest: str, route: str, req: dict, path: str | None, done: int, failed: int, skipped: int,
+                  error: str | None) -> int:
+    """What went where: the request as sent (so Run again can send it again), the folder or Drive link it landed in,
+    the counts. Rows past 5 x EXPORT_HISTORY go."""
+    count = max(int(done or 0) - int(failed or 0) - int(skipped or 0), 0)
+    cur = conn.execute("INSERT INTO exports(what, dest, route, req, path, count, done, failed, skipped, error) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (what, dest, route, json.dumps(req or {}), path, count, int(done or 0), int(failed or 0), int(skipped or 0), error))
+    conn.execute("DELETE FROM exports WHERE id NOT IN (SELECT id FROM exports ORDER BY id DESC LIMIT ?)", (EXPORT_HISTORY * 5,))
+    conn.commit()
+    return cur.lastrowid
+
+def list_exports(conn, n: int = EXPORT_HISTORY) -> list[dict]:
+    return [_export_row(r) for r in conn.execute("SELECT * FROM exports ORDER BY id DESC LIMIT ?", (n,))]
+
+def get_export(conn, eid: int) -> dict | None:
+    r = conn.execute("SELECT * FROM exports WHERE id=?", (eid,)).fetchone()
+    return _export_row(r) if r else None
+# ===== end export history =====
 
 def mark_missing(conn, present: set[str]) -> None:
     for (rel,) in conn.execute("SELECT rel FROM photos WHERE status='ok'").fetchall():

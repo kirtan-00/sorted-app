@@ -2,7 +2,43 @@ from __future__ import annotations
 import csv, os, re, shutil, subprocess
 from pathlib import Path
 from . import db
-from .config import export_root, CATEGORY_FALLBACK, SURE_MIN
+from .config import export_root, CATEGORY_FALLBACK, SURE_MIN, STD_EXTS
+
+WEB_QUALITY = 90
+
+def web_copy(src: Path, dst: Path, web_size: int) -> bool:
+    """dst = a copy of the photo at most web_size px on its long edge, orientation applied, the rest of the
+    EXIF kept, in the photo's own format (JPEG at quality 90), with the source's mtime so a re-run knows it.
+    False when the photo already fits (a copy of the original is better than a re-encode) or Pillow cannot
+    read it (a RAW, a clip, a broken file): the caller copies the original."""
+    if Path(src).suffix.lower() not in STD_EXTS:
+        return False
+    from PIL import Image, ImageOps
+    try:
+        import pillow_heif; pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+    try:
+        with Image.open(src) as im:
+            fmt = im.format or "JPEG"
+            if max(im.size) <= web_size:
+                return False
+            im = ImageOps.exif_transpose(im)
+            im.thumbnail((web_size, web_size), Image.LANCZOS)
+            exif = im.info.get("exif")
+            if fmt == "JPEG" and im.mode not in ("RGB", "L"):
+                im = im.convert("RGB")
+            kw = {"quality": WEB_QUALITY} if fmt in ("JPEG", "WEBP") else {}
+            if exif:
+                kw["exif"] = exif
+            im.save(dst, format=fmt, **kw)
+        st = os.stat(src)
+        os.utime(dst, (st.st_atime, st.st_mtime))
+        return True
+    except Exception:
+        try: os.unlink(dst)
+        except OSError: pass
+        return False
 
 def safe_segment(name: str) -> str:
     """One folder-name segment: no separators, no leading/trailing dots or spaces, never '.' or '..'."""
@@ -47,51 +83,58 @@ def export_bytes(root: Path, ids: list[int]) -> int:
         total += conn.execute(f"SELECT COALESCE(SUM(size), 0) FROM photos WHERE id IN ({q}) AND status='ok'", chunk).fetchone()[0]
     return int(total)
 
-def _is_existing_copy(dst: Path, src: Path) -> bool:
+def _is_existing_copy(dst: Path, src: Path, web: bool = False) -> bool:
     """True when dst already represents src, i.e. an earlier export already put it there: a
     symlink that resolves to src, or a regular file whose size and mtime are within 2 seconds
-    of src's own (copy2 preserves mtime, so a plain re-copy matches exactly). A source that has
-    since vanished is never "already there": that stays a failure on re-run, same as a first run."""
+    of src's own (copy2 preserves mtime, so a plain re-copy matches exactly). A web-size copy
+    (web) has another size by design, so its mtime alone, which web_copy sets from the source,
+    is the match. A source that has since vanished is never "already there": that stays a
+    failure on re-run, same as a first run."""
     if not src.exists():
         return False
     try:
         if dst.is_symlink():
             return dst.resolve() == src.resolve()
         st_d = dst.stat(); st_s = src.stat()
+        if web:
+            return abs(st_d.st_mtime - st_s.st_mtime) <= 2
         return st_d.st_size == st_s.st_size and abs(st_d.st_mtime - st_s.st_mtime) <= 2
     except OSError:
         return False
 
-def _resolve_destination(dst_dir: Path, name: str, pid: int, src: Path):
+def _resolve_destination(dst_dir: Path, name: str, pid: int, src: Path, web: bool = False):
     """Where one file lands: ("write", path) for a free name, ("skip", None) when the taken name
     is already this same file (a prior export, so re-running must not fail or duplicate), or
     ("fail", message) when 99 numbered fallbacks are all taken by something else."""
     dst = dst_dir / name
     if not (dst.exists() or dst.is_symlink()):
         return "write", dst
-    if _is_existing_copy(dst, src):
+    if _is_existing_copy(dst, src, web):
         return "skip", None
     for i in range(1, 100):
         cand = dst_dir / (f"{pid}_{name}" if i == 1 else f"{pid}_{i}_{name}")
         if not (cand.exists() or cand.is_symlink()):
             return "write", cand
-        if _is_existing_copy(cand, src):
+        if _is_existing_copy(cand, src, web):
             return "skip", None
     return "fail", f"no free name for {name} in {dst_dir} after 99 tries"
 
-def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, failed_file: Path, progress=None) -> list[str]:
+def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, failed_file: Path, progress=None,
+                   web_size: int | None = None) -> list[str]:
     """The per-file loop every export shares. jobs are (photo id, rel, destination folder); each file
     lands in its folder under its own name, or {id}_{name} (then {id}_2_{name}, ...) when that name
     is already taken by something else. A name already taken by this same file (symlink target or
     copy with matching size/mtime) counts as done without writing, so re-exporting into a folder that
     already has the photos does not fail or duplicate. mode is "copy" or "symlink". A per-file OSError
     is counted, not raised, and the list is written to failed_file at the end. progress (if given)
-    sees {done, total, failed, skipped} after every file. Destination folders must already exist."""
+    sees {done, total, failed, skipped} after every file. Destination folders must already exist.
+    web_size (copy only): photos go out re-encoded to that long edge; RAW files and clips as they are."""
     root = Path(root); notify = progress or (lambda d: None)
     failed: list[str] = []; skipped = 0; total = len(jobs)
     for n, (pid, rel, dst_dir) in enumerate(jobs, 1):
         src = root / rel; name = Path(rel).name
-        action, val = _resolve_destination(dst_dir, name, pid, src)
+        web = bool(web_size) and mode == "copy" and src.suffix.lower() in STD_EXTS
+        action, val = _resolve_destination(dst_dir, name, pid, src, web)
         if action == "skip":
             skipped += 1
         elif action == "fail":
@@ -101,7 +144,8 @@ def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, fai
             try:
                 if not src.exists():               # os.symlink would happily point at nothing
                     raise FileNotFoundError(str(src))
-                if mode == "copy": shutil.copy2(src, dst)
+                if web and web_copy(src, dst, int(web_size)): pass
+                elif mode == "copy": shutil.copy2(src, dst)
                 else: os.symlink(src.resolve(), dst)
             except OSError as e:
                 failed.append(f"{rel}\t{e}")
@@ -110,7 +154,10 @@ def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, fai
         failed_file.write_text("\n".join(failed) + "\n")
     return failed
 
-def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progress=None, base: Path | None = None) -> Path:
+def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progress=None, base: Path | None = None,
+               include_raw: bool = False, web_size: int | None = None) -> Path:
+    """A flat selection under <base>/<shoot>/<name>: copies, links or a CSV. include_raw puts each RAW sibling
+    next to its JPEG; web_size (copies only) re-encodes photos to that long edge, RAW and clips go as they are."""
     root = Path(root); out = export_dir(root, name, base)
     notify = progress or (lambda d: None)
     out.mkdir(parents=True, exist_ok=True)
@@ -124,7 +171,8 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
             for r in rows: w.writerow([r["id"], str(root / r["rel"]), r["sharp"], r["n_faces"], r["taken_at"]])
         notify({"done": len(rows), "total": len(rows), "failed": 0, "skipped": 0})
         return out
-    transfer_files(root, [(pid, rel, out) for pid, rel, _ in ids_jobs(root, ids)], mode, out / "failed.txt", progress)
+    transfer_files(root, [(pid, rel, out) for pid, rel, _ in ids_jobs(root, ids, include_raw)], mode, out / "failed.txt", progress,
+                   web_size=web_size)
     return out
 
 def category_rows(root: Path, categories: list[str] | None, include_unsure: bool = False, hide_bad: bool = False) -> list[dict]:

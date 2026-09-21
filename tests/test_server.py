@@ -60,11 +60,11 @@ def test_folder_switch_refused_while_export_running(tmp_path, monkeypatch):
     c = TestClient(create_app(tmp_path))
     ids = c.get("/api/search/ids").json()["ids"]
 
-    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None):
+    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None, **kw):
         def slow_progress(d):
             time.sleep(0.1)
             if progress: progress(d)
-        return real_export_ids(root, ids_, name, mode, progress=slow_progress, base=base)
+        return real_export_ids(root, ids_, name, mode, progress=slow_progress, base=base, **kw)
 
     monkeypatch.setattr(srv, "export_ids", slow_export_ids)
     assert c.post("/api/export", json={"ids": ids, "name": "t", "mode": "symlink"}).json()["started"]
@@ -335,6 +335,40 @@ def test_search_by_cluster(tmp_path):
     assert c.get("/api/search", params={"cluster": "crane"}).json()["results"] == []
 
 
+def test_search_filters_combine_with_and(tmp_path):
+    """Combined filters (the chip bar): person AND category AND aerial AND kind AND hide_bad on one
+    request narrow together, and /api/search/ids agrees with /api/search on every step."""
+    from conftest import make_image
+    from photosort import db as db_mod
+    for i, name in enumerate(["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]):
+        make_image(tmp_path, name, seed=i + 1)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    ids = {r[0]: r[1] for r in conn.execute("SELECT rel, id FROM photos")}
+    conn.execute("INSERT INTO people(id, name, n) VALUES(7, 'Meera', 3)")
+    for rel in ("a.jpg", "b.jpg", "c.jpg"):                                        # Meera is in a, b, c
+        conn.execute("INSERT INTO faces(photo_id, x, y, w, h, score, person_id) VALUES(?, 1, 1, 10, 10, 0.9, 7)", (ids[rel],))
+    for rel in ("a.jpg", "b.jpg", "d.jpg"):                                        # beach is a, b, d
+        conn.execute("UPDATE photos SET category='beach', category_score=0.9 WHERE rel=?", (rel,))
+    conn.execute("UPDATE photos SET aerial=1 WHERE rel IN ('a.jpg', 'b.jpg', 'e.jpg')")   # drone: a, b, e
+    conn.execute("UPDATE photos SET focus='bad' WHERE rel='b.jpg'")                       # b is out of focus
+    conn.commit()
+    c = TestClient(create_app(tmp_path))
+    def rels(**params):
+        r = c.get("/api/search", params=params); assert r.status_code == 200
+        got = sorted(x["rel"] for x in r.json()["results"])
+        assert r.json()["total"] == len(got) == c.get("/api/search/ids", params=params).json()["total"]
+        return got
+    assert rels() == ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]
+    assert rels(person=7) == ["a.jpg", "b.jpg", "c.jpg"]
+    assert rels(person=7, category="beach") == ["a.jpg", "b.jpg"]
+    assert rels(person=7, category="beach", aerial=1) == ["a.jpg", "b.jpg"]
+    assert rels(person=7, category="beach", aerial=1, kind="photos") == ["a.jpg", "b.jpg"]
+    assert rels(person=7, category="beach", aerial=1, kind="photos", hide_bad=1) == ["a.jpg"]
+    assert rels(person=7, category="beach", aerial=1, kind="videos") == []
+    assert rels(category="beach", hide_bad=1) == ["a.jpg", "d.jpg"]                # any subset works on its own
+
+
 def test_rename_discovered_category_endpoint(tmp_path):
     """POST /api/categories/discovered/rename {old, new}: 200 with the rows moved and the search index
     refreshed, 400 on a bad or colliding name, 404 on an unknown old name, 409 while indexing or
@@ -508,9 +542,9 @@ def test_export_start_is_serialised(tmp_path, monkeypatch):
         time.sleep(0.3)
         return real_export_bytes(root, ids)
 
-    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None):
+    def slow_export_ids(root, ids_, name, mode="copy", progress=None, base=None, **kw):
         time.sleep(0.5)
-        return real_export_ids(root, ids_, name, mode, progress=progress, base=base)
+        return real_export_ids(root, ids_, name, mode, progress=progress, base=base, **kw)
 
     monkeypatch.setattr(srv, "export_bytes", slow_export_bytes)
     monkeypatch.setattr(srv, "export_ids", slow_export_ids)
@@ -759,6 +793,93 @@ def test_export_destination_set_get_and_reset(tmp_path, tmp_path_factory):
     assert d2["path"] == str(export_root()) and d2["default"] is True
     assert settings.get_export_base() is None
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_export_web_size_and_raw_sibling(tmp_path):
+    """The selection export takes web_size (photos re-encoded to that long edge, the RAW sibling as it is) and
+    include_raw; a re-run into the same folder skips what is already there; links cannot be resized."""
+    from PIL import Image
+    from conftest import make_image
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    (tmp_path / "a.ARW").write_bytes(b"raw bytes, never decoded")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    assert db_mod.connect(tmp_path).execute("SELECT sibling FROM photos WHERE rel='a.jpg'").fetchone()[0] == "a.ARW"
+    c = TestClient(create_app(tmp_path))
+    ids = [r["id"] for r in c.get("/api/search").json()["results"]]
+    assert c.post("/api/export", json={"ids": ids, "name": "web", "mode": "symlink", "web_size": 2048}).status_code == 400
+    assert c.post("/api/export", json={"ids": ids, "name": "web", "mode": "copy", "web_size": 50}).status_code == 400
+    r = c.post("/api/export", json={"ids": ids, "name": "web", "mode": "copy", "web_size": 800, "include_raw": True})
+    assert r.status_code == 200 and r.json()["total"] == 2
+    p = _wait_export(c)
+    assert p["error"] is None and p["done"] == 3 and p["failed"] == 0                     # two photos plus the RAW
+    out = Path(p["path"])
+    assert sorted(os.listdir(out)) == ["a.ARW", "a.jpg", "b.jpg"]
+    assert Image.open(out / "a.jpg").size == (800, 600) and Image.open(out / "b.jpg").size == (800, 600)
+    assert (out / "a.ARW").read_bytes() == b"raw bytes, never decoded"
+    assert abs(os.stat(out / "a.jpg").st_mtime - os.stat(tmp_path / "a.jpg").st_mtime) <= 2   # the source's mtime, for re-runs
+    c.post("/api/export", json={"ids": ids, "name": "web", "mode": "copy", "web_size": 800, "include_raw": True})
+    p2 = _wait_export(c)
+    assert p2["skipped"] == 3 and sorted(os.listdir(out)) == ["a.ARW", "a.jpg", "b.jpg"]  # nothing duplicated
+    # a full-size copy next to it keeps the originals' size
+    c.post("/api/export", json={"ids": ids, "name": "full", "mode": "copy"})
+    p3 = _wait_export(c)
+    assert Image.open(Path(p3["path"]) / "a.jpg").size == (1600, 1200) and sorted(os.listdir(Path(p3["path"]))) == ["a.jpg", "b.jpg"]
+    assert sorted(os.listdir(tmp_path)) == ["a.ARW", "a.jpg", "b.jpg"]
+
+
+def test_export_prefs_per_shoot(tmp_path):
+    """The preset is remembered in the shoot's index: web until set; custom keeps its own fields; a named preset
+    always answers with its fixed fields."""
+    c = _shoot_client(tmp_path)
+    assert c.get("/api/export/prefs").json() == {"preset": "web", "mode": "copy", "web_size": 2048, "include_raw": False}
+    r = c.post("/api/export/prefs", json={"preset": "custom", "mode": "symlink", "web_size": None, "include_raw": True})
+    assert r.status_code == 200 and r.json() == {"preset": "custom", "mode": "symlink", "web_size": None, "include_raw": True}
+    assert c.get("/api/export/prefs").json()["preset"] == "custom" and c.get("/api/export/prefs").json()["include_raw"] is True
+    assert c.post("/api/export/prefs", json={"preset": "full", "mode": "symlink", "web_size": 640}).json() == {"preset": "full", "mode": "copy", "web_size": None, "include_raw": True}
+    assert c.get("/api/export/prefs").json()["preset"] == "full"
+    assert c.post("/api/export/prefs", json={"preset": "huge"}).status_code == 400
+    assert c.post("/api/export/prefs", json={"preset": "custom", "mode": "copy", "web_size": 10}).status_code == 400
+    c2 = TestClient(create_app(tmp_path))                                                      # a restart keeps it
+    assert c2.get("/api/export/prefs").json()["preset"] == "full"
+
+
+def test_export_history_and_run_again(tmp_path):
+    """Every export lands in the shoot's history with what, where, when and the counts; Run again sends the same
+    request to the same route; a folder that is gone says exists false."""
+    import shutil
+    c = _shoot_client(tmp_path, n=2)
+    assert c.get("/api/exports").json() == {"exports": []}
+    ids = [r["id"] for r in c.get("/api/search").json()["results"]]
+    c.post("/api/export", json={"ids": ids[:1], "name": "one", "mode": "copy", "web_size": 640})
+    p1 = _wait_export(c)
+    rows = c.get("/api/exports").json()["exports"]
+    assert len(rows) == 1 and rows[0]["what"] == "selection" and rows[0]["dest"] == "local" and rows[0]["path"] == p1["path"]
+    assert rows[0]["count"] == 1 and rows[0]["exists"] is True and rows[0]["at"] and "req" not in rows[0] and rows[0]["error"] is None
+    # run it again: the same folder, the file already there is skipped
+    r = c.post(f"/api/exports/{rows[0]['id']}/run")
+    assert r.status_code == 200 and r.json()["started"] is True and r.json()["what"] == "selection"
+    p2 = _wait_export(c)
+    assert p2["path"] == p1["path"] and p2["skipped"] == 1
+    rows = c.get("/api/exports").json()["exports"]
+    assert len(rows) == 2 and rows[0]["count"] == 0 and rows[0]["skipped"] == 1 and rows[1]["id"] < rows[0]["id"]   # newest first
+    # the folder gone: exists false, Run again makes it again
+    shutil.rmtree(p1["path"])
+    assert c.get("/api/exports").json()["exports"][0]["exists"] is False
+    assert c.post(f"/api/exports/{rows[1]['id']}/run").status_code == 200
+    p3 = _wait_export(c)
+    assert p3["done"] == 1 and Path(p3["path"]).is_dir()
+    assert c.post("/api/exports/999/run").status_code == 404
+    # a categories export is on the list too, and a failed request is a 400 on Run again, not a crash
+    c.post("/api/export/categories", json={"categories": None, "mode": "symlink"})
+    _wait_export(c)
+    top = c.get("/api/exports").json()["exports"][0]
+    assert top["what"] == "categories" and top["path"].endswith("categories")
+    # only the last 10 are listed
+    for i in range(12):
+        c.post("/api/export", json={"ids": ids[:1], "name": f"n{i}", "mode": "csv"}); _wait_export(c)
+    assert len(c.get("/api/exports").json()["exports"]) == 10
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
 
 
 def test_export_destination_inside_source_is_400(tmp_path):
@@ -1921,6 +2042,40 @@ def test_usage_post_takes_ui_events_batched_and_drops_junk(tmp_path):
     assert evs[0]["tab"] == "people" and evs[3]["seconds"] == 12.5 and "nested" not in evs[4]
     assert evs[5]["path"] == "<path>"
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg"]
+
+
+def test_search_history_and_saved_searches(tmp_path):
+    """Every search with text lands in the shoot's searches table with the filters it ran with; the recent list
+    keeps the last 20 newest first; a star keeps a row past the 20 and lists it under saved; delete drops it."""
+    from photosort import db as db_mod
+    c = _shoot_client(tmp_path, n=2)
+    assert c.get("/api/searches").json() == {"recent": [], "saved": []}
+    c.get("/api/search", params={"q": "boats"})
+    c.get("/api/search", params={"q": "boats", "kind": "photos", "aerial": 1, "sharp": 40})
+    c.get("/api/search", params={"q": "   "})                                          # blank text: not a query
+    c.get("/api/search", params={"kind": "videos"})                                    # no text: the grid's own reload
+    c.get("/api/search", params={"q": "boats", "offset": 200})                         # a Show more page: not a new search
+    c.get("/api/search", params={"q": "temple"})
+    rows = c.get("/api/searches").json()
+    assert [r["q"] for r in rows["recent"]] == ["temple", "boats"] and rows["saved"] == []
+    boats = rows["recent"][1]
+    assert boats["n"] == 2 and boats["filters"] == {"kind": "photos", "aerial": 1, "sharp": 40.0} and boats["saved"] is False
+    # star boats, then push 25 more queries through: boats survives the prune, the unsaved ones past 20 go
+    r = c.post(f"/api/searches/{boats['id']}/save", json={"saved": True})
+    assert r.status_code == 200 and r.json()["saved"] is True and r.json()["saved_at"]
+    conn = db_mod.connect(tmp_path)
+    for i in range(25):
+        db_mod.record_search(conn, f"q{i}", {})
+    rows = c.get("/api/searches").json()
+    assert len(rows["recent"]) == 20 and rows["recent"][0]["q"] == "q24" and "temple" not in [r["q"] for r in rows["recent"]]
+    assert [r["q"] for r in rows["saved"]] == ["boats"]
+    assert conn.execute("SELECT COUNT(*) FROM searches").fetchone()[0] == 21                # 20 recent plus the saved one
+    # unstar puts it back on the prune list; delete removes it; unknown ids are 404
+    assert c.post(f"/api/searches/{boats['id']}/save", json={"saved": False}).json()["saved"] is False
+    assert c.get("/api/searches").json()["saved"] == []
+    assert c.delete(f"/api/searches/{boats['id']}").status_code == 200
+    assert c.delete(f"/api/searches/{boats['id']}").status_code == 404
+    assert c.post("/api/searches/999999/save", json={"saved": True}).status_code == 404
 
 
 def test_usage_summary_and_report_endpoints(tmp_path, monkeypatch):

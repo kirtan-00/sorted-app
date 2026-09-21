@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from . import usage
@@ -20,9 +20,10 @@ from . import awake
 from . import classify as classify_mod
 from . import focus as focus_mod
 from . import settings
+from . import version as version_mod
 from .config import app_home, export_root
 from .search import Index, Filters
-from .export import export_ids, export_bytes
+from .export import export_ids, export_bytes, ids_jobs, jobs_bytes
 
 UI = Path(__file__).parent / "ui"
 RECENT_FILE = "recent.json"
@@ -33,10 +34,27 @@ class ExportReq(BaseModel):
     ids: list[int]
     name: str
     mode: str = "copy"
+    web_size: int | None = None             # copies only: photos re-encoded to this long edge; RAW and clips as they are
+    include_raw: bool = False               # the RAW sibling next to each JPEG
+
+
+class ExportPrefsReq(BaseModel):
+    preset: str = "custom"                  # web | links | full | custom
+    mode: str = "copy"
+    web_size: int | None = None
+    include_raw: bool = False
 
 
 class NameReq(BaseModel):
     name: str
+
+
+class SavedReq(BaseModel):
+    saved: bool = True
+
+
+class UpdateCheckReq(BaseModel):
+    enabled: bool
 
 
 class RenameReq(BaseModel):
@@ -187,6 +205,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         "classify": {"running": False, "counts": {}, "discovered": {}, "error": None},
         "focus": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
+        "export_req": None,        # {route, body, root} of the running export, for the export history row at the end
         # Where exports land instead of export_root() (another disk), or None for the default.
         "export_base": settings.get_export_base(),
         # Held from the "already running" check through setting running=True, and around a folder
@@ -200,6 +219,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     # exception is an event, logged against the route template so a person's name in a URL never lands in it.
     usage.start_session()
     usage.log("server_start", **usage.system_info())
+    version_mod.check_in_background()          # ===== version: the daily check, only when the tester turned it on =====
 
     def _route_path(request: Request) -> str:
         """The matched route's template (/api/people/references/{name}/find), or for an unmatched URL its
@@ -537,30 +557,31 @@ def create_app(root: Path | None = None) -> FastAPI:
         return dict(state["progress"], running=state["running"], awake=awake.held())
 
     def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
-                 hide_bad=0, hide_soft=0) -> Filters:
+                 hide_bad=0, hide_soft=0, fold=0) -> Filters:
         if kind not in (None, "", "photos", "videos"):
             raise HTTPException(400, "kind must be photos or videos")
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
                        taken_to=taken_to, category=category or None, kind=kind or None,
                        cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None,
-                       hide_bad=bool(hide_bad), hide_soft=bool(hide_soft))
+                       hide_bad=bool(hide_bad), hide_soft=bool(hide_soft), fold=bool(fold))
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
-               aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, limit: int = 200, offset: int = 0):
+               aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, limit: int = 200, offset: int = 0):
         """Each result carries kind, duration and aerial, sure and confidence, and focus (None until the focus
         pass ran, else ok / soft / bad); with a category or cluster filter the sure ones come first, then the
         "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it).
         kind=photos|videos keeps one kind; aerial=1 keeps drone shots only; hide_bad=1 drops rows labelled
-        bad, hide_soft=1 drops soft and bad (unchecked rows are never hidden)."""
+        bad, hide_soft=1 drops soft and bad (unchecked rows are never hidden). A row in a duplicate set or a
+        burst carries group {kind: copies|burst, n, members, sharpest}; fold=1 keeps one row per set."""
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         t0 = time.time()
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold))
         except LookupError as e:
             raise HTTPException(404, str(e))
         # The usage log keeps the query's length and first characters plus which filters were on; an empty
@@ -570,17 +591,54 @@ def create_app(root: Path | None = None) -> FastAPI:
                                       hide_bad=hide_bad, hide_soft=hide_soft, image_id=bool(image_id)).items() if v}
         if offset == 0 and (q or filt):
             usage.log("search", q=q or "", filters=filt, total=len(rows), ms=round((time.time() - t0) * 1000))
+        # ===== search history: a search with text goes into the shoot's searches table with the filters it ran with =====
+        if offset == 0 and q and q.strip():
+            hist = {k: v for k, v in dict(sharp=sharp, faces=faces, person=person, category=category, kind=kind, cluster=cluster,
+                                          aerial=aerial, hide_bad=hide_bad, hide_soft=hide_soft).items() if v}
+            try:
+                db.record_search(db.connect(state["root"]), q, hist)
+            except sqlite3.Error as e:
+                usage.log("api_error", route="/api/search", what="record_search", error=str(e))
+        # ===== end search history =====
         return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
+
+    # ===== search history and saved searches: per shoot, in the index (table searches) =====
+    @app.get("/api/searches")
+    def searches():
+        """{recent: the last 20 queries with text, newest first; saved: the starred ones}. Each row carries the
+        filters the query last ran with, so a saved search restores its chips too."""
+        if state["root"] is None:
+            return {"recent": [], "saved": []}
+        return db.list_searches(db.connect(state["root"]))
+
+    @app.post("/api/searches/{sid}/save")
+    def save_search(sid: int, req: SavedReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        row = db.save_search(db.connect(state["root"]), sid, req.saved)
+        if row is None:
+            raise HTTPException(404, "no such search")
+        usage.log("search_saved", saved=req.saved)
+        return row
+
+    @app.delete("/api/searches/{sid}")
+    def delete_search(sid: int):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not db.delete_search(db.connect(state["root"]), sid):
+            raise HTTPException(404, "no such search")
+        return {"deleted": sid}
+    # ===== end search history =====
 
     @app.get("/api/search/ids")
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                    category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
-                   aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0):
+                   aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -1041,9 +1099,11 @@ def create_app(root: Path | None = None) -> FastAPI:
         settings.set_export_base(None)
         return _destination_info()
 
-    def _export_started(what: str, dest: str, files: int, **extra) -> float:
-        """Log export_start and hand back the clock; _export_finished logs export_done from state["export"]."""
+    def _export_started(what: str, dest: str, files: int, route: str | None = None, body: dict | None = None, **extra) -> float:
+        """Log export_start and hand back the clock; _export_finished logs export_done from state["export"] and,
+        when route and body are given, writes the shoot's export history row (Run again sends body to route)."""
         usage.log("export_start", what=what, dest=dest, files=files, **extra)
+        state["export_req"] = {"route": route, "body": body, "root": state["root"]} if route else None
         return time.time()
 
     def _export_finished(what: str, dest: str, t0: float, nbytes: int | None = None) -> None:
@@ -1051,9 +1111,28 @@ def create_app(root: Path | None = None) -> FastAPI:
         usage.log("export_done", what=what, dest=dest, files=ex.get("done", 0), failed=ex.get("failed", 0),
                   skipped=ex.get("skipped", 0), bytes=ex.get("bytes") if ex.get("bytes") is not None else nbytes,
                   seconds=round(time.time() - t0, 1), error=ex.get("error"))
+        # ===== export history: what went where, in the index, so the Scan tab can show it and run it again =====
+        req = state.get("export_req")
+        state["export_req"] = None
+        if req and req.get("root") is not None:
+            try:
+                db.record_export(db.connect(req["root"]), what, dest, req["route"], req["body"], ex.get("path"),
+                                 ex.get("done", 0), ex.get("failed", 0), ex.get("skipped", 0), ex.get("error"))
+            except sqlite3.Error as e:
+                usage.log("api_error", route=req["route"], what="record_export", error=str(e))
+        # ===== end export history =====
 
     @app.post("/api/export")
     def export(req: ExportReq):
+        """The selection under <destination>/<shoot>/<name>. mode copy, symlink or csv; web_size (copies only)
+        re-encodes photos to that long edge, include_raw puts each RAW sibling next to its JPEG. total in the
+        reply counts photos; progress counts RAW siblings too."""
+        if req.mode not in ("copy", "symlink", "csv"):
+            raise HTTPException(400, "mode must be copy, symlink or csv")
+        if req.web_size is not None and req.web_size < 100:
+            raise HTTPException(400, "web size must be at least 100 px")
+        if req.web_size and req.mode != "copy":
+            raise HTTPException(400, "only a copy can be resized; links and the CSV point at the originals")
         with state["export_lock"]:
             root_at_start = state["root"]
             if root_at_start is None:
@@ -1063,7 +1142,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             base = _resolve_base()
             nbytes = None
             if req.mode == "copy":
-                nbytes = export_bytes(root_at_start, req.ids)
+                nbytes = jobs_bytes(root_at_start, ids_jobs(root_at_start, req.ids, req.include_raw)) if req.include_raw else export_bytes(root_at_start, req.ids)
                 _check_free(nbytes, base)
             try:
                 from .export import export_dir
@@ -1071,7 +1150,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": len(req.ids), "failed": 0, "skipped": 0, "path": None, "error": None}
-        t0 = _export_started("selection", "local", len(req.ids), mode=req.mode)
+        t0 = _export_started("selection", "local", len(req.ids), route="/api/export", body=req.model_dump(), mode=req.mode,
+                             web_size=req.web_size, include_raw=req.include_raw)
 
         def prog(d):
             state["export"].update(d)
@@ -1079,7 +1159,8 @@ def create_app(root: Path | None = None) -> FastAPI:
         def _run_export():
             try:
                 with awake.hold():
-                    state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base))
+                    state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base,
+                                                             include_raw=req.include_raw, web_size=req.web_size))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -1125,8 +1206,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
-        t0 = _export_started("categories", "local", n_photos, mode=req.mode, categories=req.categories, discovered=len(req.discovered or []),
-                             include_raw=req.include_raw, include_unsure=req.include_unsure, videos=req.videos, drone=req.drone, hide_bad=req.hide_bad)
+        t0 = _export_started("categories", "local", n_photos, route="/api/export/categories", body=req.model_dump(), mode=req.mode,
+                             categories=req.categories, discovered=len(req.discovered or []), include_raw=req.include_raw,
+                             include_unsure=req.include_unsure, videos=req.videos, drone=req.drone, hide_bad=req.hide_bad)
 
         def prog(d):
             state["export"].update(d)
@@ -1177,7 +1259,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             except ValueError as e:
                 raise HTTPException(400, str(e))
             state["export"] = {"running": True, "done": 0, "total": n_photos, "failed": 0, "skipped": 0, "path": None, "error": None}
-        t0 = _export_started("people", "local", n_photos, mode=req.mode, people=len(folders), include_raw=req.include_raw, min_sim=min_sim)
+        t0 = _export_started("people", "local", n_photos, route="/api/export/references", body=req.model_dump(), mode=req.mode,
+                             people=len(folders), include_raw=req.include_raw, min_sim=min_sim)
 
         def prog(d):
             state["export"].update(d)
@@ -1195,6 +1278,100 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
+
+    # ===== export presets and history: the preset the shoot last used (meta), the last 10 exports (table exports) =====
+    PRESETS = {"web": {"mode": "copy", "web_size": 2048, "include_raw": False},
+               "links": {"mode": "symlink", "web_size": None, "include_raw": False},
+               "full": {"mode": "copy", "web_size": None, "include_raw": True}}
+
+    @app.get("/api/export/prefs")
+    def export_prefs():
+        """{preset, mode, web_size, include_raw} as last set for this shoot; the "web" preset until set."""
+        out = dict(preset="web", **PRESETS["web"])
+        if state["root"] is None:
+            return out
+        raw = db.get_meta(db.connect(state["root"]), "export_prefs")
+        try:
+            saved = json.loads(raw) if raw else {}
+        except ValueError:
+            saved = {}
+        if isinstance(saved, dict) and saved.get("preset") in ("web", "links", "full", "custom"):
+            out["preset"] = saved["preset"]
+            if saved["preset"] in PRESETS:
+                out.update(PRESETS[saved["preset"]])
+            else:
+                out["mode"] = saved.get("mode") if saved.get("mode") in ("copy", "symlink", "csv") else "copy"
+                ws = saved.get("web_size")
+                out["web_size"] = int(ws) if isinstance(ws, int) and not isinstance(ws, bool) and ws >= 100 else None
+                out["include_raw"] = bool(saved.get("include_raw"))
+        return out
+
+    @app.post("/api/export/prefs")
+    def set_export_prefs(req: ExportPrefsReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if req.preset not in ("web", "links", "full", "custom"):
+            raise HTTPException(400, "preset must be web, links, full or custom")
+        if req.mode not in ("copy", "symlink", "csv"):
+            raise HTTPException(400, "mode must be copy, symlink or csv")
+        if req.web_size is not None and req.web_size < 100:
+            raise HTTPException(400, "web size must be at least 100 px")
+        body = req.model_dump() if req.preset == "custom" else dict(preset=req.preset, **PRESETS[req.preset])
+        db.set_meta(db.connect(state["root"]), "export_prefs", json.dumps(body))
+        usage.log("export_preset", preset=req.preset)
+        return body
+
+    @app.get("/api/exports")
+    def exports_history():
+        """The last 10 exports of this shoot, newest first: what, where (path, or the Drive folder link), when,
+        the counts, and exists (the folder is still there, so Show in Finder can open it)."""
+        if state["root"] is None:
+            return {"exports": []}
+        rows = db.list_exports(db.connect(state["root"]))
+        for r in rows:
+            r["exists"] = bool(r["dest"] == "local" and r["path"] and Path(r["path"]).exists())
+            r["options"] = _export_options(r)
+            r["at"] = r["at"].replace(" ", "T") + "Z" if r["at"] and "T" not in r["at"] else r["at"]   # sqlite's UTC clock, as ISO
+            r.pop("req", None)
+        return {"exports": rows}
+
+    def _export_options(row: dict) -> str:
+        """The request in a few words: "copy, 2048 px, with RAW", "links", "CSV", "Google Drive, 2048 px", "links, segments"."""
+        b = row.get("req") or {}
+        parts = []
+        if row.get("dest") == "drive":
+            parts.append("Google Drive")
+        else:
+            parts.append({"copy": "copy", "symlink": "links", "csv": "CSV"}.get(b.get("mode"), ""))
+        if b.get("web_size"):
+            parts.append(f"{b['web_size']} px")
+        if b.get("include_raw"):
+            parts.append("with RAW")
+        if b.get("videos") == "segments":
+            parts.append("segments")
+        if b.get("include_unsure"):
+            parts.append("less sure too")
+        return ", ".join(p for p in parts if p)
+
+    @app.post("/api/exports/{eid}/run")
+    def export_again(eid: int):
+        """Send the export's request to its route again: the same ids, categories or people, the same options,
+        the destination as it is now. Same 400 and 409 answers as the route itself."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        row = db.get_export(db.connect(state["root"]), eid)
+        if row is None:
+            raise HTTPException(404, "no such export")
+        runner = EXPORT_RUNNERS.get(row["route"])
+        if runner is None:
+            raise HTTPException(400, "that export cannot be run again")
+        try:
+            out = runner(row["req"])
+        except ValidationError as e:
+            raise HTTPException(400, f"that export's request no longer fits: {e.errors()[0].get('msg', 'bad field')}")
+        usage.log("export_again", what=row["what"], dest=row["dest"])
+        return dict(out, what=row["what"], dest=row["dest"])
+    # ===== end export presets and history =====
 
     # Google Drive as a destination (photosort/drive.py): paste a folder link, the app uploads the
     # same three exports (ticked categories, saved people, a selection) into it. The upload rides the
@@ -1316,7 +1493,8 @@ def create_app(root: Path | None = None) -> FastAPI:
             settings.set_drive_prefs(req.link, req.web_size)
             state["export"] = {"running": True, "done": 0, "total": len(jobs), "failed": 0, "skipped": 0, "path": None,
                                "error": None, "what": "drive", "bytes": 0, "current": None, "failures": []}
-        t0 = _export_started(req.what, "drive", len(jobs), web_size=req.web_size, skip_videos=req.skip_videos, include_raw=req.include_raw)
+        t0 = _export_started(req.what, "drive", len(jobs), route="/api/drive/export", body=req.model_dump(), web_size=req.web_size,
+                             skip_videos=req.skip_videos, include_raw=req.include_raw)
 
         def prog(d):
             state["export"].update(d)
@@ -1336,6 +1514,15 @@ def create_app(root: Path | None = None) -> FastAPI:
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(jobs)}
+
+    # ===== export history: Run again sends the stored body to the route it came from =====
+    EXPORT_RUNNERS = {
+        "/api/export": lambda body: export(ExportReq(**body)),
+        "/api/export/categories": lambda body: export_categories_api(CategoriesExportReq(**body)),
+        "/api/export/references": lambda body: export_references_api(ReferencesExportReq(**body)),
+        "/api/drive/export": lambda body: drive_export(DriveExportReq(**body)),
+    }
+    # ===== end export history =====
 
     # Reorganise disk: the one guarded exception to the read-only shoot root (photosort/reorganise.py).
     # Plan first (every guard, the full move list cached under a plan id), then apply with the folder's
@@ -1668,5 +1855,25 @@ def create_app(root: Path | None = None) -> FastAPI:
         usage.log("report_saved", bytes=p.stat().st_size)
         return {"path": str(p), "bytes": p.stat().st_size}
     # ===== end usage log endpoints =====
+
+    # ===== version and the opt-in update check (photosort/version.py) =====
+    @app.get("/api/version")
+    def version_info():
+        """The version and build, whether the daily check is on, and what it last found. When the check is on
+        and a day has passed, one runs in the background now; checking says so and the next call has the answer."""
+        started = version_mod.check_in_background()
+        st = version_mod.status()
+        st["checking"] = st["checking"] or started
+        return st
+
+    @app.post("/api/version/check")
+    def version_check(req: UpdateCheckReq):
+        """Turn the daily check on (one check runs now, the answer comes back) or off (the answer is forgotten)."""
+        settings.set_update_enabled(req.enabled)
+        usage.log("update_check", enabled=req.enabled)
+        if not req.enabled:
+            return version_mod.status()
+        return version_mod.check_now()
+    # ===== end version =====
 
     return app

@@ -7,8 +7,9 @@ PUB="$HERE/../app-public"
 cd "$HERE"
 find "$PUB" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 git archive HEAD | tar -x -C "$PUB"
+git rev-parse --short HEAD > "$PUB/BUILD"          # the build stamp next to VERSION: the source sha, not the public repo's
 cd "$PUB"
-git add -A && git add -f models/*.onnx
+git add -A && git add -f models/*.onnx BUILD
 git commit -q -m "${1:-update}" || { echo "nothing to publish"; exit 0; }
 git push -q origin main
 echo "published: https://github.com/kirtan-00/sorted-app"

@@ -137,3 +137,58 @@ def test_hide_bad_and_hide_soft_drop_flagged_rows(tmp_path):
     assert sorted(r["rel"] for r in ix.search(filters=Filters(hide_soft=True))) == ["new.jpg", "ok.jpg"]
     assert sorted(r["rel"] for r in ix.search(filters=Filters(hide_bad=True, hide_soft=True))) == ["new.jpg", "ok.jpg"]
     assert len(ix.search(filters=Filters(hide_bad=True, faces="one"))) == 0
+
+
+def _row(rel, taken_at, sharp, qhash=None, camera="SONY", kind="photo"):
+    return dict(rel=rel, size=100, mtime=1.0, qhash=qhash or ("h" + rel), sibling=None, width=100, height=80, taken_at=taken_at,
+                camera=camera, phash="p", sharp_tile=sharp, sharp_max=sharp, sharp_eye=None, sharp=sharp, n_faces=0,
+                status="ok", kind=kind, duration=None, aerial=0)
+
+def test_duplicates_fold_into_one_tile_by_qhash(tmp_path):
+    """The same file twice on the disk (same qhash) is one tile with group copies; fold keeps the first in order,
+    unfolded rows still carry the group so the inspector can say "one of 2"."""
+    conn = db.connect(tmp_path)
+    for rel, t, s in (("day1/a.jpg", "2026-09-01T10:00:00", 5.0), ("backup/a.jpg", "2026-09-01T10:00:00", 5.0), ("day1/b.jpg", "2026-09-01T10:05:00", 9.0)):
+        db.upsert_photo(conn, _row(rel, t, s, qhash="same" if rel.endswith("a.jpg") else None))
+    ix = Index(tmp_path)
+    plain = ix.search()
+    assert [r["rel"] for r in plain] == ["backup/a.jpg", "day1/a.jpg", "day1/b.jpg"]
+    assert plain[0]["group"]["kind"] == "copies" and plain[0]["group"]["n"] == 2 and plain[2]["group"] is None
+    assert [m["rel"] for m in plain[0]["group"]["members"]] == ["backup/a.jpg", "day1/a.jpg"] and plain[1]["group"] == plain[0]["group"]
+    folded = ix.search(filters=Filters(fold=True))
+    assert [r["rel"] for r in folded] == ["backup/a.jpg", "day1/b.jpg"] and folded[0]["group"]["n"] == 2
+    # a filter that drops one copy leaves the other alone: no group of one
+    conn.execute("UPDATE photos SET focus='bad' WHERE rel='backup/a.jpg'"); conn.commit()
+    ix = Index(tmp_path)
+    only = ix.search(filters=Filters(hide_bad=True, fold=True))
+    assert [r["rel"] for r in only] == ["day1/a.jpg", "day1/b.jpg"] and only[0]["group"] is None
+
+def test_bursts_fold_by_second_frame_number_and_embedding(tmp_path):
+    """Consecutive frame numbers each within a second of the last, in one folder, with embeddings that agree,
+    are one burst; the sharpest is named; a gap in time, in numbering, in folder or in embedding breaks it."""
+    import numpy as np
+    conn = db.connect(tmp_path)
+    rows = [("s/DSC00010.jpg", "2026-09-01T10:00:00", 3.0), ("s/DSC00011.jpg", "2026-09-01T10:00:00", 8.0), ("s/DSC00012.jpg", "2026-09-01T10:00:01", 5.0),
+            ("s/DSC00013.jpg", "2026-09-01T10:00:01", 6.0),      # the embedding disagrees: not the same burst
+            ("s/DSC00020.jpg", "2026-09-01T10:00:01", 6.0),      # numbering jumps
+            ("s/DSC00021.jpg", "2026-09-01T10:00:05", 6.0),      # four seconds later
+            ("t/DSC00022.jpg", "2026-09-01T10:00:05", 6.0),      # another folder
+            ("s/C0001.MP4", "2026-09-01T10:00:05", 6.0)]
+    ids = {}
+    for rel, t, s in rows:
+        ids[rel] = db.upsert_photo(conn, _row(rel, t, s, kind="video" if rel.endswith(".MP4") else "photo"))
+    v = np.zeros(512, np.float32); v[0] = 1.0
+    w = np.zeros(512, np.float32); w[1] = 1.0
+    for rel in ("s/DSC00010.jpg", "s/DSC00011.jpg", "s/DSC00012.jpg"): db.set_embed(conn, ids[rel], v)
+    db.set_embed(conn, ids["s/DSC00013.jpg"], w)
+    conn.commit()
+    ix = Index(tmp_path)
+    folded = ix.search(filters=Filters(fold=True))
+    assert [r["rel"] for r in folded] == ["s/DSC00010.jpg", "s/DSC00013.jpg", "s/DSC00020.jpg", "s/C0001.MP4", "s/DSC00021.jpg", "t/DSC00022.jpg"]
+    g = folded[0]["group"]
+    assert g["kind"] == "burst" and g["n"] == 3 and g["sharpest"] == ids["s/DSC00011.jpg"]
+    assert [m["rel"] for m in g["members"]] == ["s/DSC00010.jpg", "s/DSC00011.jpg", "s/DSC00012.jpg"] and all(r["group"] is None for r in folded[1:])
+    assert len(ix.search()) == 8                                                    # no fold: every frame
+    # an image query keeps the best-scoring frame of the burst as its tile
+    like = ix.search(image_id=ids["s/DSC00012.jpg"], filters=Filters(fold=True))
+    assert like[0]["group"]["n"] == 3 and like[0]["rel"] in ("s/DSC00010.jpg", "s/DSC00011.jpg", "s/DSC00012.jpg")

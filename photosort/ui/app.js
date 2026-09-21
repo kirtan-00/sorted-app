@@ -28,7 +28,12 @@
     scan: null,                 // {items, scanned, embedded, pending, unembedded, complete, faces, interrupted: {kind, stage, done, total} | null}
     // ===== end resume =====
     // ===== navigation: where the Search filter came from, and each list's scroll position =====
-    ctx: null,                  // null, or {from: "people"|"categories", kind: "person"|"saved"|"category"|"cluster"|"drone", key}
+    // ===== combined filters: every active filter is a chip; they AND together (a saved-person find stays on its own) =====
+    chips: [],                  // ordered [{kind, key, from}]: kind person|saved|category|cluster|drone|kind|hide_bad|hide_soft, from "people"|"categories"|null
+    shootTotal: 0,              // photos + videos from /api/stats, the M in "31 of 777 match"
+    // ===== end combined filters =====
+    searches: { recent: [], saved: [] },   // ===== search history: /api/searches, per shoot =====
+    showCopies: false,          // ===== duplicates and bursts: false folds each set into one tile (fold=1), true shows every copy and frame =====
     scroll: {},                 // view name -> main.scrollTop when the user left it
     // ===== end navigation =====
   };
@@ -97,7 +102,7 @@
     track("tab", { tab: name, view: name });
   }
   function usageTarget(t) {
-    var el = t && t.closest ? t.closest("button, a, .card, .cat-tile, label.check, .seg label, .panel-head, .ctx-crumb, [data-view]") : null;
+    var el = t && t.closest ? t.closest("button, a, .card, .cat-tile, label.check, .seg label, .panel-head, .ctx-chip, [data-view]") : null;
     if (!el) return null;
     var tile = el.classList.contains("cat-tile") ? el : (el.classList.contains("cat-tile-main") ? el.closest(".cat-tile") : null);
     if (tile) {
@@ -216,134 +221,196 @@
     b.addEventListener("click", function () { goView(b.dataset.view); });   // goView: showView plus a history entry (navigation block below)
   });
 
-  // ===== navigation: context bar, breadcrumb, browser history, back =====
-  // A jump from a People or Categories row sets state.ctx and lands on Search with the grid filtered; the
-  // context bar under the sub-toolbar shows the way back. Every tab switch and every jump is a history entry
-  // ({view, ctx, root} plus a hash such as #people or #search?person=126), so command-[ and the trackpad
-  // swipe walk back through them and a reload keeps the view. The no-folder screen and the lightbox never push.
+  // ===== navigation: context bar, filter chips, browser history, back =====
+  // Every active filter is a chip in the bar under the sub-toolbar: a person, a category, a discovered one, drone,
+  // photos or videos, the two focus boxes. A row on People or Categories ADDS its chip to the ones already there
+  // (one per kind: a second person replaces the first); the form controls in the sub-toolbar and the sidebar are
+  // the same filters, so a change there is the same as a chip. Every tab switch and every chip change is a history
+  // entry ({view, chips, root} plus a hash such as #people or #search?person=126&category=beach), so command-[ and
+  // the trackpad swipe walk back through them and a reload keeps the view. Back removes the last chip. A saved-person
+  // find is not a form filter (its matches come from one POST), so it is the one chip that stands alone.
   var ctxBar = $("#ctxbar");
   var ctxBackBtn = $("#ctx-back");
   var ctxBackLabel = $("#ctx-back-label");
-  var ctxCrumb = $("#ctx-crumb");
+  var ctxChips = $("#ctx-chips");
+  var ctxCount = $("#ctx-count");
   var ctxClearBtn = $("#ctx-clear");
   var viewSearch = $("#view-search");
   var VIEWS = ["search", "people", "categories", "index"];
   var TAB_NAMES = { people: "People", categories: "Categories" };
+  var CHIP_KINDS = ["person", "saved", "category", "cluster", "drone", "kind", "hide_bad", "hide_soft"];
   try { history.scrollRestoration = "manual"; } catch (e) { /* not supported */ }
 
-  function ctxKey(ctx) { return JSON.stringify(ctx || null); }
+  function chipsKey(chips) { return JSON.stringify((chips || []).map(function (c) { return [c.kind, c.key]; })); }
+  function chipOf(kind, chips) {
+    var list = chips || state.chips;
+    for (var i = 0; i < list.length; i++) if (list[i].kind === kind) return list[i];
+    return null;
+  }
   function personById(id) {
     for (var i = 0; i < state.people.length; i++) if (state.people[i].id === id) return state.people[i];
     return null;
   }
   function personLabel(p, id) { return (p && p.name) || "person_" + String(id).padStart(2, "0"); }
-  // The filter params a context stands for; passed to runSearch explicitly at boot, when the person select has no options yet.
-  function ctxParams(ctx) {
-    if (!ctx) return {};
-    if (ctx.kind === "person") return { person: ctx.key };
-    if (ctx.kind === "category") return { category: ctx.key };
-    if (ctx.kind === "cluster") return { cluster: ctx.key };
-    if (ctx.kind === "drone") return { aerial: 1 };
-    return {};
+  // The filter params the chips stand for; passed to runSearch explicitly at boot, when the person select has no options yet.
+  function ctxParams(chips) {
+    var out = {};
+    (chips || []).forEach(function (c) {
+      if (c.kind === "person") out.person = c.key;
+      else if (c.kind === "category") out.category = c.key;
+      else if (c.kind === "cluster") out.cluster = c.key;
+      else if (c.kind === "drone") out.aerial = 1;
+      else if (c.kind === "kind") out.kind = c.key;
+      else if (c.kind === "hide_bad") out.hide_bad = 1;
+      else if (c.kind === "hide_soft") out.hide_soft = 1;
+    });
+    return out;
   }
-  // Write the context into the form: the person select, the two hidden category fields, the drone box and the chip.
-  function applyCtxFilters(ctx) {
-    var kind = ctx ? ctx.kind : null;
-    personSelect.value = kind === "person" ? String(ctx.key) : "";
-    $("#category-filter").value = kind === "category" ? ctx.key : "";
-    $("#cluster-filter").value = kind === "cluster" ? ctx.key : "";
-    aerialOnly.checked = kind === "drone";
-    if (kind === "category") showCategoryChip("category: " + ctx.key);
-    else if (kind === "cluster") showCategoryChip("discovered: " + ctx.key);
-    else if (kind === "drone") showCategoryChip("drone");
-    else showCategoryChip(null);
+  // The chips the form holds right now, in a fixed kind order (the person select, the two hidden category fields, the
+  // drone box, the kind segments, the two focus boxes). A saved find lives only in state.chips, never in the form.
+  function chipsFromForm() {
+    var fd = new FormData(form), out = [];
+    if (fd.get("person")) out.push({ kind: "person", key: Number(fd.get("person")), from: null });
+    if (fd.get("category")) out.push({ kind: "category", key: fd.get("category"), from: null });
+    if (fd.get("cluster")) out.push({ kind: "cluster", key: fd.get("cluster"), from: null });
+    if (fd.get("aerial")) out.push({ kind: "drone", key: "drone", from: null });
+    if (fd.get("kind")) out.push({ kind: "kind", key: fd.get("kind"), from: null });
+    if (fd.get("hide_bad")) out.push({ kind: "hide_bad", key: "hide_bad", from: null });
+    if (fd.get("hide_soft")) out.push({ kind: "hide_soft", key: "hide_soft", from: null });
+    return out;
   }
-  function setCtx(ctx) {
-    state.ctx = ctx || null;
-    applyCtxFilters(state.ctx);
+  // After a form control changed by hand: chips still on the form keep their place and origin, new ones go last, gone ones drop.
+  function syncChipsFromForm() {
+    var now = chipsFromForm();
+    var kept = state.chips.filter(function (c) {
+      if (c.kind === "person" && !state.people.length) return true;   // the select has no options yet (boot): the chip stands
+      return now.some(function (n) { return n.kind === c.kind && n.key === c.key; });
+    });
+    now.forEach(function (n) { if (!chipOf(n.kind, kept)) kept.push(n); });
+    var changed = chipsKey(kept) !== chipsKey(state.chips);
+    state.chips = kept;
+    renderCtxBar();
+    return changed;
+  }
+  // Write the chips into the form: the person select, the two hidden category fields, the drone box, the kind segments, the focus boxes.
+  function applyChips(chips) {
+    state.chips = (chips || []).slice();
+    writeChipsToForm(state.chips);
     renderCtxBar();
   }
-  function crumbSeg(text, last) {
-    var s = document.createElement("span");
-    s.className = "crumb-seg" + (last ? " last" : "");
-    s.textContent = text;
-    return s;
+  // The form alone (no state change): a search run from the history list writes the form this way, so runSearch sees the change.
+  function writeChipsToForm(chips) {
+    var c = function (kind) { return chipOf(kind, chips); };
+    personSelect.value = c("person") ? String(c("person").key) : "";
+    $("#category-filter").value = c("category") ? c("category").key : "";
+    $("#cluster-filter").value = c("cluster") ? c("cluster").key : "";
+    aerialOnly.checked = !!c("drone");
+    var k = c("kind") ? c("kind").key : "";
+    $$('#kind-select input[name="kind"]').forEach(function (r) { r.checked = r.value === k; });
+    $("#hide-bad").checked = !!c("hide_bad");
+    $("#hide-soft").checked = !!c("hide_soft");
   }
-  // "People / Dhaval owner / 760 photos", "Categories / discovered / fishing boats / 42". A text query ranks the
-  // whole filtered set rather than narrowing it, so with a query the tail reads from the search's own numbers:
-  // "beach · 'sunset' · 200 of 807 shown".
+  // Add one chip to the set: one per kind, so a second person replaces the first; a saved find stands alone.
+  function addChip(chip, base) {
+    var list = (base || state.chips).filter(function (c) { return c.kind !== chip.kind && c.kind !== "saved"; });
+    if (chip.kind === "saved") list = [];
+    list.push(chip);
+    return list;
+  }
+  function chipLabel(c) {
+    if (c.kind === "person") return personLabel(personById(c.key), c.key);
+    if (c.kind === "cluster") return "discovered: " + (/^group \d+$/.test(c.key) ? "Unnamed " + c.key : c.key);
+    if (c.kind === "kind") return c.key;
+    if (c.kind === "hide_bad") return "no out of focus";
+    if (c.kind === "hide_soft") return "no soft";
+    return c.key;
+  }
+  function chipTitle(c) {
+    if (c.kind === "person" || c.kind === "saved") return "only photos of " + chipLabel(c);
+    if (c.kind === "category") return "only the " + c.key + " category";
+    if (c.kind === "cluster") return "only the discovered category " + c.key;
+    if (c.kind === "drone") return "only drone shots";
+    if (c.kind === "kind") return "only " + c.key;
+    if (c.kind === "hide_bad") return "the focus check's out-of-focus rows are hidden";
+    return "the focus check's soft rows are hidden too";
+  }
+  // The origin tab of the last chip that came from one: the Back button's label and the sidebar dot.
+  function lastOrigin() {
+    for (var i = state.chips.length - 1; i >= 0; i--) if (state.chips[i].from) return state.chips[i].from;
+    return null;
+  }
+  // The bar: Back, one chip per filter with its own x, "31 of 777 match", Clear filters.
   function renderCtxBar() {
-    var ctx = state.ctx;
-    ctxBar.hidden = !ctx;
-    viewSearch.classList.toggle("has-ctx", !!ctx);
-    $$("header nav button[data-view]").forEach(function (b) { b.classList.toggle("from", !!ctx && b.dataset.view === ctx.from); });
-    if (!ctx) return;
-    var tab = TAB_NAMES[ctx.from] || ctx.from;
-    ctxBackLabel.textContent = tab;
-    ctxBackBtn.title = "back to " + tab + " (Esc)";
-    ctxClearBtn.title = "drop the " + tab + " filter and stay on Search";
-    var segs = [tab];
-    var name, count = null;
-    if (ctx.kind === "person") {
-      var p = personById(ctx.key);
-      name = personLabel(p, ctx.key);
-      if (p) count = p.n + " photo" + (p.n === 1 ? "" : "s");
-    } else if (ctx.kind === "saved") {
-      name = ctx.key;
-      count = state.total + " photo" + (state.total === 1 ? "" : "s");
-    } else if (ctx.kind === "cluster") {
-      segs.push("discovered");
-      name = /^group \d+$/.test(ctx.key) ? "Unnamed " + ctx.key : ctx.key;
-      if (state.categories.discovered[ctx.key] != null) count = String(state.categories.discovered[ctx.key]);
-    } else if (ctx.kind === "drone") {
-      name = "drone";
-      if (state.categories.drone) count = String(state.categories.drone);
-    } else {
-      name = ctx.key;
-      if (state.categories.fixed[ctx.key] != null) count = String(state.categories.fixed[ctx.key]);
-    }
-    var q = state.lastParams.q, ranked = !!(q || state.lastParams.image_id);
-    if (ranked && ctx.kind !== "saved") {
-      segs.push(name + " · " + (q ? "'" + q + "'" : "similar shots") + " · " + state.results.length + " of " + state.total + " shown");
-    } else {
-      segs.push(name);
-      if (count != null) segs.push(count);
-    }
-    ctxCrumb.innerHTML = "";
-    segs.forEach(function (t, i) {
-      if (i) { var sep = document.createElement("span"); sep.className = "crumb-sep"; sep.textContent = "/"; ctxCrumb.appendChild(sep); }
-      ctxCrumb.appendChild(crumbSeg(t, i === segs.length - 1));
+    var chips = state.chips;
+    ctxBar.hidden = !chips.length;
+    viewSearch.classList.toggle("has-ctx", chips.length > 0);
+    $$("header nav button[data-view]").forEach(function (b) {
+      b.classList.toggle("from", chips.some(function (c) { return c.from === b.dataset.view; }));
     });
+    ctxChips.innerHTML = "";                          // an emptied bar keeps no stale chips behind its hidden attribute
+    if (!chips.length) return;
+    var origin = lastOrigin();
+    var tab = origin ? TAB_NAMES[origin] || origin : null;
+    ctxBackLabel.textContent = tab || "Back";
+    ctxBackBtn.title = tab ? "remove the last filter and go back to " + tab + " (Esc)" : "remove the last filter (Esc)";
+    chips.forEach(function (c) {
+      var chip = document.createElement("span");
+      chip.className = "ctx-chip ctx-chip-" + c.kind;
+      chip.title = chipTitle(c);
+      var label = document.createElement("span");
+      label.className = "ctx-chip-label";
+      label.textContent = chipLabel(c);
+      chip.appendChild(label);
+      var x = document.createElement("button");
+      x.type = "button"; x.className = "ctx-chip-x";
+      x.title = "remove this filter";
+      x.setAttribute("aria-label", "remove the " + chipLabel(c) + " filter");
+      x.innerHTML = '<svg viewBox="0 0 8 8" aria-hidden="true"><path d="M1 1l6 6M7 1L1 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+      x.addEventListener("click", function () { removeChip(c); });
+      chip.appendChild(x);
+      ctxChips.appendChild(chip);
+    });
+    var n = state.total, m = state.shootTotal;
+    ctxCount.textContent = m ? n + " of " + m + " match" : n + " match";
+    ctxCount.title = m ? n + " of the shoot's " + m + " photos and clips pass every filter" : "";
   }
 
   // history
   var navRestoring = false;
-  function hashFor(view, ctx) {
-    if (view !== "search" || !ctx) return "#" + view;
-    var key = { person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial" }[ctx.kind];
-    return "#search?" + key + "=" + encodeURIComponent(ctx.kind === "drone" ? 1 : ctx.key);
+  var HASH_KEYS = { person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
+  function hashFor(view, chips) {
+    if (view !== "search" || !chips || !chips.length) return "#" + view;
+    var p = new URLSearchParams();
+    chips.forEach(function (c) { p.set(HASH_KEYS[c.kind], c.kind === "drone" || c.kind === "hide_bad" || c.kind === "hide_soft" ? "1" : String(c.key)); });
+    return "#search?" + p.toString();
   }
+  // A pasted or typed URL: the chips in the order the hash lists them; a person, category, cluster or drone chip remembers its tab.
   function parseHash(h) {
     var m = /^#(search|people|categories|index)(?:\?(.*))?$/.exec(h || "");
     if (!m) return null;
-    var entry = { view: m[1], ctx: null };
+    var entry = { view: m[1], chips: [] };
     if (m[1] === "search" && m[2]) {
-      var p = new URLSearchParams(m[2]);
-      if (p.get("person") && /^\d+$/.test(p.get("person"))) entry.ctx = { from: "people", kind: "person", key: Number(p.get("person")) };
-      else if (p.get("saved")) entry.ctx = { from: "people", kind: "saved", key: p.get("saved") };
-      else if (p.get("category")) entry.ctx = { from: "categories", kind: "category", key: p.get("category") };
-      else if (p.get("cluster")) entry.ctx = { from: "categories", kind: "cluster", key: p.get("cluster") };
-      else if (p.get("aerial")) entry.ctx = { from: "categories", kind: "drone", key: "drone" };
+      new URLSearchParams(m[2]).forEach(function (v, k) {
+        if (k === "person" && /^\d+$/.test(v)) entry.chips = addChip({ kind: "person", key: Number(v), from: "people" }, entry.chips);
+        else if (k === "saved" && v) entry.chips = [{ kind: "saved", key: v, from: "people" }];
+        else if (k === "category" && v) entry.chips.push({ kind: "category", key: v, from: "categories" });
+        else if (k === "cluster" && v) entry.chips.push({ kind: "cluster", key: v, from: "categories" });
+        else if (k === "aerial" && v) entry.chips.push({ kind: "drone", key: "drone", from: "categories" });
+        else if (k === "kind" && (v === "photos" || v === "videos")) entry.chips.push({ kind: "kind", key: v, from: null });
+        else if (k === "hide_bad" && v) entry.chips.push({ kind: "hide_bad", key: "hide_bad", from: null });
+        else if (k === "hide_soft" && v) entry.chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
+      });
+      if (chipOf("saved", entry.chips)) entry.chips = [chipOf("saved", entry.chips)];
     }
     return entry;
   }
   // backable: the entry before this one is the origin tab, so the Back button can use history.back() and keep Forward alive.
   function navPush(replace, backable) {
     if (navRestoring || !(state.folder && state.folder.root)) return;
-    var entry = { view: state.view, ctx: state.ctx, root: state.folder.root, backable: !!backable };
+    var entry = { view: state.view, chips: state.chips, root: state.folder.root, backable: !!backable };
     var cur = history.state;
-    var same = cur && cur.view === entry.view && ctxKey(cur.ctx) === ctxKey(entry.ctx) && cur.root === entry.root;
-    var url = hashFor(entry.view, entry.ctx);
+    var same = cur && cur.view === entry.view && chipsKey(cur.chips) === chipsKey(entry.chips) && cur.root === entry.root;
+    var url = hashFor(entry.view, entry.chips);
     try {
       if (replace || !cur || same) history.replaceState(same && !replace ? cur : entry, "", url);
       else history.pushState(entry, "", url);
@@ -353,39 +420,48 @@
     showView(name);
     navPush();
   }
-  // Land on Search filtered by a row of another tab. Called by the People rows, the saved-people rows and the category rows.
-  function jumpTo(ctx, run) {
-    var backable = state.view === ctx.from;
-    setCtx(ctx);
+  // Land on Search with one more chip. Called by the People rows, the saved-people rows and the category rows.
+  function jumpTo(chip, run) {
+    var backable = state.view === chip.from;
+    applyChips(addChip(chip));
     showView("search");
     mainEl.scrollTop = 0;
     run();
     navPush(false, backable);
   }
+  // Back removes the last chip: through the browser when the entry before is the origin tab (Forward then brings the chip
+  // back), else by hand, landing on the chip's own tab when nothing is left.
   function navBack() {
-    var from = state.ctx && state.ctx.from;
-    if (!from) return;
+    if (!state.chips.length) return;
     if (history.state && history.state.backable && history.state.root === state.folder.root) { history.back(); return; }
-    setCtx(null);
-    runSearch();
-    goView(from);
+    var last = state.chips[state.chips.length - 1];
+    applyChips(state.chips.slice(0, -1));
+    runSearch(ctxParams(state.chips));
+    if (last.from && !state.chips.length) goView(last.from);
+    else navPush();
+  }
+  function removeChip(chip) {
+    applyChips(state.chips.filter(function (c) { return c !== chip; }));
+    runSearch(ctxParams(state.chips));
+    navPush();
   }
   function clearCtx() {
-    if (!state.ctx) return;
-    setCtx(null);
+    if (!state.chips.length) return;
+    applyChips([]);
     runSearch();
     navPush();
   }
-  // Put an entry's view and filter back; the grid is re-run whenever the filter changed, even on another tab, so it is never stale.
+  // Put an entry's view and chips back; the grid is re-run whenever the chips changed, even on another tab, so it is never stale.
   function restoreEntry(entry) {
-    var ctx = entry.root && entry.root !== state.folder.root ? null : entry.ctx;
-    var changed = ctxKey(ctx) !== ctxKey(state.ctx);
+    var chips = entry.root && entry.root !== state.folder.root ? [] : (entry.chips || []);
+    var changed = chipsKey(chips) !== chipsKey(state.chips);
     navRestoring = true;
-    setCtx(ctx);
+    applyChips(chips);
     showView(VIEWS.indexOf(entry.view) >= 0 ? entry.view : "search");
     if (changed) {
-      if (ctx && ctx.kind === "saved") { if (state.view === "search") findSaved(ctx.key); else pendingFind = ctx.key; }
-      else runSearch(ctxParams(ctx));
+      var saved = chipOf("saved", chips);
+      if (saved) { if (state.view === "search") findSaved(saved.key); else pendingFind = saved.key; }
+      else runSearch(ctxParams(chips));
     }
     navRestoring = false;
   }
@@ -397,7 +473,7 @@
   });
   function navBootEntry() {                            // history.state survives a reload; the hash is the fallback (a typed or pasted URL)
     var s = history.state;
-    if (s && s.view && VIEWS.indexOf(s.view) >= 0) return { view: s.view, ctx: s.root === state.folder.root ? s.ctx : null };
+    if (s && s.view && VIEWS.indexOf(s.view) >= 0) return { view: s.view, chips: s.root === state.folder.root ? (s.chips || []) : [] };
     return parseHash(location.hash);
   }
   ctxBackBtn.addEventListener("click", navBack);
@@ -419,6 +495,10 @@
       $("#stats").textContent = bits.join(" · ");
       $("#stats").title = s.last_index ? "scanned " + s.last_index : "";
       // ===== end title block =====
+      // ===== combined filters: "31 of 777 match" needs the shoot's size =====
+      state.shootTotal = (s.photos || 0) + (s.videos || 0);
+      renderCtxBar();
+      // ===== end combined filters =====
       // ===== welcome: the shoot disk went away since the folder opened; the welcome comes back with its line =====
       if (state.folder && state.folder.root && s.mounted === false && state.folder.mounted !== false) {
         state.folder.mounted = false;
@@ -536,19 +616,20 @@
     progressEl.textContent = "";
     $("#index-errors").hidden = true;
     lastErrorCount = null;
-    $("#category-filter").value = ""; $("#cluster-filter").value = "";
-    showCategoryChip(null);
     // ===== per-folder reset: focus boxes and line, faces pending, the reorganise section =====
-    $("#hide-bad").checked = false; $("#hide-soft").checked = false;
     renderFocusLine(null);
     renderFacesPending(null);
     resetReorganise();
     renderScanBar(); renderScanHealth(null);          // ===== resume: state.scan came with the folder reply =====
     // ===== end per-folder reset =====
     // ===== navigation: a filter from the previous shoot means nothing here; the lists start at the top =====
-    setCtx(null);
+    applyChips([]);
+    state.shootTotal = 0;
     state.scroll = {};
     // ===== end navigation =====
+    closeHistory(); loadSearches();                   // ===== search history: the new shoot's list =====
+    state.showCopies = false;                          // ===== duplicates and bursts: folded again on a new shoot =====
+    loadPrefs(); loadExports();                        // ===== export presets and history: this shoot's =====
     loadRecent();
     if (!folderOpen(info)) {
       showView(state.view);
@@ -713,11 +794,17 @@
 
   var PAGE = 200;
   function runSearch(extra, append) {
-    // ===== navigation: a saved-person find is not a form filter, so any plain search replaces it and drops that crumb =====
-    if (state.ctx && state.ctx.kind === "saved") { state.ctx = null; renderCtxBar(); }
-    // ===== end navigation =====
+    // ===== combined filters: a plain search (no explicit params) reads the chips off the form, so a control changed by hand
+    // is a chip like any other; a saved-person find is not a form filter, so any plain search drops it. A change is a history entry. =====
+    var pushAfter = false;
+    if (!extra && !append) {
+      if (chipOf("saved")) state.chips = state.chips.filter(function (c) { return c.kind !== "saved"; });
+      pushAfter = syncChipsFromForm();
+    }
+    // ===== end combined filters =====
     var params = currentFilters();
     Object.assign(params, extra || {});
+    params.fold = state.showCopies ? 0 : 1;            // ===== duplicates and bursts: one tile per set unless the inspector unfolded them =====
     if (!append) { state.offset = 0; state.results = []; }
     params.limit = PAGE; params.offset = state.offset;
     state.lastParams = params;
@@ -727,6 +814,7 @@
       state.total = data.total || 0;
       state.offset = state.results.length;
       renderGrid();
+      if (pushAfter) navPush();                        // ===== combined filters: the hash and history follow the chips =====
     }).catch(function (err) {
       if (err.status === 404) {
         state.results = []; state.total = 0;
@@ -749,22 +837,158 @@
   [$("#hide-bad"), $("#hide-soft")].forEach(function (box) { box.addEventListener("change", function () { runSearch(); }); });
   // ===== end focus filters =====
   var aerialOnly = $("#aerial-only");
-  aerialOnly.addEventListener("change", function () {
-    // Unticking the box by hand is the same as clearing the "drone" chip the tile put up.
-    if (!aerialOnly.checked && $("#category-chip-name").textContent === "drone") showCategoryChip(null);
-    // ===== navigation: unticking by hand also ends a drone context =====
-    if (!aerialOnly.checked && state.ctx && state.ctx.kind === "drone") { state.ctx = null; renderCtxBar(); navPush(); }
-    // ===== end navigation =====
+  aerialOnly.addEventListener("change", function () { runSearch(); });   // ===== combined filters: the box is the drone chip =====
+
+  // ===== search history and saved searches: arrow down in the field lists the last 20 queries on this shoot, each with the
+  // filters it ran with; a star keeps one as a chip in the sidebar under Filters; a row or a chip puts the text and every
+  // filter back and runs it (a history entry like any chip change). The list is per shoot, in the index (table searches). =====
+  var qField = form.querySelector('[name="q"]');
+  var qHist = $("#q-history");
+  var savedGroup = $("#saved-group");
+  var savedSearchesEl = $("#saved-searches");
+  var qhRows = [];                                     // the rows in the dropdown, in order
+  var qhIndex = -1;                                    // the highlighted row
+  var FACES_WORDS = { none: "no people", one: "one person", two: "two people", group: "group of 3+" };
+  function loadSearches() {
+    if (!(state.folder && state.folder.root)) { state.searches = { recent: [], saved: [] }; renderSavedSearches(); return Promise.resolve(); }
+    return api("/api/searches").then(function (d) {
+      state.searches = { recent: d.recent || [], saved: d.saved || [] };
+      renderSavedSearches();
+      if (!qHist.hidden) renderHistory();
+    }).catch(function () { /* the list is a convenience; a failed load leaves the old one */ });
+  }
+  // The filters a query ran with, in a few words: "person_01 · beach · drone · photos · sharp 40"
+  function filterSummary(f) {
+    f = f || {};
+    var parts = [];
+    if (f.person) parts.push(personLabel(personById(Number(f.person)), Number(f.person)));
+    if (f.category) parts.push(f.category);
+    if (f.cluster) parts.push(/^group \d+$/.test(f.cluster) ? "Unnamed " + f.cluster : f.cluster);
+    if (f.aerial) parts.push("drone");
+    if (f.kind) parts.push(f.kind);
+    if (f.faces) parts.push(FACES_WORDS[f.faces] || f.faces);
+    if (f.sharp) parts.push("sharp " + Math.round(Number(f.sharp)));
+    if (f.hide_soft) parts.push("no soft"); else if (f.hide_bad) parts.push("no out of focus");
+    return parts.join(" · ");
+  }
+  function chipsFromFilters(f) {
+    f = f || {};
+    var chips = [];
+    if (f.person && /^\d+$/.test(String(f.person))) chips.push({ kind: "person", key: Number(f.person), from: null });
+    if (f.category) chips.push({ kind: "category", key: String(f.category), from: null });
+    if (f.cluster) chips.push({ kind: "cluster", key: String(f.cluster), from: null });
+    if (f.aerial) chips.push({ kind: "drone", key: "drone", from: null });
+    if (f.kind === "photos" || f.kind === "videos") chips.push({ kind: "kind", key: f.kind, from: null });
+    if (f.hide_bad) chips.push({ kind: "hide_bad", key: "hide_bad", from: null });
+    if (f.hide_soft) chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
+    return chips;
+  }
+  // Run a recent or saved search: the text, the toolbar controls (Sharp, faces) and the chips it ran with.
+  function applySearchRow(row) {
+    var f = row.filters || {};
+    closeHistory();
+    if (state.view !== "search") goView("search");
+    qField.value = row.q;
+    sharpInput.value = f.sharp ? Number(f.sharp) : 0;
+    sharpInput.dispatchEvent(new Event("input"));    // the number field and the fill follow the slider
+    form.querySelector('[name="faces"]').value = f.faces && FACES_WORDS[f.faces] ? f.faces : "";
+    writeChipsToForm(chipsFromFilters(f));            // the form only: runSearch reads the chips off it and pushes a history entry
+    track("search_again", { saved: !!row.saved, filters: Object.keys(f).length });
     runSearch();
+    mainEl.scrollTop = 0;
+  }
+  function setSaved(row, saved) {
+    return api("/api/searches/" + row.id + "/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ saved: saved }) })
+      .then(function () { setStatus(saved ? "saved: " + row.q : "forgot the saved search " + row.q); return loadSearches(); })
+      .catch(function (err) { setStatus("could not save the search: " + err.message); });
+  }
+  function forgetSearch(row) {
+    return api("/api/searches/" + row.id, { method: "DELETE" }).then(function () { return loadSearches(); })
+      .catch(function (err) { setStatus("could not remove the search: " + err.message); });
+  }
+  var X_SVG = '<svg viewBox="0 0 8 8" aria-hidden="true"><path d="M1 1l6 6M7 1L1 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+  var STAR_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.2l1.5 3.1 3.4.5-2.45 2.4.6 3.4L6 9l-3.05 1.6.6-3.4L1.1 4.8l3.4-.5z"/></svg>';
+  function renderHistory() {
+    var keep = qhIndex;                                // a re-render after a fresh load keeps the highlight
+    qHist.innerHTML = ""; qhRows = []; qhIndex = -1;
+    var rows = state.searches.recent;
+    if (!rows.length) {
+      var e = document.createElement("div"); e.className = "qh-empty"; e.textContent = "No searches yet on this shoot"; qHist.appendChild(e);
+      return;
+    }
+    rows.forEach(function (row) {
+      var r = document.createElement("div"); r.className = "qh-row"; r.setAttribute("role", "option"); r.dataset.id = row.id;
+      var t = document.createElement("span"); t.className = "qh-text"; t.textContent = row.q; t.title = row.q;
+      var f = document.createElement("span"); f.className = "qh-filters"; f.textContent = filterSummary(row.filters); f.title = f.textContent;
+      var star = document.createElement("button");
+      star.type = "button"; star.className = "qh-star"; star.innerHTML = STAR_SVG;
+      star.setAttribute("aria-pressed", row.saved ? "true" : "false");
+      star.title = row.saved ? "forget this saved search" : "save this search as a chip in the sidebar";
+      star.setAttribute("aria-label", (row.saved ? "forget the saved search " : "save the search ") + row.q);
+      star.addEventListener("click", function (ev) { ev.stopPropagation(); setSaved(row, !row.saved); });
+      var del = document.createElement("button");
+      del.type = "button"; del.className = "qh-del"; del.innerHTML = X_SVG;
+      del.title = "remove from the list"; del.setAttribute("aria-label", "remove " + row.q + " from the list");
+      del.addEventListener("click", function (ev) { ev.stopPropagation(); forgetSearch(row); });
+      r.appendChild(t); r.appendChild(f); r.appendChild(star); r.appendChild(del);
+      r.addEventListener("mousedown", function (ev) { ev.preventDefault(); });   // the field keeps its focus
+      r.addEventListener("click", function () { applySearchRow(row); });
+      qHist.appendChild(r); qhRows.push(r);
+    });
+    if (keep >= 0) highlightRow(Math.min(keep, qhRows.length - 1));
+  }
+  function openHistory() {
+    renderHistory();
+    qHist.hidden = false; qField.setAttribute("aria-expanded", "true");
+    loadSearches().then(function () {                  // fresh: the last search may have added a row
+      if (!qHist.hidden && qhIndex < 0 && qhRows.length) highlightRow(0);
+    });
+  }
+  function closeHistory() {
+    if (qHist.hidden) return;
+    qHist.hidden = true; qhIndex = -1; qField.setAttribute("aria-expanded", "false");
+  }
+  function highlightRow(i) {
+    qhIndex = i;
+    qhRows.forEach(function (r, k) { r.classList.toggle("on", k === i); });
+    if (qhRows[i]) qhRows[i].scrollIntoView({ block: "nearest" });
+  }
+  qField.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown" && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (qHist.hidden) { openHistory(); highlightRow(qhRows.length ? 0 : -1); }
+      else highlightRow(Math.min(qhIndex + 1, qhRows.length - 1));
+      return;
+    }
+    if (qHist.hidden) return;
+    if (e.key === "ArrowUp") { e.preventDefault(); if (qhIndex <= 0) closeHistory(); else highlightRow(qhIndex - 1); return; }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeHistory(); return; }
+    if (e.key === "Enter" && qhIndex >= 0 && state.searches.recent[qhIndex]) { e.preventDefault(); applySearchRow(state.searches.recent[qhIndex]); return; }
+    if (e.key === "Tab") closeHistory();
   });
-  // ===== navigation: the "anyone" picker moves a People context to the picked person, or ends it on "anyone" =====
-  $("#person-select").addEventListener("change", function () {   // personSelect itself is assigned further down
-    if (!state.ctx || state.ctx.from !== "people") return;
-    state.ctx = personSelect.value ? { from: "people", kind: "person", key: Number(personSelect.value) } : null;
-    renderCtxBar();
-    navPush();
-  });
-  // ===== end navigation =====
+  qField.addEventListener("input", closeHistory);
+  qField.addEventListener("blur", closeHistory);
+  form.addEventListener("submit", closeHistory);
+  function renderSavedSearches() {
+    var rows = state.searches.saved;
+    savedGroup.hidden = savedSearchesEl.hidden = !rows.length;
+    savedSearchesEl.innerHTML = "";
+    rows.forEach(function (row) {
+      var chip = document.createElement("span"); chip.className = "ss-chip";
+      var run = document.createElement("button");
+      run.type = "button"; run.className = "ss-run"; run.textContent = row.q;
+      var sum = filterSummary(row.filters);
+      run.title = "run this saved search" + (sum ? ": " + row.q + " · " + sum : "");
+      run.addEventListener("click", function () { applySearchRow(row); });
+      var x = document.createElement("button");
+      x.type = "button"; x.className = "ss-x"; x.innerHTML = X_SVG;
+      x.title = "forget this saved search"; x.setAttribute("aria-label", "forget the saved search " + row.q);
+      x.addEventListener("click", function () { setSaved(row, false); });
+      chip.appendChild(run); chip.appendChild(x);
+      savedSearchesEl.appendChild(chip);
+    });
+  }
+  // ===== end search history =====
   $("#show-more").addEventListener("click", function () { runSearch(state.lastParams, true); });
   $("#select-matching").addEventListener("click", function () {
     var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
@@ -870,6 +1094,15 @@
         drone.textContent = "drone";
         card.appendChild(drone);
       }
+      // ===== duplicates and bursts: "x2" for a file that is on the disk twice, "burst of 12" for a burst =====
+      if (r.group) {
+        var grp = document.createElement("div");
+        grp.className = "badge group mono";
+        grp.textContent = r.group.kind === "burst" ? "burst of " + r.group.n : "x" + r.group.n;
+        grp.title = r.group.kind === "burst" ? "one tile for " + r.group.n + " frames shot as a burst" : "the same file is on the disk " + r.group.n + " times";
+        card.appendChild(grp);
+      }
+      // ===== end duplicates and bursts =====
 
       card.addEventListener("click", function (e) { clickCard(e, r, card); });
       card.addEventListener("dblclick", function () {
@@ -886,7 +1119,7 @@
     $("#show-more").hidden = state.results.length >= state.total;
     $("#select-matching").hidden = ranked;
     updateSelbar();
-    renderCtxBar();                                    // ===== navigation: the crumb's query tail follows the results =====
+    renderCtxBar();                                    // ===== navigation: the count line follows the results =====
   }
 
   function toggleSelect(id, card) {
@@ -941,6 +1174,7 @@
           if (p.running) { renderDriveProgress(p); return; }
           clearInterval(exportTimer); exportTimer = null;
           renderDriveDone(p);
+          loadExports();                               // ===== export history: the Drive row =====
           return;
         }
         // ===== end Google Drive =====
@@ -957,6 +1191,7 @@
           return;
         }
         // ===== end save scan file =====
+        loadExports();                                 // ===== export history: the row for this export =====
         if (p.error) { setStatus("export failed: " + p.error, true); return; }
         var written = p.done - p.failed - (p.skipped || 0);
         var msg = "exported " + written + " of " + p.total + " to " + p.path;
@@ -972,9 +1207,10 @@
     }, 800);
   }
   function startExport(ids, name, mode, label) {
+    var prefs = exportPrefs();                         // ===== export presets: the size and the RAW box ride along =====
     return api("/api/export", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: ids, name: name, mode: mode }),
+      body: JSON.stringify({ ids: ids, name: name, mode: mode, web_size: mode === "copy" ? prefs.web_size : null, include_raw: prefs.include_raw }),
     }).then(function () { pollExportProgress(label); })
       .catch(function (err) { setStatus("export failed: " + err.message, true); });
   }
@@ -991,6 +1227,122 @@
     var mode = $("#exportmode").value;
     startExport(ids, name, mode, "exporting " + ids.length + " photo(s)");
   });
+
+  // ===== export presets: one select sets copy or links, the size and the RAW box for the selection export; any change to those
+  // makes it Custom; the choice is remembered per shoot (/api/export/prefs, in the index). With Google Drive as the destination
+  // the preset writes the strip's size and RAW controls instead, since the strip owns them there. =====
+  var PRESETS = { web: { mode: "copy", web_size: 2048, include_raw: false }, links: { mode: "symlink", web_size: null, include_raw: false },
+                  full: { mode: "copy", web_size: null, include_raw: true } };
+  var exportPreset = $("#export-preset");
+  var exportSize = $("#export-size");
+  var exportRaw = $("#export-raw");
+  var exportRawLabel = $("#export-raw-label");
+  var prefsQuiet = false;                              // writing the controls from a preset must not flip it to Custom
+  function exportPrefs() {                             // the controls as they stand
+    var mode = $("#exportmode").value;
+    return { preset: exportPreset.value, mode: mode, web_size: mode === "copy" && exportSize.value ? Number(exportSize.value) : null, include_raw: exportRaw.checked };
+  }
+  function syncExportControls() {                      // links and the CSV point at the originals: no size for them
+    var copy = $("#exportmode").value === "copy";
+    exportSize.disabled = !copy;
+    exportSize.title = copy ? "the long edge for photos in a copy; RAW files and clips are never resized" : "links and the CSV point at the originals, so there is no size";
+  }
+  function applyPreset(name, save) {
+    var p = PRESETS[name];
+    prefsQuiet = true;
+    exportPreset.value = name;
+    if (p) {
+      $("#exportmode").value = p.mode;
+      exportSize.value = p.web_size ? String(p.web_size) : "";
+      exportRaw.checked = p.include_raw;
+      $("#drive-web-size").value = p.web_size ? String(p.web_size) : "";
+      $("#drive-include-raw").checked = p.include_raw;
+    }
+    syncExportControls();
+    prefsQuiet = false;
+    if (save) savePrefs();
+  }
+  function savePrefs() {
+    if (!(state.folder && state.folder.root)) return;
+    api("/api/export/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(exportPrefs()) })
+      .catch(function () { /* the preset is a convenience; the export itself carries the controls */ });
+  }
+  function loadPrefs() {
+    if (!(state.folder && state.folder.root)) return Promise.resolve();
+    return api("/api/export/prefs").then(function (p) {
+      prefsQuiet = true;
+      exportPreset.value = p.preset || "web";
+      $("#exportmode").value = p.mode || "copy";
+      exportSize.value = p.web_size ? String(p.web_size) : "";
+      exportRaw.checked = !!p.include_raw;
+      if (p.preset !== "custom") { $("#drive-web-size").value = exportSize.value; $("#drive-include-raw").checked = exportRaw.checked; }
+      syncExportControls();
+      prefsQuiet = false;
+    }).catch(function () { prefsQuiet = false; });
+  }
+  function customised() {                              // a control changed by hand: the preset is Custom now
+    if (prefsQuiet) return;
+    exportPreset.value = "custom";
+    syncExportControls();
+    track("export_custom", {});
+    savePrefs();
+  }
+  exportPreset.addEventListener("change", function () { track("export_preset", { preset: exportPreset.value }); applyPreset(exportPreset.value, true); });
+  $("#exportmode").addEventListener("change", customised);
+  exportSize.addEventListener("change", customised);
+  exportRaw.addEventListener("change", customised);
+  $("#drive-web-size").addEventListener("change", function () { if (!prefsQuiet && state.view === "search") { exportSize.value = $("#drive-web-size").value; customised(); } });
+  $("#drive-include-raw").addEventListener("change", function () { if (!prefsQuiet && state.view === "search") { exportRaw.checked = $("#drive-include-raw").checked; customised(); } });
+  syncExportControls();
+  // ===== end export presets =====
+
+  // ===== export history: the last 10 exports of this shoot in the Scan tab, with Show in Finder and Run again =====
+  var exportsList = $("#exports-list");
+  var exportsEmpty = $("#exports-empty");
+  var WHAT_WORDS = { selection: "Selection", categories: "Categories", people: "People" };
+  function loadExports() {
+    if (!(state.folder && state.folder.root)) { renderExports([]); return Promise.resolve(); }
+    return api("/api/exports").then(function (d) { renderExports(d.exports || []); }).catch(function () { /* the list is a convenience */ });
+  }
+  function renderExports(rows) {
+    exportsList.innerHTML = "";
+    exportsEmpty.hidden = rows.length > 0;
+    rows.forEach(function (r) {
+      var row = document.createElement("div"); row.className = "exp-row" + (r.error ? " failed" : "");
+      var what = document.createElement("div"); what.className = "exp-what";
+      var n = r.count || 0;
+      what.textContent = (WHAT_WORDS[r.what] || r.what) + ", " + (r.options || "") + " ";
+      var cnt = document.createElement("span"); cnt.className = "exp-count";
+      cnt.textContent = r.error ? "failed: " + r.error : n + (n === 1 ? " file" : " files") + (r.skipped ? ", " + r.skipped + " already there" : "") + (r.failed ? ", " + r.failed + " failed" : "");
+      what.appendChild(cnt);
+      var where = document.createElement("div"); where.className = "exp-where"; where.textContent = r.path || ""; where.title = r.path || "";
+      var when = document.createElement("div"); when.className = "exp-when"; when.textContent = fmtWhen(r.at); when.title = r.at || "";
+      var acts = document.createElement("div"); acts.className = "exp-acts";
+      if (r.exists) {
+        var show = document.createElement("button"); show.type = "button"; show.className = "link small"; show.textContent = "Show in Finder";
+        show.title = "open the export folder in the Finder";
+        show.addEventListener("click", function () { revealPath(r.path); });
+        acts.appendChild(show);
+      } else if (r.dest === "drive" && r.path) {
+        var open = document.createElement("a"); open.className = "link small"; open.textContent = "Open in Drive"; open.href = r.path; open.target = "_blank"; open.rel = "noopener";
+        acts.appendChild(open);
+      }
+      var again = document.createElement("button"); again.type = "button"; again.className = "link small"; again.textContent = "Run again";
+      again.title = "the same export, into the destination as it is now";
+      again.addEventListener("click", function () { runExportAgain(r); });
+      acts.appendChild(again);
+      row.appendChild(what); row.appendChild(where); row.appendChild(when); row.appendChild(acts);
+      exportsList.appendChild(row);
+    });
+  }
+  function runExportAgain(r) {
+    api("/api/exports/" + r.id + "/run", { method: "POST" }).then(function (res) {
+      var label = (r.dest === "drive" ? "uploading " : "exporting ") + (WHAT_WORDS[r.what] || r.what).toLowerCase();
+      setStatus(label + " again…", true);
+      pollExportProgress(label);
+    }).catch(function (err) { setStatus("could not run it again: " + err.message, true); });
+  }
+  // ===== end export history =====
 
   // ---------- export destination: this Mac, or a Google Drive folder ----------
   // ===== Google Drive =====
@@ -1029,6 +1381,7 @@
     $$(".seg.dest input").forEach(function (r) { r.checked = r.value === dest; });
     // the copy/link picker has no meaning for an upload; trimmed segments cannot go to Drive
     [$("#exportmode"), $("#people-export-mode"), $("#cat-export-mode")].forEach(function (sel) { sel.hidden = drive; });
+    $("#export-size").hidden = drive; $("#export-raw-label").hidden = drive;   // ===== export presets: the Drive strip carries size and RAW =====
     var segOpt = $("#cat-videos option[value=segments]");
     segOpt.disabled = drive;
     if (drive && $("#cat-videos").value === "segments") $("#cat-videos").value = "clips";
@@ -1394,7 +1747,7 @@
       goView(VIEWS[Number(e.key) - 1]);
       return;
     }
-    if (e.key === "Escape" && !typing && state.view === "search" && state.ctx) { e.preventDefault(); navBack(); return; }
+    if (e.key === "Escape" && !typing && state.view === "search" && state.chips.length) { e.preventDefault(); navBack(); return; }
     // ===== end navigation keys =====
     if (typing && !(cmd && e.key.toLowerCase() === "f")) return;
     if (e.key === "/" || (cmd && e.key.toLowerCase() === "f")) {
@@ -1529,12 +1882,72 @@
     // ===== inspector focus label: ok / soft / bad once the focus check has scored this row =====
     if (r.focus) info.body.appendChild(inspRow("Focus", r.focus === "bad" ? "bad, out of focus" : r.focus));
     // ===== end inspector focus label =====
+    if (r.group) info.body.appendChild(groupRow(r));   // ===== duplicates and bursts: the copies toggle, pick the sharpest =====
     cats.body.appendChild(inspRow("Category", r.category ? r.category + (r.category_score != null ? "  " + Math.round(r.category_score * 100) + "%" : "") : "unclassified"));
     if (r.cluster) cats.body.appendChild(inspRow("Discovered", /^group \d+$/.test(r.cluster) ? "Unnamed " + r.cluster : r.cluster));
     if (r.sure === false) cats.body.appendChild(inspRow("Confidence", Math.round((r.confidence || 0) * 100) + "%, less sure"));
     cats.body.appendChild(inspRow("Aerial", r.aerial ? "yes" : "no"));
     faces.body.appendChild(inspRow("Faces", r.kind === "video" ? "not scanned in clips" : facesLabel(r.n_faces)));
   }
+  // ===== duplicates and bursts: the inspector row for a tile that stands for a set. Copies: "2 on disk" and a link that
+  // unfolds them into their own tiles (and folds them back). Bursts: "12 frames", "pick the sharpest" selects the frame
+  // with the best sharpness score (the tile swaps to it while folded), and the same unfold link. Export follows the
+  // selection, so a folded set exports the shown one and an unfolded one exports every tile picked. =====
+  function groupRow(r) {
+    var g = r.group, burst = g.kind === "burst";
+    var row = inspRow(burst ? "Burst" : "Copies", burst ? g.n + " frames" : g.n + " on disk");
+    var acts = document.createElement("span"); acts.className = "insp-acts";
+    if (burst) {
+      var pick = document.createElement("button");
+      pick.type = "button"; pick.className = "link small"; pick.textContent = "pick the sharpest";
+      pick.title = "select the frame with the best sharpness score" + (g.sharpest === r.id ? " (this one)" : "");
+      pick.addEventListener("click", function () { pickSharpest(r); });
+      acts.appendChild(pick);
+    }
+    var tog = document.createElement("button");
+    tog.type = "button"; tog.className = "link small";
+    tog.textContent = state.showCopies ? (burst ? "fold the burst" : "fold copies") : (burst ? "show every frame" : "show copies");
+    tog.title = state.showCopies ? "one tile per set again" : "every copy and frame as its own tile, selectable and exportable one by one";
+    tog.addEventListener("click", function () { setShowCopies(!state.showCopies); });
+    acts.appendChild(tog);
+    row.appendChild(acts);
+    return row;
+  }
+  function setShowCopies(v) {
+    if (v === state.showCopies) return;
+    if (chipOf("saved")) { setStatus("a saved-person find shows every frame already"); return; }
+    state.showCopies = v;
+    track("copies", { shown: v });
+    var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
+    runSearch(p).then(function () { setStatus(v ? "every copy and frame is its own tile" : "copies and bursts folded, one tile each"); });
+  }
+  function pickSharpest(r) {
+    var g = r.group;
+    var best = null;
+    for (var i = 0; i < g.members.length; i++) if (g.members[i].id === g.sharpest) best = g.members[i];
+    if (!best) return;
+    g.members.forEach(function (m) { state.selected.delete(m.id); });
+    if (state.showCopies || best.id === r.id) {
+      state.selected.add(best.id);
+      $$(".card", gridEl).forEach(function (c) {
+        var id = Number(c.dataset.id);
+        if (g.members.some(function (m) { return m.id === id; })) c.classList.toggle("selected", id === best.id);
+      });
+    } else {                                           // folded: the tile becomes the sharpest frame, selected
+      var idx = indexOfId(r.id);
+      if (idx < 0) return;
+      state.results[idx] = Object.assign({}, r, { id: best.id, rel: best.rel, qhash: best.qhash, sharp_pct: best.sharp_pct, group: g });
+      state.selected.add(best.id);
+      var top = mainEl.scrollTop;
+      renderGrid();
+      mainEl.scrollTop = top;
+      hoveredId = best.id;
+    }
+    lastClickedId = best.id;
+    updateSelbar();
+    setStatus("picked " + best.rel.split("/").pop() + ", the sharpest of " + g.n);
+  }
+  // ===== end duplicates and bursts =====
   function setInspector(open) {
     if (open !== document.body.classList.contains("insp")) track("inspector", { open: open });   // ===== usage log =====
     document.body.classList.toggle("insp", open);
@@ -1659,8 +2072,9 @@
       personSelect.appendChild(opt);
     });
     personSelect.value = current || "";
-    // ===== navigation: a person context set before the options existed (reload, history) takes the select now; names reach the crumb =====
-    if (state.ctx && state.ctx.kind === "person" && !personSelect.value) personSelect.value = String(state.ctx.key);
+    // ===== navigation: a person chip set before the options existed (reload, history) takes the select now; names reach the chip =====
+    var pc = chipOf("person");
+    if (pc && !personSelect.value) personSelect.value = String(pc.key);
     renderCtxBar();
     // ===== end navigation =====
   }
@@ -1928,8 +2342,9 @@
       body: JSON.stringify({ min_sim: parseFloat(findSim.value) }),
     }).then(function (data) {
       showFindResults(data, name);
-      // ===== navigation: the crumb reads "People / name / N photos" once the matches are in =====
-      if (state.ctx && state.ctx.kind === "saved" && state.ctx.key === name) renderCtxBar();
+      // ===== navigation: the count line follows the matches once they are in =====
+      var sc = chipOf("saved");
+      if (sc && sc.key === name) renderCtxBar();
       // ===== end navigation =====
     }).catch(function (err) {
       setStatus("could not show " + name + ": " + err.message);
@@ -2092,24 +2507,9 @@
   var catTilesEl = $("#cat-tiles");
   var discTilesEl = $("#disc-tiles");
   var catProgressEl = $("#cat-progress");
-  var categoryChip = $("#category-chip");
 
-  function showCategoryChip(text) {
-    if (!text) { categoryChip.hidden = true; return; }
-    $("#category-chip-name").textContent = text;
-    categoryChip.hidden = false;
-  }
-  $("#category-chip-clear").addEventListener("click", function () {
-    $("#category-filter").value = ""; $("#cluster-filter").value = ""; aerialOnly.checked = false;
-    showCategoryChip(null);
-    // ===== navigation: the chip is hidden while a context shows, but clearing it ends a Categories context all the same =====
-    if (state.ctx && state.ctx.from === "categories") { state.ctx = null; renderCtxBar(); navPush(); }
-    // ===== end navigation =====
-    runSearch();
-  });
-
-  // One of the filters at a time from a tile: a fixed category, a discovered one (cluster), or the drone flag.
-  // ===== navigation: each lands on Search through jumpTo, which writes the fields, the chip, the crumb and a history entry =====
+  // A tile adds its chip (a fixed category, a discovered one, or the drone flag) to whatever is already filtering the grid.
+  // ===== navigation: each lands on Search through jumpTo, which writes the fields, the chips and a history entry =====
   function filterByCategory(cat, cluster) {
     jumpTo({ from: "categories", kind: cluster ? "cluster" : "category", key: cat }, function () { runSearch(); });
   }
@@ -2646,7 +3046,58 @@
     helpToggle.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) helpClose.focus();
     else if (document.activeElement && helpEl.contains(document.activeElement)) helpToggle.focus();
+    if (open) loadVersion();                           // ===== version: the number, the build, what the daily check found =====
   }
+
+  // ===== version and the opt-in update check: /api/version says what runs here and, when the box is ticked, what the site
+  // says is out; the box posts /api/version/check (on: one check now, and one a day from then; off: forgotten). =====
+  var appVersionEl = $("#app-version");
+  var updateBox = $("#update-check");
+  var updateLine = $("#update-line");
+  var versionQuiet = false;
+  function renderVersion(st) {
+    appVersionEl.textContent = st.version + (st.build ? " (" + st.build + ")" : "");
+    appVersionEl.title = st.build ? "version " + st.version + ", build " + st.build : "version " + st.version;
+    versionQuiet = true; updateBox.checked = !!st.enabled; versionQuiet = false;
+    updateLine.className = "help-out";
+    updateLine.innerHTML = "";
+    if (!st.enabled) { updateLine.hidden = true; return; }
+    updateLine.hidden = false;
+    if (st.newer) {
+      updateLine.classList.add("update-new");
+      var strong = document.createElement("strong"); strong.textContent = st.latest + " is out";
+      updateLine.appendChild(strong);
+      if (st.notes) updateLine.appendChild(document.createTextNode(": " + st.notes + " "));
+      else updateLine.appendChild(document.createTextNode(". "));
+      var a = document.createElement("a"); a.href = st.download_url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Get it from the download page";
+      updateLine.appendChild(a);
+    } else if (st.checking && !st.checked_at) {
+      updateLine.textContent = "checking…";
+    } else if (st.error && !st.latest) {
+      updateLine.textContent = "could not reach the site (" + st.error + "); it tries again tomorrow";
+      updateLine.classList.add("err");
+    } else if (st.latest) {
+      updateLine.textContent = "this is the newest version, checked " + fmtWhen(st.checked_at);
+    } else {
+      updateLine.textContent = "checking…";
+    }
+  }
+  function loadVersion() {
+    return api("/api/version").then(function (st) {
+      renderVersion(st);
+      if (st.checking && !helpEl.hidden) setTimeout(function () { if (!helpEl.hidden) loadVersion(); }, 2500);
+    }).catch(function () { appVersionEl.textContent = "?"; });
+  }
+  updateBox.addEventListener("change", function () {
+    if (versionQuiet) return;
+    var on = updateBox.checked;
+    updateLine.hidden = !on; updateLine.className = "help-out"; updateLine.textContent = on ? "checking…" : "";
+    api("/api/version/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: on }) })
+      .then(renderVersion)
+      .catch(function (err) { setStatus("could not change the version check: " + err.message, true); loadVersion(); });
+  });
+  loadVersion();                                       // the line under the wordmark is right from the start
+  // ===== end version =====
   helpToggle.addEventListener("click", function () { setHelp(helpEl.hidden); });
   helpClose.addEventListener("click", function () { setHelp(false); });
   document.addEventListener("click", function (e) {
@@ -2932,7 +3383,7 @@
     // ===== navigation boot: the view and filter come back from history.state (survives a reload) or the hash =====
     var entry = navBootEntry();
     if (entry) state.view = entry.view;
-    var ctx = entry ? entry.ctx : null;
+    var chips = entry ? entry.chips || [] : [];
     // ===== end navigation boot =====
     if (!info.indexed) {
       showView("index");
@@ -2945,10 +3396,13 @@
     loadStats().then(function (s) { if (s.indexing) pollProgress(); });
     loadPeople();
     loadCategories();                                  // fills the count beside the Categories nav row
+    loadSearches();                                    // ===== search history: the sidebar chips =====
+    loadPrefs(); loadExports();                        // ===== export presets and history =====
     // ===== navigation boot: a person filter goes out explicitly, the select has no options yet; a saved name is a find =====
-    setCtx(ctx);
-    if (ctx && ctx.kind === "saved") { if (state.view === "search") findSaved(ctx.key); else pendingFind = ctx.key; }
-    else runSearch(ctxParams(ctx));
+    applyChips(chips);
+    var savedChip = chipOf("saved", chips);
+    if (savedChip) { if (state.view === "search") findSaved(savedChip.key); else pendingFind = savedChip.key; }
+    else runSearch(ctxParams(chips));
     showView(state.view);
     navPush(true);
     // ===== end navigation boot =====

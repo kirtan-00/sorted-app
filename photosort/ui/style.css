@@ -542,11 +542,12 @@ body.nofolder #inspector { display: none; }
 .search-head { position: sticky; top: 0; z-index: 3; flex: none; }
 .search-head .subbar { position: static; }
 .ctxbar {
-  height: 36px;
+  min-height: 36px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px 0 8px;
+  gap: 6px 12px;
+  padding: 4px 12px 4px 8px;
   background: var(--g100);
   border-bottom: 1px solid var(--g50);
   white-space: nowrap;
@@ -596,8 +597,41 @@ body.nofolder #inspector { display: none; }
 .ctx-crumb .crumb-seg { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .ctx-crumb .crumb-seg.last { color: var(--g800); font-weight: 500; flex: 1 1 auto; }
 .ctx-crumb .crumb-sep { color: var(--g500); flex: none; }
+/* one chip per active filter, each with its own x; they AND together */
+.ctx-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  max-width: 260px;
+  padding: 0 4px 0 8px;
+  font-size: 13px;
+  background: var(--g200);
+  border: 1px solid var(--g300);
+  border-radius: 4px;
+  color: var(--g800);
+}
+.ctx-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-chip-x {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--g600);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: background-color var(--ease), color var(--ease);
+}
+.ctx-chip-x:hover { background: var(--g300); color: var(--g800); }
+.ctx-chip-x:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.ctx-chip-x svg { width: 8px; height: 8px; }
+.ctx-count { font-size: 13px; color: var(--g600); flex: none; }
 #ctx-clear { flex: none; }
-#view-search.has-ctx #category-chip { display: none; }   /* the breadcrumb says the same thing, with one clear affordance */
 #q { min-width: 0; }
 #q .q-wrap { position: relative; flex: 1 1 auto; max-width: 480px; min-width: 140px; }
 #q .q-wrap::before {
@@ -611,32 +645,54 @@ body.nofolder #inspector { display: none; }
   background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Ccircle cx='6' cy='6' r='4' fill='none' stroke='%23909090' stroke-width='1.5'/%3E%3Cpath d='M9 9l3.5 3.5' stroke='%23909090' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat center;
 }
 #q input[name="q"] { width: 100%; padding-left: 28px; }
-#category-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 4px 0 8px;
-  font-size: 13px;
-  background: var(--g200);
+/* search history: the last 20 queries under the field (arrow down); a star saves one, an x forgets it */
+.q-history {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 32px;
+  z-index: 6;
+  max-height: 340px;
+  overflow: hidden auto;
+  padding: 4px 0;
+  background: var(--g100);
   border: 1px solid var(--g300);
   border-radius: 4px;
-  color: var(--g800);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
-#category-chip-clear {
-  width: 16px;
-  height: 16px;
+.qh-row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px 0 10px; font-size: 13px; color: var(--g700); cursor: default; }
+.qh-row:hover, .qh-row.on { background: var(--g200); color: var(--g800); }
+.qh-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qh-filters { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g500); }
+.qh-star, .qh-del {
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
-  border-radius: 2px;
+  border-radius: 3px;
   background: none;
-  color: var(--g600);
+  color: var(--g500);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
+  transition: background-color var(--ease), color var(--ease);
 }
-#category-chip-clear:hover { background: var(--g300); color: var(--g800); }
-#category-chip-clear svg { width: 8px; height: 8px; }
+.qh-star svg, .qh-del svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.qh-del svg { width: 8px; height: 8px; }
+.qh-star:hover, .qh-del:hover { background: var(--g300); color: var(--g800); }
+.qh-star[aria-pressed="true"] { color: var(--blue); }
+.qh-star[aria-pressed="true"] svg { fill: currentColor; }
+.qh-star:focus-visible, .qh-del:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.qh-empty { padding: 6px 10px; font-size: 12px; color: var(--g500); }
+/* saved searches: chips in the sidebar under Filters; the label runs the search, the x forgets it */
+.saved-searches { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px; }
+.ss-chip { display: inline-flex; align-items: center; max-width: 100%; height: 24px; background: var(--g200); border: 1px solid var(--g300); border-radius: 4px; }
+nav .ss-chip button { width: auto; height: 22px; padding: 0 4px 0 8px; gap: 0; border-radius: 3px; font-size: 13px; color: var(--g800); min-width: 0; }
+nav .ss-chip .ss-run { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+nav .ss-chip .ss-x { padding: 0 4px; color: var(--g500); flex: none; }
+nav .ss-chip .ss-x:hover { color: var(--g800); background: var(--g300); }
+nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inherit; }
 
 /* grid: Lightroom Library cells */
 #grid {
@@ -710,6 +766,10 @@ body.nofolder #inspector { display: none; }
 }
 #grid .badge.drone { right: auto; left: 8px; }
 #grid .badge.drone::before { display: none; }
+/* duplicates and bursts: "x2" or "burst of 12", top left, clear of the drone and clip badges */
+#grid .badge.group { right: auto; bottom: auto; left: 8px; top: 8px; }
+#grid .badge.group::before { display: none; }
+.insp-row .insp-acts { grid-column: 2; display: flex; flex-wrap: wrap; gap: 0 8px; margin-left: -4px; }
 .grid-divider {
   grid-column: 1 / -1;
   display: flex;
@@ -733,9 +793,24 @@ body.nofolder #inspector { display: none; }
 
 #selbar #selcount { font-size: 14px; color: var(--g600); }
 #selbar.has-sel #selcount { color: var(--g800); }
-#selbar .sel-export { display: flex; align-items: center; gap: 8px; }
-#exportname { width: 180px; }
-#exportmode { max-width: 230px; }
+#selbar .sel-export { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+#exportname { width: 140px; }
+#exportmode { max-width: 150px; }
+#export-preset { max-width: 230px; }
+#export-size { max-width: 110px; }
+#export-raw-label { color: var(--g700); }
+/* export history: one line per export in the Scan tab */
+.exports { display: flex; flex-direction: column; }
+.exp-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--g100); font-size: 13px; }
+.exp-row:first-child { border-top: 0; }
+.exp-what { color: var(--g800); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.exp-what .exp-count { color: var(--g600); }
+.exp-where { grid-column: 1; color: var(--g600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.exp-where::before, .exp-where::after { content: "\200E"; }
+.exp-when { grid-column: 2; grid-row: 1; color: var(--g500); white-space: nowrap; }
+.exp-acts { grid-column: 2; grid-row: 2; display: flex; gap: 8px; justify-content: flex-end; }
+.exp-acts .link.small { margin: 0; }
+.exp-row.failed .exp-what { color: var(--red); }
 #selbar.has-sel #export { background: var(--blue); border-color: var(--blue); color: var(--g900); }
 #selbar.has-sel #export:hover { background: var(--blue-h); border-color: var(--blue-h); }
 
@@ -1058,6 +1133,14 @@ body.nofolder #inspector { display: none; }
 .help-actions a.link { display: inline-flex; align-items: center; color: var(--blue); text-decoration: none; }
 .help-actions a.link:hover { color: var(--blue-h); background: none; text-decoration: underline; text-underline-offset: 2px; }
 .help-lines p.help-out { margin-top: 8px; font-size: 13px; color: var(--g600); overflow-wrap: anywhere; }
+/* the Version section: the number and the build stamp, the daily check, what it found */
+.help-lines .help-version-line { color: var(--g800); }
+.app-version { font-family: var(--mono); font-size: 13px; }
+.help-lines .help-check { margin: 4px 0 2px; height: 26px; }
+.help-lines .help-fine { font-size: 12px; color: var(--g500); }
+.help-lines p.help-out.update-new { color: var(--g800); }
+.help-lines p.help-out.update-new a { color: var(--blue); text-decoration: none; }
+.help-lines p.help-out.update-new a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .help-lines p.help-out.err { color: var(--red); }
 
 /* focus filters: the status line under the kind control, a 12 px link beside it */

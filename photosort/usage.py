@@ -24,7 +24,7 @@ import zipfile
 from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path
-from .config import app_home, ROOT
+from .config import app_home
 
 EVENTS_NAME = "events.jsonl"
 ROTATE_BYTES = 20 * 1024 * 1024     # events.jsonl is renamed to events.1.jsonl past this; two files are kept
@@ -152,18 +152,14 @@ def _run(cmd: list[str], timeout: float = 3.0) -> str | None:
 
 @lru_cache(maxsize=1)
 def system_info() -> dict:
-    """App version (git short sha when the checkout has one, else the package version), macOS version,
-    chip, RAM, python, ffmpeg. Every probe is optional: the .app bundle has no .git, a Mac may have no ffmpeg."""
+    """App version ("0.3.0 (a12ec7a)": VERSION plus the BUILD stamp or git's short sha, see version.py), macOS
+    version, chip, RAM, python, ffmpeg. Every probe is optional: a Mac may have no ffmpeg."""
     info = {"app": None, "macos": None, "chip": None, "ram_gb": None, "python": platform.python_version(), "ffmpeg": None}
-    sha = _run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"])
-    if sha:
-        info["app"] = sha
-    else:
-        try:
-            from importlib.metadata import version
-            info["app"] = version("photosort")
-        except Exception:
-            info["app"] = "unknown"
+    try:
+        from .version import version_string
+        info["app"] = version_string()
+    except Exception:
+        info["app"] = "unknown"
     try:
         info["macos"] = platform.mac_ver()[0] or platform.platform()
     except Exception:

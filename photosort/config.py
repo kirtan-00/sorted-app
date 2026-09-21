@@ -62,6 +62,12 @@ def thumb_workers(ncpu: int | None) -> int:
     """cores minus one, at least 2, at most JPEG_WORKERS_MAX; an unknown core count reads as 4."""
     return max(2, min((ncpu or 4) - 1, JPEG_WORKERS_MAX))
 JPEG_WORKERS = thumb_workers(os.cpu_count())
+# Bursts: a run of photos in one folder with consecutive frame numbers, each shot within BURST_GAP_S of the last
+# (10 fps bursts span several seconds, so the gap is per pair, not one second for the run) and, where both
+# frames have embeddings, cosine BURST_SIM or closer. Duplicates need no threshold: the same qhash is the same file.
+BURST_GAP_S = 1.0
+BURST_SIM = 0.9
+
 RAW_WORKERS = 2
 EMBED_BATCH = 32
 

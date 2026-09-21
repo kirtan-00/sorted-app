@@ -57,3 +57,25 @@ def set_drive_prefs(link: str | None, web_size: int | None) -> None:
     if web_size: d["drive_web_size"] = int(web_size)
     else: d.pop("drive_web_size", None)
     save(d)
+
+# ===== the opt-in update check (photosort/version.py): on or off, when it last ran, what it found =====
+def get_update_prefs() -> dict:
+    d = load()
+    return {"enabled": bool(d.get("update_check")), "checked_at": d.get("update_checked_at"),
+            "latest": d.get("update_latest"), "notes": d.get("update_notes"), "error": d.get("update_error")}
+
+def set_update_enabled(enabled: bool) -> None:
+    d = load()
+    if enabled: d["update_check"] = True
+    else:
+        for k in ("update_check", "update_checked_at", "update_latest", "update_notes", "update_error"): d.pop(k, None)
+    save(d)
+
+def set_update_result(latest: str | None, notes: str | None, checked_at: str, error: str | None) -> None:
+    d = load()
+    d["update_checked_at"] = checked_at
+    if latest:
+        d["update_latest"] = latest; d["update_notes"] = notes or ""; d.pop("update_error", None)
+    else:
+        d["update_error"] = error or "unknown"       # the last good answer, if any, stays
+    save(d)
