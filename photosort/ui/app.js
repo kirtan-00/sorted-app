@@ -34,6 +34,7 @@
     // ===== end combined filters =====
     searches: { recent: [], saved: [] },   // ===== search history: /api/searches, per shoot =====
     showCopies: false,          // ===== duplicates and bursts: false folds each set into one tile (fold=1), true shows every copy and frame =====
+    folded: 0,                  // how many rows the folded tiles are hiding, from the last search
     scroll: {},                 // view name -> main.scrollTop when the user left it
     // ===== end navigation =====
   };
@@ -348,7 +349,7 @@
       b.classList.toggle("from", chips.some(function (c) { return c.from === b.dataset.view; }));
     });
     ctxChips.innerHTML = "";                          // an emptied bar keeps no stale chips behind its hidden attribute
-    if (!chips.length) return;
+    if (!chips.length) { ctxCount.textContent = ""; ctxCount.title = ""; return; }
     var origin = lastOrigin();
     var tab = origin ? TAB_NAMES[origin] || origin : null;
     ctxBackLabel.textContent = tab || "Back";
@@ -630,6 +631,7 @@
     // ===== end navigation =====
     closeHistory(); loadSearches();                   // ===== search history: the new shoot's list =====
     state.showCopies = false;                          // ===== duplicates and bursts: folded again on a new shoot =====
+    if ($("#show-copies")) $("#show-copies").checked = false;
     loadPrefs(); loadExports();                        // ===== export presets and history: this shoot's =====
     loadRecent();
     if (!folderOpen(info)) {
@@ -793,7 +795,13 @@
     return params;
   }
 
+  function num(x) { return Number(x).toLocaleString("en-US"); }
+
   var PAGE = 200;
+  // Two searches can be in flight at once (a radio change fires one, the chip sync another), and the slower
+  // reply used to land last and leave the counts describing a filter that is no longer on. Every search takes
+  // a ticket; only the newest one is allowed to paint. "Show more" (append) keeps its own ticket.
+  var searchSeq = 0;
   function runSearch(extra, append) {
     // ===== combined filters: a plain search (no explicit params) reads the chips off the form, so a control changed by hand
     // is a chip like any other; a saved-person find is not a form filter, so any plain search drops it. A change is a history entry. =====
@@ -805,20 +813,24 @@
     // ===== end combined filters =====
     var params = currentFilters();
     Object.assign(params, extra || {});
-    params.fold = state.showCopies ? 0 : 1;            // ===== duplicates and bursts: one tile per set unless the inspector unfolded them =====
+    params.fold = state.showCopies ? 0 : 1;            // ===== duplicates and bursts: one tile per set unless "Show every copy" is ticked =====
     if (!append) { state.offset = 0; state.results = []; }
     params.limit = PAGE; params.offset = state.offset;
     state.lastParams = params;
     var qs = new URLSearchParams(params).toString();
+    var ticket = ++searchSeq;
     return api("/api/search?" + qs).then(function (data) {
+      if (ticket !== searchSeq) return;                // a newer search is on its way; this reply is history
       state.results = append ? state.results.concat(data.results || []) : (data.results || []);
       state.total = data.total || 0;
+      state.folded = data.folded || 0;                 // ===== duplicates and bursts: rows inside the tiles =====
       state.offset = state.results.length;
       renderGrid();
       if (pushAfter) navPush();                        // ===== combined filters: the hash and history follow the chips =====
     }).catch(function (err) {
+      if (ticket !== searchSeq) return;
       if (err.status === 404) {
-        state.results = []; state.total = 0;
+        state.results = []; state.total = 0; state.folded = 0;
         renderGrid();
         setStatus("that photo has no embedding to compare against");
       } else {
@@ -1116,7 +1128,10 @@
     // A text or image query ranks the whole shoot, so "total" is the shoot size and
     // "select all matching" would select everything: only filter-only searches get it.
     var ranked = !!(state.lastParams.q || state.lastParams.image_id);
-    $("#shown-count").textContent = ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown";
+    // ===== duplicates and bursts: say how many rows the tiles are hiding, so a filtered count is never a surprise =====
+    var folded = state.folded ? ", " + num(state.folded) + " " + (state.folded === 1 ? "copy" : "copies") + " folded" : "";
+    $("#shown-count").textContent = (ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown") + folded;
+    $("#shown-count").title = state.folded ? "duplicates and burst frames are one tile each; tick Show every copy in the sidebar to see them all" : "";
     $("#show-more").hidden = state.results.length >= state.total;
     $("#select-matching").hidden = ranked;
     updateSelbar();
@@ -1915,13 +1930,18 @@
     return row;
   }
   function setShowCopies(v) {
-    if (v === state.showCopies) return;
-    if (chipOf("saved")) { setStatus("a saved-person find shows every frame already"); return; }
+    var box = $("#show-copies");
+    if (v === state.showCopies) { if (box) box.checked = v; return; }
+    if (chipOf("saved")) { setStatus("a saved-person find shows every frame already"); if (box) box.checked = false; return; }
     state.showCopies = v;
+    if (box) box.checked = v;
     track("copies", { shown: v });
     var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
     runSearch(p).then(function () { setStatus(v ? "every copy and frame is its own tile" : "copies and bursts folded, one tile each"); });
   }
+  var showCopiesBox = $("#show-copies");
+  if (showCopiesBox) showCopiesBox.addEventListener("change", function () { setShowCopies(showCopiesBox.checked); });
+
   function pickSharpest(r) {
     var g = r.group;
     var best = null;
@@ -2236,6 +2256,7 @@
     // who: "that person" for a picked photo, or a saved name (that payload has no reference keys).
     state.results = data.results || [];
     state.total = data.total || 0;
+    state.folded = data.folded || 0;
     state.offset = state.results.length;
     state.lastParams = {};
     showView("search");

@@ -603,7 +603,11 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except sqlite3.Error as e:
                 usage.log("api_error", route="/api/search", what="record_search", error=str(e))
         # ===== end search history =====
-        return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset, "limit": limit}
+        # folded: rows hidden inside the tiles of this result set (duplicates and burst frames), so the UI can
+        # say "1,965 copies folded" instead of quietly showing fewer tiles than the shoot has.
+        folded = sum((r.get("group") or {}).get("n", 1) - 1 for r in rows) if fold else 0
+        return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows), "offset": offset,
+                "limit": limit, "folded": folded}
 
     # ===== search history and saved searches: per shoot, in the index (table searches) =====
     @app.get("/api/searches")
