@@ -12,7 +12,7 @@
 .beta-msg { min-height: 1.4em; margin: 8px 0 0; font-size: 14px; color: var(--ink-2); }
 .beta-msg.bad { color: var(--red); }
 .beta-fine { margin: 6px 0 0; font-size: 14px; color: var(--ink-3); }
-.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
+.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 80; }
 @media (max-width: 560px) { .beta-mail-row { flex-direction: column; } .beta-mail-row input { text-align: center; } }
 
 /* download gate */
@@ -29,3 +29,6 @@
 .dl-form input:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px rgba(75, 156, 245, 0.25); }
 .dl-form .cta { white-space: nowrap; }
 @media (max-width: 560px) { .dl-form { flex-direction: column; } }
+.cta-aside { align-self: center; font-size: 14px; color: var(--ink-3); max-width: 28ch; line-height: 1.35; text-align: left; }
+.dl-card .beta-line.big { margin-bottom: 4px; }
+.dl-card .beta-fine { margin: 0; }

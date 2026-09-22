@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Share a scan with an editor</title>
-<meta name="description" content="How to hand a sorted scan to another editor: save the scan file, give it with the disk, load it in seconds on the other Mac.">
+<title>Share a project file with an editor</title>
+<meta name="description" content="How to hand a sorted project file to another editor: save it, give it with the disk, open it in seconds on the other Mac.">
 <link rel="icon" href="../brand/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@112.5,700&display=swap">
 <link rel="stylesheet" href="../style.css">
@@ -30,8 +30,8 @@
 <main class="sh">
   <a class="top" href="../"><img class="brand-mark" src="../brand/mark.svg" alt="" width="28" height="28"><span class="wordmark"></span><span class="badge">public beta, testing right now</span></a>
 
-  <h1>Share a scan with an editor.</h1>
-  <p class="lede">A scan file holds everything sorted learned about a shoot: thumbnails, video frames, search, faces, people names, your Same or Different answers. It does not hold the photos and clips. So the editor gets two things: the scan file and the disk.</p>
+  <h1>Share a project file with an editor.</h1>
+  <p class="lede">A project file holds everything sorted learned about a shoot: thumbnails, video frames, search, faces, people names, your Same or Different answers. It does not hold the photos and clips. So the editor gets two things: the project file and the disk.</p>
 
   <h2>On your Mac</h2>
   <div class="step"><span class="n">1</span><div>
@@ -39,14 +39,14 @@
     <p>It is under <kbd>Recent</kbd> on the welcome screen.</p>
   </div></div>
   <div class="step"><span class="n">2</span><div>
-    <h3>Left sidebar <kbd>Scan</kbd>, then <kbd>Save scan file</kbd></h3>
-    <p>A Mac dialog asks where. Best place: a <kbd>sorted</kbd> folder on the shoot disk itself, so the file travels with the footage. It writes <kbd>&lt;shoot name&gt;.photosort-index.zip</kbd>, usually a few hundred MB, about 1 GB for a shoot with many clips. <kbd>Show in Finder</kbd> points at it.</p>
-    <div class="shot"><img src="save-scan-file.png" alt="The Scan tab in sorted with the Save scan file button circled" width="1280" height="760" loading="lazy"></div>
-    <p class="quiet" style="font-size:14px;color:var(--ink-3)">Older build showing <kbd>Export index</kbd> instead? Same thing; it saves into Desktop, photosort-out. Re-run the install line to get the current build.</p>
+    <h3>Left sidebar <kbd>Scan</kbd>, then <kbd>Save project</kbd></h3>
+    <p>No dialog, no wait: command S works too. It writes <kbd>sorted_&lt;shoot name&gt;.sorted</kbd> straight into a <kbd>sorted</kbd> folder beside the shoot on the disk, so it travels with the footage. Usually a few hundred MB, about 1 GB for a shoot with many clips. Want it somewhere else: <kbd>Save to…</kbd> opens a folder picker and remembers the place. <kbd>Show in Finder</kbd> points at the file.</p>
+    <div class="shot"><img src="save-scan-file.png" alt="The Scan tab in sorted: the Project file card with Save project, Save to and Show in Finder" width="1280" height="760" loading="lazy"></div>
+    <p class="quiet" style="font-size:14px;color:var(--ink-3)">Older build showing <kbd>Export index</kbd> instead? Re-run the install line to get the current build.</p>
   </div></div>
   <div class="step"><span class="n">3</span><div>
     <h3>Hand over the disk and the file</h3>
-    <p>Or a copy of the shoot folder plus the zip on Drive. The zip alone lets someone browse and search; cutting needs the footage.</p>
+    <p>Or a copy of the shoot folder plus the file on Drive. The file alone lets someone browse and search; cutting needs the footage.</p>
   </div></div>
 
   <h2>On the editor's Mac</h2>
@@ -55,15 +55,15 @@
     <p>One line in Terminal, on the <a href="../download/">download page</a>. A few minutes.</p>
   </div></div>
   <div class="step b"><span class="n">2</span><div>
-    <h3>Plug in the disk, open sorted, <kbd>Load a scan file</kbd></h3>
-    <p>Pick the zip. When it asks for the photo folder, point at the shoot on the disk. Seconds, no rescan. Names, people and categories arrive with it.</p>
+    <h3>Plug in the disk, then double-click the project file</h3>
+    <p>Double-click <kbd>sorted_&lt;shoot name&gt;.sorted</kbd> in the Finder and it opens straight into sorted (the Desktop icon the installer made handles this; re-run the install line if you installed before today to get it). Or open sorted first and click <kbd>Open a project file</kbd> on the welcome screen, or <kbd>Open project…</kbd> in the sidebar. When it asks for the photo folder, point at the shoot on the disk. Seconds, no rescan. Names, people and categories arrive with it. Given an older <kbd>.photosort-index.zip</kbd> instead? It opens the same way.</p>
   </div></div>
   <div class="step b"><span class="n">3</span><div>
     <h3>Work</h3>
     <p>Search, people, categories, export selects, Reorganise with Undo, straight to Drive. All on the originals.</p>
   </div></div>
 
-  <div class="note">One owner per scan file for now. If the editor names more people or answers more Same or Different prompts, that stays on their Mac until they save their own scan file; merging two scans of one shoot is on the roadmap.</div>
+  <div class="note">One owner per project file for now. If the editor names more people or answers more Same or Different prompts, that stays on their Mac until they save their own project file; merging two project files of one shoot is on the roadmap.</div>
 </main>
 </body>
 </html>

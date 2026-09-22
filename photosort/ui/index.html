@@ -43,7 +43,7 @@
     <button type="button" data-view="categories" title="categories found in the shoot">
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
     </button>
-    <button type="button" data-view="index" title="scan this folder, save or load the scan file">
+    <button type="button" data-view="index" title="scan this folder, save or open the project file">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Scan</span>
     </button>
     <div class="nav-group">Filters</div>
@@ -77,12 +77,14 @@
       <p id="welcome-scanleft" class="welcome-scanleft" hidden><span id="welcome-scanleft-text"></span> The scan continues from where it stopped once the disk is back.</p>
       <div class="welcome-actions">
         <button type="button" id="welcome-scan" class="btn welcome-btn" title="pick a disk or folder; a folder not scanned yet starts scanning straight away">
-          <span class="l">Scan a disk or folder</span>
-          <span class="s">Pick the folder. A new one starts scanning at once; a scanned one opens.</span>
+          <svg class="glyph glyph-disk" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 13.5h18"/><circle cx="17" cy="16.5" r="1" fill="currentColor" stroke="none"/><path d="M7 9h5"/></svg>
+          <span class="t"><span class="l">Scan a disk or folder</span>
+          <span class="s">Pick the folder. A new one starts scanning at once; a scanned one opens.</span></span>
         </button>
-        <button type="button" id="welcome-load" class="btn welcome-btn" title="open a scan file (.photosort-index.zip) made on another Mac">
-          <span class="l">Load a scan file</span>
-          <span class="s">A .photosort-index.zip made on another Mac. Loads in seconds.</span>
+        <button type="button" id="welcome-load" class="btn welcome-btn" title="open a sorted project file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
+          <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
+          <span class="t"><span class="l">Open a project file</span>
+          <span class="s">A sorted_&lt;shoot&gt;.sorted from any Mac. The shoot opens in seconds, already sorted.</span></span>
         </button>
       </div>
       <div class="welcome-under">
@@ -281,8 +283,26 @@
       <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
       <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
       <span class="spring"></span>
-      <button type="button" id="bundle-export" class="btn" title="save this shoot's scan file (one zip) wherever you like">Save scan file</button>
-      <button type="button" id="bundle-import" class="btn" title="open a scan file made on another Mac">Load scan file</button>
+      <button type="button" id="bundle-import" class="btn" title="open a sorted project file made on this or another Mac">Open project…</button>
+    </div>
+    <div class="panel" data-panel="project">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Project file <span class="sub">the shoot, sorted, in one file: hand it over with the disk</span></button>
+      <div class="panel-body">
+        <div class="project-card">
+          <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
+          <div class="project-main">
+            <div id="project-name" class="project-name" title="the project file for this shoot"></div>
+            <div class="project-where">Saves to <span id="project-dir" class="filename" title=""></span></div>
+            <div id="project-state" class="project-state">Not saved yet</div>
+          </div>
+          <div class="project-actions">
+            <button type="button" id="project-save" class="btn primary" title="save the project file to the folder above (command S)">Save project</button>
+            <button type="button" id="bundle-export" class="btn" title="pick another folder for the project file; it is remembered">Save to…</button>
+            <button type="button" id="bundle-reveal" class="btn" hidden title="show the project file in the Finder">Show in Finder</button>
+          </div>
+        </div>
+        <p class="hint">Like a Premiere project: what is in each shot, the thumbnails, the saved people, your searches and exports, all in one file. Nothing from the disk is copied into it. Give it to an editor with the disk and their Mac opens the shoot in seconds instead of scanning again. Save after a scan, after naming people, after anything you want to keep.</p>
+      </div>
     </div>
     <div class="panel" data-panel="progress">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Progress</button>
@@ -308,13 +328,6 @@
       <div class="panel-body">
         <div id="exports-list" class="exports"></div>
         <p id="exports-empty" class="empty">No exports yet from this shoot</p>
-      </div>
-    </div>
-    <div class="panel" data-panel="bundle">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Hand this shoot to another Mac</button>
-      <div class="panel-body">
-        <p class="hint">The scan file is one zip with everything sorted knows about this shoot: what is in each shot, the thumbnails, the saved people. Save it anywhere, hand it over with the disk, and the other Mac loads it in seconds instead of scanning again.</p>
-        <p id="bundle-out" class="bundle-out" hidden><span id="bundle-out-path" class="filename" title=""></span><button type="button" id="bundle-reveal" class="link small" title="show the scan file in the Finder">Show in Finder</button></p>
       </div>
     </div>
     <div id="reorg-block" class="panel collapsed" data-panel="reorganise">
@@ -368,12 +381,12 @@
       </div>
     </div>
     <div class="panel" data-panel="help-scan">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, or load a scan file</button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, and the project file</button>
       <div class="panel-body help-lines">
         <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The disk is only ever read. The Mac stays awake until the scan ends.</p>
         <p>If the disk is unplugged or the Mac dies mid-scan, nothing is lost: the shoot opens with "2,080 of 4,315 scanned" and a Continue scan button that reads only what is missing. The Scan tab's last line says what is on the disk, what is scanned and what is searchable, with one button for the gap.</p>
-        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort. "Save scan file" packs it into one zip, wherever you like.</p>
-        <p>Hand that zip to an editor with the disk and "Load a scan file" opens the shoot on their Mac in seconds, already searchable, with the saved people.</p>
+        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort. "Save project" (command S) packs it into one file, sorted_&lt;shoot&gt;.sorted, in a sorted folder beside the shoot so it travels with the disk; "Save to" puts it anywhere else, and that place is remembered.</p>
+        <p>Hand that file to an editor with the disk and "Open a project file" (or a double-click on it) opens the shoot on their Mac in seconds, already searchable, with the saved people. Older files named .photosort-index.zip open the same way.</p>
         <p>Nothing leaves the Mac. The one exception is the version check above, off unless you tick it, and it sends nothing either.</p>
       </div>
     </div>
@@ -426,7 +439,7 @@
         <p>One folder per ticked category, per person, or for the current selection.</p>
         <p>"Videos: only the matching segments" trims clips at keyframes.</p>
         <p>Google Drive as the destination: paste a folder link and the files go straight from the shoot disk into it; nothing is saved on this Mac on the way. What you upload counts against your own Drive space, unless the folder is on a Shared Drive. Uploads are resumable, and a manifest means a re-run only sends what is missing.</p>
-        <p>The scan file is the zip an editor loads to get the shoot already sorted.</p>
+        <p>The project file is what an editor opens to get the shoot already sorted.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-reorganise">

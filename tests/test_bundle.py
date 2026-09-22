@@ -23,7 +23,7 @@ def test_export_bundle_writes_one_zip(tmp_path, tmp_path_factory):
     out_dir = tmp_path_factory.mktemp("out")
     seen = []
     z = export_bundle(tmp_path, out_dir, progress=seen.append)
-    assert z == out_dir / f"{tmp_path.name}.photosort-index.zip" and z.is_file()
+    assert z == out_dir / f"sorted_{tmp_path.name}.sorted" and z.is_file()
     assert seen and seen[-1] == {"done": 6, "total": 6, "failed": 0}
     with zipfile.ZipFile(z) as zf:
         names = sorted(zf.namelist())
@@ -56,21 +56,21 @@ def test_inspect_bundle_rejects_a_zip_that_is_not_a_bundle(tmp_path, tmp_path_fa
     plain = out / "plain.zip"
     with zipfile.ZipFile(plain, "w") as zf:
         zf.writestr("hello.txt", "hi")
-    with pytest.raises(ValueError, match="not a photosort index bundle"):
+    with pytest.raises(ValueError, match="not a sorted project file"):
         inspect_bundle(plain)
     wrong = out / "wrong.zip"
     with zipfile.ZipFile(wrong, "w") as zf:                                # right file, wrong format string
         zf.writestr("bundle.json", json.dumps({"format": "photosort-index/99", "root": "/x"}))
         zf.writestr("index.db", b"")
-    with pytest.raises(ValueError, match="not a photosort index bundle"):
+    with pytest.raises(ValueError, match="not a sorted project file"):
         inspect_bundle(wrong)
     nodb = out / "nodb.zip"
     with zipfile.ZipFile(nodb, "w") as zf:                                 # right format, no database
         zf.writestr("bundle.json", json.dumps({"format": "photosort-index/1", "root": "/x"}))
-    with pytest.raises(ValueError, match="not a photosort index bundle"):
+    with pytest.raises(ValueError, match="not a sorted project file"):
         inspect_bundle(nodb)
     (out / "notzip.zip").write_bytes(b"not a zip at all")
-    with pytest.raises(ValueError, match="not a photosort index bundle"):
+    with pytest.raises(ValueError, match="not a sorted project file"):
         inspect_bundle(out / "notzip.zip")
 
 
@@ -254,3 +254,29 @@ def test_older_bundle_without_scan_still_loads(tmp_path, tmp_path_factory, monke
     target = import_bundle(old, tmp_path)
     assert (target / "index.db").is_file()
     assert db.scan_counts(db.connect(tmp_path))["scanned"] == 3            # the counts come from the index itself
+
+
+# ===== the project file: its name, its default folder, and the old name still opening =====
+def test_project_name_and_default_dir(tmp_path, monkeypatch):
+    from photosort.bundle import project_name, bundle_path, default_project_dir
+    shoot = tmp_path / "disk" / "NSG_26_Part 1"; shoot.mkdir(parents=True)
+    assert project_name(shoot) == "sorted_NSG_26_Part 1.sorted"
+    assert bundle_path(shoot, tmp_path / "x") == tmp_path / "x" / "sorted_NSG_26_Part 1.sorted"
+    # beside the shoot, in a "sorted" folder, when the parent can be written to
+    assert default_project_dir(shoot) == tmp_path / "disk" / "sorted"
+    # a parent we cannot write to: ~/Documents/sorted instead
+    monkeypatch.setattr("os.access", lambda p, m: False)
+    assert default_project_dir(shoot, home=tmp_path / "home") == tmp_path / "home" / "Documents" / "sorted"
+
+
+def test_legacy_name_still_opens(tmp_path, tmp_path_factory, monkeypatch):
+    """A <shoot>.photosort-index.zip from before the rename: same format inside, so it inspects and imports."""
+    from photosort.bundle import export_bundle, inspect_bundle, import_bundle
+    _three_photo_shoot(tmp_path)
+    out = tmp_path_factory.mktemp("out")
+    z = export_bundle(tmp_path, out)
+    legacy = out / f"{tmp_path.name}.photosort-index.zip"
+    z.rename(legacy)
+    assert inspect_bundle(legacy)["photos"] == 3
+    home = tmp_path_factory.mktemp("home"); monkeypatch.setenv("PHOTOSORT_HOME", str(home))
+    assert import_bundle(legacy).is_dir()

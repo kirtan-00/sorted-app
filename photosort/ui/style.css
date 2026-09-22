@@ -405,10 +405,10 @@ body.nofolder #inspector { display: none; }
   min-height: 76px;
   padding: 14px 16px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 4px;
+  gap: 12px;
   text-align: left;
   white-space: normal;
   line-height: 1.3;
@@ -416,8 +416,15 @@ body.nofolder #inspector { display: none; }
 }
 .welcome-btn:hover { background: var(--g200); border-color: var(--g400); }
 .welcome-btn:active { background: var(--g300); }
+.welcome-btn .t { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .welcome-btn .l { font-size: 15px; font-weight: 600; color: var(--g800); }
 .welcome-btn .s { font-size: 12px; font-weight: 400; color: var(--g600); }
+/* the two glyphs: line icons in the sidebar's style, the project file carries the blush tile of the mark */
+.glyph { width: 28px; height: 28px; flex: none; fill: none; stroke: var(--g600); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; margin-top: 1px; }
+.welcome-btn:hover .glyph { stroke: var(--g800); }
+.glyph-project rect { fill: var(--g600); }
+.welcome-btn:hover .glyph-project rect { fill: var(--g800); }
+.glyph-project rect[fill="#f3c8d0"], .welcome-btn:hover .glyph-project rect[fill="#f3c8d0"] { fill: #f3c8d0; }
 .welcome-under { display: flex; flex-direction: column; gap: 2px; margin-top: -4px; }
 .welcome-under label.check { height: 24px; }
 .welcome-note { font-size: 12px; color: var(--g500); padding-left: 22px; }
@@ -1079,8 +1086,20 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .scan-health-text:empty { display: none; }
 .scan-health .btn.small { height: 26px; padding: 0 10px; font-size: 13px; flex: none; }
 .welcome-scanleft { font-size: 13px; line-height: 1.4; color: var(--g600); margin-top: -12px; }
-.bundle-out { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-width: 0; }
-.bundle-out .filename { color: var(--g600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the project file card: glyph, the file name large, where it saves, when it was saved, the three buttons */
+.project-card { display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; border: 1px solid var(--g200); border-radius: 8px; background: var(--g75); min-width: 0; }
+.project-card .glyph { width: 36px; height: 36px; stroke: var(--g700); margin-top: 2px; }
+.project-card .glyph-project rect { fill: var(--g700); }
+.project-card .glyph-project rect[fill="#f3c8d0"] { fill: #f3c8d0; }
+.project-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.project-name { font-family: var(--mono); font-size: 15px; font-weight: 600; color: var(--g900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-where { font-size: 12px; color: var(--g600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-where .filename { color: var(--g700); font-size: 12px; }
+.project-state { font-size: 12px; color: var(--g500); }
+.project-state.saved { color: var(--green); }
+.project-state.stale { color: var(--g600); }
+.project-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: flex-start; }
+@media (max-width: 900px) { .project-card { flex-wrap: wrap; } .project-actions { width: 100%; justify-content: flex-start; } }
 #index-errors { margin-top: 12px; }
 #index-errors-title { color: var(--red); font-size: 13px; margin-bottom: 6px; }
 #index-errors-list, .drive-failures {

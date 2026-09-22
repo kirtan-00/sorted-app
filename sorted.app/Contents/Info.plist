@@ -10,4 +10,14 @@
 <key>LSUIElement</key><true/>
 <key>LSArchitecturePriority</key><array><string>arm64</string></array>
 <key>LSRequiresNativeExecution</key><true/>
+<!-- The project file type, so the Finder shows the sorted icon and "sorted project" on sorted_<shoot>.sorted.
+     Opening one by double-click is the Desktop icon's job (an applet made by "Install sorted.command" that
+     hands the path to this launcher); a shell launcher like this one never receives the file. -->
+<key>UTExportedTypeDeclarations</key><array><dict>
+  <key>UTTypeIdentifier</key><string>in.craywingz.sorted.project</string>
+  <key>UTTypeDescription</key><string>sorted project</string>
+  <key>UTTypeIconFile</key><string>sorted</string>
+  <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+  <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>sorted</string></array></dict>
+</dict></array>
 </dict></plist>

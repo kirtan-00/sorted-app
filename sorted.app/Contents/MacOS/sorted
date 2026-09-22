@@ -1,6 +1,8 @@
 #!/bin/bash
 # sorted.app: start the local server (no folder yet) and open the browser.
 # The app itself asks for a folder via the Open folder button / picker.
+# With a project file as the first argument (the Desktop icon passes what was double-clicked), the
+# server opens that file as soon as the page loads.
 # Everything it needs lives inside this repo folder: .venv (made by "Install sorted.command"),
 # a static ffmpeg in .venv/bin when Homebrew has none, and the face models in models/.
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -24,11 +26,17 @@ done
 sleep 0.5
 # The CLI takes 7777, or the next free port (7778 and up) when something else holds it; the
 # "photosort serving ... at http://127.0.0.1:<port>" line below says which.
-echo "[$(date)] launching from $REPO" >> "$LOG"
+PROJECT=()
+if [ -n "${1:-}" ] && [ -f "$1" ]; then
+  PROJECT=(--project "$1")
+  echo "[$(date)] launching from $REPO with $1" >> "$LOG"
+else
+  echo "[$(date)] launching from $REPO" >> "$LOG"
+fi
 MARK=$(wc -l < "$LOG")
 # arch -arm64: LaunchServices can start a script bundle under Rosetta; a universal interpreter then
 # loads as x86_64 and every arm64 wheel fails with "incompatible architecture".
-arch -arm64 "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" >> "$LOG" 2>&1 &
+arch -arm64 "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" "${PROJECT[@]}" >> "$LOG" 2>&1 &
 SRV=$!
 # Wait for the "serving ... at http://127.0.0.1:<port>" line, then open it in Chrome (or the default browser).
 URL=""

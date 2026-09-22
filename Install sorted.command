@@ -231,10 +231,13 @@ xattr -dr com.apple.quarantine "$REPO/sorted.app" 2>/dev/null
 note "ready"
 
 # 8. A sorted icon on the Desktop ----------------------------------------------------------------
-# ~/Desktop/sorted.app is a real bundle (so Finder shows the icon), not an alias: the same
-# Info.plist keys and icon as sorted.app here, and a launcher that execs the one here by absolute
-# path. A marker file records which folder made it, so a re-run (or an install in a new folder)
-# replaces it and a sorted.app somebody put on the Desktop by hand is left alone.
+# ~/Desktop/sorted.app is a small AppleScript applet (osacompile ships with macOS): double-click it
+# and it runs the launcher in this folder; double-click a project file (sorted_<shoot>.sorted) and it
+# runs the launcher with that file, which the app then opens. An applet gets the file from the Finder;
+# a plain shell bundle never does. It carries the sorted icon and declares the project file type, so
+# the Finder shows the icon on project files too. A marker file records which folder made it, so a
+# re-run (or an install in a new folder) replaces it and a sorted.app somebody put on the Desktop by
+# hand is left alone.
 desktop_icon() {
   local desk="$HOME/Desktop/sorted.app" marker="Contents/Resources/sorted-installed-from"
   local src="$REPO/sorted.app" launcher="$REPO/sorted.app/Contents/MacOS/sorted"
@@ -247,31 +250,58 @@ desktop_icon() {
     return 0
   fi
   rm -rf "$desk"
-  mkdir -p "$desk/Contents/MacOS" "$desk/Contents/Resources" || { note "could not write to the Desktop, skipping the Desktop icon"; return 0; }
-  cp "$src/Contents/Resources/sorted.icns" "$desk/Contents/Resources/sorted.icns"
+  local script; script="$(mktemp -t sorted-desktop-icon).applescript"
+  # $launcher is expanded now, so the icon carries the absolute path of this folder.
+  cat > "$script" <<APPLESCRIPT
+on run
+	do shell script quoted form of "$launcher" & " > /dev/null 2>&1 &"
+end run
+on open theFiles
+	set f to item 1 of theFiles
+	do shell script quoted form of "$launcher" & " " & quoted form of POSIX path of f & " > /dev/null 2>&1 &"
+end open
+APPLESCRIPT
+  if ! osacompile -o "$desk" "$script" >/dev/null 2>&1; then
+    note "could not build the Desktop icon, skipping it (the app still runs from $REPO/sorted.app)"; rm -rf "$desk" "$script"; return 0
+  fi
+  rm -f "$script"
+  cp "$src/Contents/Resources/sorted.icns" "$desk/Contents/Resources/droplet.icns"
+  rm -f "$desk/Contents/Resources/Assets.car"
   printf '%s\n' "$REPO" > "$desk/$marker"
-  cat > "$desk/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleName</key><string>sorted</string>
-<key>CFBundleIdentifier</key><string>in.craywingz.photosort.desktop</string>
-<key>CFBundleVersion</key><string>0.1.0</string>
-<key>CFBundleExecutable</key><string>sorted</string>
-<key>CFBundleIconFile</key><string>sorted</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>LSUIElement</key><true/>
-<key>LSArchitecturePriority</key><array><string>arm64</string></array>
-<key>LSRequiresNativeExecution</key><true/>
-</dict></plist>
-PLIST
-  # $REPO is expanded now, so the shortcut carries the absolute path of this folder.
-  printf '#!/bin/bash\n# Desktop shortcut made by "Install sorted.command"; the app lives in the folder below.\nexec %q "$@"\n' "$launcher" > "$desk/Contents/MacOS/sorted"
-  chmod +x "$desk/Contents/MacOS/sorted"
+  local plist="$desk/Contents/Info.plist" pb=/usr/libexec/PlistBuddy
+  "$pb" -c "Delete :CFBundleIconName" "$plist" >/dev/null 2>&1
+  "$pb" -c "Delete :CFBundleDocumentTypes" "$plist" >/dev/null 2>&1
+  # One PlistBuddy call per key: many -c in one call abort part way on macOS 15.
+  local ok=1 c
+  for c in "Set :CFBundleName sorted" \
+           "Add :CFBundleIdentifier string in.craywingz.sorted.desktop" \
+           "Add :LSUIElement bool true" \
+           "Add :CFBundleDocumentTypes array" \
+           "Add :CFBundleDocumentTypes:0 dict" \
+           "Add :CFBundleDocumentTypes:0:CFBundleTypeName string 'sorted project'" \
+           "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" \
+           "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner" \
+           "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" \
+           "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string in.craywingz.sorted.project" \
+           "Add :UTExportedTypeDeclarations array" \
+           "Add :UTExportedTypeDeclarations:0 dict" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string in.craywingz.sorted.project" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'sorted project'" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeIconFile string droplet" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" \
+           "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string sorted"; do
+    "$pb" -c "$c" "$plist" >/dev/null 2>&1 || ok=0
+  done
+  [ "$ok" = 1 ] || note "the Desktop icon is there but the Finder may not know project files yet"
   xattr -dr com.apple.quarantine "$desk" 2>/dev/null
+  # Tell the Finder about the icon and the file type now, not at the next login.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$desk" >/dev/null 2>&1
   touch "$desk"
   DESKTOP_ICON="$desk"
-  note "sorted.app is on the Desktop; it starts the app in $REPO"
+  note "sorted.app is on the Desktop; it starts the app in $REPO, and opens sorted_<shoot>.sorted files by double-click"
 }
 step "Desktop icon"
 desktop_icon

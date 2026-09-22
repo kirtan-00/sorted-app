@@ -1,6 +1,8 @@
-"""Index bundles: everything the app knows about a shoot (index.db with its saved people, thumbs,
-grid thumbs) in one <shoot>.photosort-index.zip, so a ready index can be handed to another Mac and
-opened there without re-indexing. Format "photosort-index/1": bundle.json, index.db, thumbs/*.jpg,
+"""The project file: everything the app knows about a shoot (index.db with its saved people, searches
+and exports, thumbs, grid thumbs) in one sorted_<shoot>.sorted, a zip inside, so a ready index can be
+handed to another Mac and opened there without re-indexing, the way an editor hands over a Premiere
+project. Older files are named <shoot>.photosort-index.zip and load the same; the format inside has not
+changed. Format "photosort-index/1": bundle.json, index.db, thumbs/*.jpg,
 grid/*.jpg, frames/*.jpg (sampled video frames). bundle.json also carries "scan", how far the scan had got
 (db.scan_counts plus faces), so a bundle of a half-scanned shoot says so before it is loaded; the key is
 optional, an older bundle without it loads the same. The shoot root is only ever read; a bundle never lands under it."""
@@ -11,17 +13,35 @@ from . import db
 from .config import DB_NAME, app_home, shoot_slug
 
 FORMAT = "photosort-index/1"
-SUFFIX = ".photosort-index.zip"
-NOTE = "Unzip into ~/Library/Application Support/photosort/ or use Import index bundle in the app."
+SUFFIX = ".sorted"
+LEGACY_SUFFIX = ".photosort-index.zip"
+PREFIX = "sorted_"
+NOTE = "A sorted project file (a zip inside). Open it with sorted, or unzip into ~/Library/Application Support/photosort/."
+
+
+def project_name(root: Path) -> str:
+    """sorted_<shoot folder name>.sorted; a volume root, which has no name, becomes sorted_root.sorted."""
+    return f"{PREFIX}{Path(root).resolve().name or 'root'}{SUFFIX}"
 
 
 def bundle_path(root: Path, out_dir: Path) -> Path:
-    """<out_dir>/<shoot name>.photosort-index.zip. Refuses an out_dir that is the (read-only)
+    """<out_dir>/sorted_<shoot name>.sorted. Refuses an out_dir that is the (read-only)
     shoot root or inside it. Does not create anything."""
     root_res = Path(root).resolve(); out_res = Path(out_dir).resolve()
     if out_res == root_res or out_res.is_relative_to(root_res):
-        raise ValueError("bundle destination is inside the source folder")
-    return Path(out_dir) / f"{root_res.name or 'root'}{SUFFIX}"
+        raise ValueError("the project file cannot go inside the source folder (the shoot)")
+    return Path(out_dir) / project_name(root_res)
+
+
+def default_project_dir(root: Path, home: Path | None = None) -> Path:
+    """Where Save puts the project file when nobody has chosen: a "sorted" folder beside the shoot
+    folder (so /Volumes/Prod_02/NSG_26 saves to /Volumes/Prod_02/sorted and the file travels with the
+    disk), when that parent is a folder we can write to; otherwise ~/Documents/sorted. Nothing is created."""
+    root_res = Path(root).resolve()
+    parent = root_res.parent
+    if parent != root_res and parent.is_dir() and os.access(parent, os.W_OK) and parent.parts[-1:] != ("Volumes",):
+        return parent / "sorted"
+    return (home or Path.home()) / "Documents" / "sorted"
 
 
 def bundle_files(root: Path) -> list[tuple[str, Path]]:
@@ -99,17 +119,17 @@ def export_bundle(root: Path, out_dir: Path, progress=None) -> Path:
 
 def inspect_bundle(zip_path: Path) -> dict:
     """bundle.json of a bundle, after checking the format string and that index.db is there.
-    Anything else (not a zip, no bundle.json, wrong format) is ValueError("not a photosort index bundle")."""
+    Anything else (not a zip, no bundle.json, wrong format) is ValueError("not a sorted project file")."""
     try:
         with zipfile.ZipFile(zip_path) as z:
             names = set(z.namelist())
             if "bundle.json" not in names or DB_NAME not in names:
-                raise ValueError("not a photosort index bundle")
+                raise ValueError("not a sorted project file")
             info = json.loads(z.read("bundle.json"))
     except (zipfile.BadZipFile, OSError, ValueError, UnicodeDecodeError):
-        raise ValueError("not a photosort index bundle")
+        raise ValueError("not a sorted project file")
     if not isinstance(info, dict) or info.get("format") != FORMAT or not isinstance(info.get("root"), str):
-        raise ValueError("not a photosort index bundle")
+        raise ValueError("not a sorted project file")
     return info
 
 

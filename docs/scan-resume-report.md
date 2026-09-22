@@ -5,7 +5,7 @@ worktree agent-a5f2ec0eed9a78a61, four commits on top of a9b0e02:
 
 - a9b0e02 a scan lists every file first, so an interrupted scan knows what is left
 - 505cf68 the server knows when a scan was cut short, keeps the Mac awake, and names the one fix
-- bf1e05a a scan file says how far its scan got, and loading one replies with it
+- bf1e05a a project file says how far its scan got, and loading one replies with it
 - 4ca51e7 ui: a scan that stopped says so everywhere it matters, with one Continue
 
 Full suite: 322 passed, 1 skipped (ffmpeg-less case), 2 min 17 s. 17 new tests.
@@ -27,9 +27,12 @@ the Scan tab both show "Scanning 2,612 of 4,315, reading photos and clips" and a
 "keeping the Mac awake" note. Same thing if the Mac died or the app was quit mid-scan: the
 next open marks the run as interrupted and everything above still applies.
 
-Load a scan file of a half-scanned shoot and the status line says "loaded NSG_26_Part 1:
-2,080 of 4,315 scanned. This scan file is incomplete; press Continue scan with the disk
+Open a project file of a half-scanned shoot and the status line says "loaded NSG_26_Part 1:
+2,080 of 4,315 scanned. This project file is incomplete; press Continue scan with the disk
 connected." The bar is there with the button. No more quietly showing fewer items.
+
+(This ran the day before the file was renamed to the project file, sorted_<shoot>.sorted;
+what it says about the file itself still holds under the current name.)
 
 ## How it works, by layer
 
@@ -70,7 +73,7 @@ connected." The bar is there with the button. No more quietly showing fewer item
 - The focus pass keeps its own job row (done / failed / interrupted); the health line's fix
   for a cut-short focus pass is "Finish the focus check" (POST /api/focus), never a scan.
 
-### Scan file (photosort/bundle.py)
+### Project file (photosort/bundle.py)
 - bundle.json carries `scan` (counts plus faces). The format string is unchanged, the key is
   optional, an older bundle loads as before. The import reply carries the installed index's
   own scan block, so an old bundle gets the same answer.

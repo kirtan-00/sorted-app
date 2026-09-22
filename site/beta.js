@@ -1,14 +1,9 @@
-/* Join the beta. One button: the tap is recorded, confetti, a line, then an email field.
-   Storage is a Supabase table reached through two insert-only functions with the publishable key
+/* Install sorted. Every Install button asks for an email, throws confetti, then goes to the install page.
+   Storage is a Supabase table reached through an insert-only function with the publishable key
    (nothing is readable from the browser). No sign-in, no cookies. */
 (function () {
   var URL = 'https://woasffpwdbwavwcrtllz.supabase.co/rest/v1/rpc/';
   var KEY = 'sb_publishable_aAR90Pzf1gza49CP2t7uKQ_xyDhkTZI';
-  var wrap = document.getElementById('beta-cta');
-  var join = document.getElementById('beta-join');
-  if (!wrap || !join) return;
-  var note = wrap.parentNode.querySelector('.beta-note');
-  var source = (location.hash || '').slice(1, 61) || 'site';
 
   function rpc(fn, args) {
     return fetch(URL + fn, {
@@ -52,54 +47,29 @@
     })(t0);
   }
 
-  function step2() {
-    join.disabled = true; join.classList.add('pressed');
-    confetti(join, 140);
-    rpc('beta_tap', { p_source: source, p_user_agent: ua() }).catch(function () {});
-    var box = document.createElement('form'); box.className = 'beta-mail'; box.noValidate = true;
-    box.innerHTML =
-      '<p class="beta-line">Nice. Where do we send the build?</p>' +
-      '<div class="beta-mail-row"><input name="email" type="email" inputmode="email" autocomplete="email" placeholder="you@studio.in" required maxlength="200" aria-label="Email">' +
-      '<button type="submit" class="cta beta-submit">Notify me</button></div>' +
-      '<p class="beta-msg" aria-live="polite"></p>';
-    wrap.insertAdjacentElement('afterend', box);
-    if (note) note.hidden = true;
-    requestAnimationFrame(function () { box.classList.add('in'); box.email.focus({ preventScroll: true }); });
-    var msg = box.querySelector('.beta-msg'), btn = box.querySelector('.beta-submit');
-    box.addEventListener('submit', function (e) {
-      e.preventDefault();
-      var email = box.email.value.trim().toLowerCase();
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(email)) { msg.textContent = 'That email does not look right.'; msg.classList.add('bad'); return; }
-      btn.disabled = true; msg.classList.remove('bad'); msg.textContent = 'One second';
-      rpc('beta_join', { p_email: email, p_source: source, p_user_agent: ua() }).then(function () {
-        box.innerHTML = '<p class="beta-line big">You are in. We will notify you shortly with the build.</p><p class="beta-fine">One email, from purohit.krick@gmail.com. Nothing else.</p>';
-        confetti(box.querySelector('.beta-line'), 60);
-      }).catch(function (err) {
-        btn.disabled = false; msg.classList.add('bad'); msg.textContent = err.message === 'failed' ? 'Could not save that. Try again in a moment.' : err.message;
-      });
-    });
-  }
-  join.addEventListener('click', step2, { once: true });
-
-  /* Download for Mac: ask for an email first, then go to the download page. A returning visitor
-     who already gave one goes straight through. */
+  /* Install sorted: every Install button asks for an email first, then confetti, then the install page.
+     A returning visitor who already gave one gets the confetti and goes straight through. */
   var KEY_MAIL = 'sorted.beta.email';
   function knownEmail() { try { return localStorage.getItem(KEY_MAIL) || ''; } catch (e) { return ''; } }
   function remember(email) { try { localStorage.setItem(KEY_MAIL, email); } catch (e) {} }
-  function gate(href) {
+  function go(href, from, delay) {
+    confetti(from, 140);
+    setTimeout(function () { location.href = href; }, reduced() ? 0 : delay);
+  }
+  function gate(href, from) {
     var old = document.getElementById('dl-gate'); if (old) old.remove();
     var m = document.createElement('div'); m.id = 'dl-gate'; m.className = 'dl-gate';
     m.innerHTML =
       '<div class="dl-card" role="dialog" aria-modal="true" aria-labelledby="dl-h">' +
         '<button type="button" class="dl-x" aria-label="Close">&times;</button>' +
-        '<h3 id="dl-h">One thing before the download.</h3>' +
-        '<p>Your email, so we can send you the build updates while the beta moves fast. One email at a time, nothing else.</p>' +
+        '<h3 id="dl-h">One thing before the install.</h3>' +
+        '<p>Your email, so we can tell you when a build changes something. One email at a time, nothing else.</p>' +
         '<form class="dl-form" novalidate><input name="email" type="email" inputmode="email" autocomplete="email" placeholder="you@studio.in" required maxlength="200" aria-label="Email">' +
-        '<button type="submit" class="cta">Go to the download</button></form>' +
+        '<button type="submit" class="cta">Install sorted</button></form>' +
         '<p class="beta-msg" aria-live="polite"></p>' +
       '</div>';
     document.body.appendChild(m);
-    var form = m.querySelector('form'), msg = m.querySelector('.beta-msg'), btn = form.querySelector('button');
+    var card = m.querySelector('.dl-card'), form = m.querySelector('form'), msg = m.querySelector('.beta-msg'), btn = form.querySelector('button');
     function close() { m.remove(); document.removeEventListener('keydown', esc); }
     function esc(e) { if (e.key === 'Escape') close(); }
     m.querySelector('.dl-x').addEventListener('click', close);
@@ -111,8 +81,10 @@
       var email = form.email.value.trim().toLowerCase();
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(email)) { msg.textContent = 'That email does not look right.'; msg.classList.add('bad'); return; }
       btn.disabled = true; msg.classList.remove('bad'); msg.textContent = 'One second';
-      rpc('beta_join', { p_email: email, p_source: 'download', p_user_agent: ua() }).then(function () {
-        remember(email); location.href = href;
+      rpc('beta_join', { p_email: email, p_source: 'install', p_user_agent: ua() }).then(function () {
+        remember(email);
+        card.innerHTML = '<p class="beta-line big">You are in.</p><p class="beta-fine">Taking you to the install page.</p>';
+        go(href, card, 1500);
       }).catch(function (err) {
         btn.disabled = false; msg.classList.add('bad'); msg.textContent = err.message === 'failed' ? 'Could not save that. Try again in a moment.' : err.message;
       });
@@ -120,8 +92,9 @@
   }
   Array.prototype.forEach.call(document.querySelectorAll('a[href$="download/"]'), function (a) {
     a.addEventListener('click', function (e) {
-      if (knownEmail()) return;
-      e.preventDefault(); gate(a.getAttribute('href'));
+      e.preventDefault();
+      if (knownEmail()) { go(a.getAttribute('href'), a, 900); return; }
+      gate(a.getAttribute('href'), a);
     });
   });
 })();

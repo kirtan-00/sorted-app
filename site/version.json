@@ -1,4 +1,4 @@
 {
-  "version": "0.3.0",
-  "notes": "Filters combine as chips, the last 20 searches are one arrow down away and a star saves one, duplicates and bursts fold into one tile, export presets and an export history, and the app shows its version here."
+  "version": "0.3.1",
+  "notes": "The project file: sorted_<shoot>.sorted. Save project (command S) puts it in a sorted folder beside the shoot, Save to picks another place, and a double-click on the file in the Finder opens the shoot. Older .photosort-index.zip files still open."
 }

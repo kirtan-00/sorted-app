@@ -9,7 +9,7 @@ All five shipped 21 September (docs/scan-resume-report.md).
 - [M] Resume a scan after the disk is unplugged or the Mac sleeps: keep a per-file done mark,
   on reopen say "2,080 of 4,315 scanned, continue?" and continue. This is exactly what bit
   Dhrumil (Part 1).
-- [S] A scan file (.photosort-index.zip) that is incomplete says so on load, with a Continue
+- [S] A project file (sorted_<shoot>.sorted) that is incomplete says so on load, with a Continue
   scan button, instead of quietly showing fewer items.
 - [S] Health line on the Scan tab: items on disk vs items scanned vs items with search ready,
   in plain words, with one button to fix the gap.
@@ -37,7 +37,7 @@ All five shipped 21 September (docs/scan-resume-report.md).
 ## 4. Search and understanding
 - [M] Faces on video: sample frames per scene, group with the same people, so "every clip of
   Dhaval" works. The biggest missing promise on the landing page.
-- [M] Person search across shoots: pick a saved person, search every scan file on this Mac.
+- [M] Person search across shoots: pick a saved person, search every project file on this Mac.
 - [M] Better video scene breakdown: one thumbnail strip per clip with the scene cuts, click a
   scene to jump; export a segment list (EDL/CSV) an editor can import.
 - [M] Text in frames (OCR on stills): signs, slates, name cards, so "find the shot with the
@@ -69,10 +69,12 @@ All five shipped 21 September (docs/scan-resume-report.md).
 - [M] Large-shoot mode above 20k items: paged grids, lazy thumbs, index in chunks.
 
 ## 7. Working together
-- [M] Hand-off: the scan file already travels; add "notes and picks" so an editor's selects
-  come back to the photographer in the same file.
+- DONE 2026-09-22: project file (sorted_<shoot>.sorted), Save/Save to/Open, double-click from
+  the Finder.
+- [M] Hand-off: add "notes and picks" so an editor's selects come back to the photographer in
+  the same file.
 - [M] Named people that travel between shoots (a people book on the Mac, opt-in per shoot).
-- [L] Two Macs, one disk: merge two scan files of the same shoot.
+- [L] Two Macs, one disk: merge two project files of the same shoot.
 
 ## 8. Business
 - [S] Pricing page on the site: one-time licence for the app, no subscription for compute;

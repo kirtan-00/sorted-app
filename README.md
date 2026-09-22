@@ -45,9 +45,10 @@ is only macOS asking whether the app may read the disk.
 ## First run
 
 1. The app opens on a welcome screen with two buttons. **Scan a disk or folder**: pick the shoot
-   (the disk or the folder with the day's cards) and the scan starts. **Load a scan file**: pick a
-   `.photosort-index.zip` someone gave you and skip the scan. Recent shoots are listed under the
-   buttons.
+   (the disk or the folder with the day's cards) and the scan starts. **Open a project file**: pick a
+   `sorted_<shoot>.sorted` someone gave you (an older `.photosort-index.zip` opens the same way) and
+   skip the scan. Double-clicking the file in the Finder does the same thing. Recent shoots are
+   listed under the buttons.
 2. Leave **Detect faces** ticked unless you are in a hurry (untick it, scan, and run
    **Detect faces now** later). A few thousand photos take a while; the progress bar is honest.
 3. Then:

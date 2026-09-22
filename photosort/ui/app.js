@@ -621,6 +621,7 @@
     renderFacesPending(null);
     resetReorganise();
     renderScanBar(); renderScanHealth(null);          // ===== resume: state.scan came with the folder reply =====
+    loadProject();                                     // ===== project file: the card for this shoot =====
     // ===== end per-folder reset =====
     // ===== navigation: a filter from the previous shoot means nothing here; the lists start at the top =====
     applyChips([]);
@@ -1183,14 +1184,14 @@
           return;
         }
         clearInterval(exportTimer); exportTimer = null;
-        // ===== save scan file: its own end line, the path in the Scan tab with Show in Finder =====
+        // ===== project file: its own end line, and the card shows the new place and time =====
         if (p.what === "bundle") {
-          if (p.error) { setStatus("could not save the scan file: " + p.error, true); return; }
-          renderBundleSaved(p.path);
-          setStatus("scan file saved to " + p.path + (p.failed ? " (" + p.failed + " thumbnails could not be read)" : ""), true);
+          loadProject();
+          if (p.error) { setStatus("could not save the project: " + p.error, true); return; }
+          setStatus("project saved: " + p.path + (p.failed ? " (" + p.failed + " thumbnails could not be read)" : ""), true);
           return;
         }
-        // ===== end save scan file =====
+        // ===== end project file =====
         loadExports();                                 // ===== export history: the row for this export =====
         if (p.error) { setStatus("export failed: " + p.error, true); return; }
         var written = p.done - p.failed - (p.skipped || 0);
@@ -2794,7 +2795,7 @@
           } else if (p.stage === "paused") {
             setStatus("scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
           } else {
-            setStatus("scan finished");
+            setStatus("scan finished. Save the project (command S) so it travels with the disk.", true);
           }
           // the index changed under us: refresh everything that shows it
           loadStats().then(function () { if (state.view === "index") loadScanHealth(); });   // ===== resume: the health line after a scan =====
@@ -2967,61 +2968,126 @@
     });
   }
 
-  // ===== save scan file anywhere: the native folder picker (POST /api/bundle/export/choose, opening on the export
-  // destination), then the export into the pick; the poller shows the path and a Show in Finder button at the end =====
-  var bundleOut = $("#bundle-out");
-  var bundleOutPath = $("#bundle-out-path");
+  // ===== the project file: sorted_<shoot>.sorted. The card on the Scan tab shows the name, where Save
+  // writes (a sorted folder beside the shoot, or the folder picked last time) and when it was last saved.
+  // Save project (command S) needs no picker; Save to runs the folder picker; Open project runs the file picker.
+  // A double-click on a project file in the Finder reaches the page through GET /api/launch at boot. =====
+  var projectName = $("#project-name"), projectDir = $("#project-dir"), projectState = $("#project-state");
+  var projectReveal = $("#bundle-reveal");
+  state.project = null;
   function revealPath(path) {
     return api("/api/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: path }) })
       .catch(function (err) { setStatus("could not show it in the Finder: " + err.message, true); });
   }
-  function renderBundleSaved(path) {
-    bundleOutPath.textContent = path || ""; bundleOutPath.title = path || "";
-    bundleOut.hidden = !path;
+  function shortDir(path) {
+    // /Volumes/Prod_02/sorted reads as Prod_02 › sorted; /Users/me/Documents/sorted as Documents › sorted
+    var parts = (path || "").split("/").filter(Boolean);
+    if (parts[0] === "Volumes") parts = parts.slice(1);
+    else if (parts[0] === "Users" && parts.length > 2) parts = parts.slice(2);
+    if (parts.length > 3) parts = ["…"].concat(parts.slice(-3));   // the folder name is the part that matters
+    return parts.length ? parts.join(" › ") : path;
   }
-  $("#bundle-reveal").addEventListener("click", function () { if (bundleOutPath.textContent) revealPath(bundleOutPath.textContent); });
+  function renderProject(info) {
+    state.project = info || null;
+    if (!info) { projectName.textContent = ""; projectDir.textContent = ""; projectState.textContent = ""; projectReveal.hidden = true; return; }
+    projectName.textContent = info.name;
+    projectDir.textContent = shortDir(info.dir); projectDir.title = info.dir;
+    projectReveal.hidden = !info.exists;
+    projectState.className = "project-state";
+    if (info.exists && info.saved_at) {
+      projectState.textContent = "Saved " + info.saved_at.slice(0, 16);
+      projectState.classList.add("saved");
+    } else if (info.exists) {
+      projectState.textContent = "Opened from this file";
+      projectState.classList.add("saved");
+    } else if (info.path) {
+      projectState.textContent = "The saved file is not there any more (was " + info.path + "). Save again.";
+      projectState.classList.add("stale");
+    } else {
+      projectState.textContent = "Not saved yet";
+    }
+  }
+  function loadProject() {
+    if (!(state.folder && state.folder.root)) { renderProject(null); return Promise.resolve(null); }
+    return api("/api/project").then(renderProject).catch(function () { renderProject(null); });
+  }
+  function saveProject() {
+    if (!(state.folder && state.folder.root)) { setStatus("open a shoot first"); return; }
+    setStatus("saving the project…", true);
+    api("/api/project/save", { method: "POST" }).then(function () {
+      pollExportProgress("saving the project");
+    }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
+  }
+  $("#project-save").addEventListener("click", saveProject);
+  projectReveal.addEventListener("click", function () { if (state.project && state.project.path) revealPath(state.project.path); });
   $("#bundle-export").addEventListener("click", function () {
     setStatus("waiting for the folder picker…", true);
-    renderBundleSaved(null);
     pickerPost("/api/bundle/export/choose").then(function (res) {
       if (!res) { setStatus("save cancelled"); return; }
-      setStatus("saving the scan file…", true);
-      pollExportProgress("saving the scan file");
-    }).catch(function (err) { setStatus("could not save the scan file: " + err.message, true); });
+      setStatus("saving the project…", true);
+      pollExportProgress("saving the project");
+    }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
   });
-  // ===== end save scan file =====
+  // command S saves the project from anywhere in the app (the browser's own Save page is never what anyone wants here)
+  document.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (state.folder && state.folder.root) saveProject();
+    }
+  });
 
+  function openedProject(info) {
+    applyFolderInfo(info);
+    // ===== resume: a project file of a half-scanned shoot says so, and the bar under the search offers Continue =====
+    if (info.scan && !info.scan.complete) {
+      setStatus("opened " + (info.name || info.root) + ": " + scanSummary(info.scan) + ". This project is incomplete; press Continue scan with the disk connected.", true);
+    } else {
+      setStatus("opened " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
+    }
+    // ===== end resume =====
+    settleFolder(info);
+  }
   function importBundle() {
-    setStatus("waiting for the scan file picker…", true);
+    setStatus("waiting for the file picker…", true);
     pickerPost("/api/bundle/import/choose").then(function (res) {
-      if (!res) { setStatus("load cancelled"); return null; }
+      if (!res) { setStatus("open cancelled"); return null; }
       if (!res.needs_root) return res;
       // Made on a Mac where the disk sat under another path: ask for the folder, then install under it.
-      setStatus("that scan file was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
+      setStatus("that project was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
       return pickerPost("/api/bundle/import/choose-root", { zip: res.zip }).then(function (r2) {
-        if (!r2) { setStatus("load cancelled, nothing was changed"); return null; }
+        if (!r2) { setStatus("open cancelled, nothing was changed"); return null; }
         return r2;
       });
     }).then(function (info) {
-      if (!info) return;
-      applyFolderInfo(info);
-      // ===== resume: a scan file of a half-scanned shoot says so, and the bar under the search offers Continue =====
-      if (info.scan && !info.scan.complete) {
-        setStatus("loaded " + (info.name || info.root) + ": " + scanSummary(info.scan) + ". This scan file is incomplete; press Continue scan with the disk connected.", true);
-      } else {
-        setStatus("loaded " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
-      }
-      // ===== end resume =====
-      settleFolder(info);
+      if (info) openedProject(info);
     }).catch(function (err) {
-      setStatus("could not load the scan file: " + err.message, true);
+      setStatus("could not open the project: " + err.message, true);
     });
   }
   $("#bundle-import").addEventListener("click", importBundle);
+  // The file a double-click handed the app: the same load as Open project, with the folder picker only when
+  // the shoot sits somewhere else on this Mac.
+  function openProjectFile(zip) {
+    setStatus("opening " + zip.split("/").pop() + "…", true);
+    return pickerPost("/api/bundle/import", { zip: zip }).then(function (info) {
+      if (info) openedProject(info);
+    }).catch(function (err) {
+      if (err.status === 400 && /not here/.test(err.message || "")) {
+        setStatus(err.message, true);
+        return pickerPost("/api/bundle/import/choose-root", { zip: zip }).then(function (r2) {
+          if (!r2) { setStatus("open cancelled, nothing was changed"); return; }
+          openedProject(r2);
+        }).catch(function (e2) { setStatus("could not open the project: " + e2.message, true); });
+      }
+      setStatus("could not open the project: " + err.message, true);
+      return null;
+    });
+  }
+  // ===== end project file =====
 
   // ===== welcome: the two buttons, the faces tick, the How it works link =====
   // Scan a disk or folder: the folder picker; a folder with nothing scanned yet starts the scan at once with the
-  // welcome's faces choice (mirrored into the Scan tab's box); a scanned one just opens. Load a scan file: importBundle.
+  // welcome's faces choice (mirrored into the Scan tab's box); a scanned one just opens. Open a project file: importBundle.
   var welcomeFaces = $("#welcome-faces");
   $("#welcome-scan").addEventListener("click", function () {
     openFolderPicker().then(function (info) {
@@ -3374,12 +3440,16 @@
 
   // ---------- boot ----------
   loadExportDest();
+  // ===== project file: a double-click in the Finder started the app with a file; open it first =====
+  api("/api/launch").then(function (l) { if (l && l.open) openProjectFile(l.open); }).catch(function () { /* older server */ });
+  // ===== end project file =====
   loadFolder().then(function (info) {
     loadRecent();
     if (!folderOpen(info)) {
       showView(state.view);
       return;
     }
+    loadProject();                                     // ===== project file: the card, whatever tab opens =====
     // ===== navigation boot: the view and filter come back from history.state (survives a reload) or the hash =====
     var entry = navBootEntry();
     if (entry) state.view = entry.view;

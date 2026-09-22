@@ -1201,7 +1201,7 @@ def test_bundle_export_endpoint_runs_to_completion(tmp_path, tmp_path_factory):
     p = _wait_export(c)
     assert p["error"] is None and p["done"] == 6 and p["total"] == 6 and p["failed"] == 0
     z = Path(p["path"])
-    assert z == disk.resolve() / f"{tmp_path.resolve().name}.photosort-index.zip" and z.is_file()
+    assert z == disk.resolve() / f"sorted_{tmp_path.resolve().name}.sorted" and z.is_file()
     assert inspect_bundle(z)["photos"] == 3
     assert TestClient(create_app(None)).post("/api/bundle/export").status_code == 400
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg"]
@@ -1248,7 +1248,7 @@ def test_bundle_export_dest_lands_there_and_refuses_the_shoot(tmp_path, tmp_path
     p = _wait_export(c)
     assert p["error"] is None and p["what"] == "bundle"
     z = Path(p["path"])
-    assert z == dest.resolve() / f"{tmp_path.resolve().name}.photosort-index.zip" and z.is_file()
+    assert z == dest.resolve() / f"sorted_{tmp_path.resolve().name}.sorted" and z.is_file()
     assert inspect_bundle(z)["photos"] == 2
     assert sorted(os.listdir(tmp_path)) == before
 
@@ -1263,10 +1263,10 @@ def test_bundle_export_choose_runs_the_picker_then_exports(tmp_path, tmp_path_fa
         return sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
     monkeypatch.setattr("photosort.server.subprocess.run", fake_run)
     assert c.post("/api/bundle/export/choose").status_code == 204          # cancelled: nothing started
-    from photosort.config import export_root
-    assert "choose folder" in scripts[-1] and f'default location (POSIX file "{export_root()}")' in scripts[-1]
+    # the picker opens on the project folder (a "sorted" folder beside the shoot), or the nearest folder that exists
+    assert "choose folder" in scripts[-1] and f'default location (POSIX file "{tmp_path.resolve().parent}")' in scripts[-1]
     assert c.get("/api/export/progress").json()["running"] is False
-    # an export destination on a disk that is not there must not block the picker (it opens on the Desktop folder)
+    # an export destination on a disk that is not there must not block the picker
     gone = tmp_path_factory.mktemp("gone") / "disk"; gone.mkdir()
     assert c.post("/api/export/destination", json={"path": str(gone)}).status_code == 200
     gone.rmdir()
@@ -1349,7 +1349,7 @@ def test_bundle_import_endpoint_400s_and_409s(tmp_path, tmp_path_factory):
     with zipfile.ZipFile(plain, "w") as zf:
         zf.writestr("hello.txt", "hi")
     r = c.post("/api/bundle/import", json={"zip": str(plain), "root": str(tmp_path)})
-    assert r.status_code == 400 and "not a photosort index bundle" in r.json()["detail"]
+    assert r.status_code == 400 and "not a sorted project file" in r.json()["detail"]
     r = c.post("/api/bundle/import", json={"zip": str(out / "missing.zip"), "root": str(tmp_path)})
     assert r.status_code == 400
     r = c.post("/api/bundle/import", json={"zip": str(z), "root": str(tmp_path / "nope")})
@@ -2292,3 +2292,53 @@ def test_bundle_import_reply_says_how_far_the_scan_got(tmp_path, tmp_path_factor
     r = other.post("/api/bundle/import", json={"zip": str(old), "root": str(tmp_path)})
     assert r.status_code == 200 and r.json()["scan"]["pending"] == 1 and r.json()["scan"]["complete"] is False
     assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+
+
+# ===== the project file: /api/project says the name and where Save goes; Save writes there without a picker;
+# the folder is remembered in the shoot's index; a double-click hands the file over once via /api/launch =====
+def test_project_info_save_and_remembered_folder(tmp_path, tmp_path_factory, monkeypatch):
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=2)
+    before = sorted(os.listdir(tmp_path))
+    info = c.get("/api/project").json()
+    assert info["name"] == f"sorted_{tmp_path.resolve().name}.sorted"
+    assert info["path"] is None and info["exists"] is False and info["saved_at"] is None
+    assert info["dir"] == str(tmp_path.resolve().parent / "sorted") == info["default_dir"]
+    r = c.post("/api/project/save")
+    assert r.status_code == 200, r.text
+    assert r.json()["dest"] == str(tmp_path.resolve().parent / "sorted")
+    p = _wait_export(c)
+    assert p["error"] is None and p["what"] == "bundle"
+    z = Path(p["path"])
+    assert z == tmp_path.resolve().parent / "sorted" / info["name"] and inspect_bundle(z)["photos"] == 2
+    info = c.get("/api/project").json()
+    assert info["path"] == str(z) and info["exists"] is True and info["saved_at"]
+    # Save to a picked folder: that folder is the one remembered from now on
+    dest = tmp_path_factory.mktemp("picked")
+    assert c.post("/api/bundle/export", json={"dest": str(dest)}).status_code == 200
+    p = _wait_export(c)
+    info = c.get("/api/project").json()
+    assert info["path"] == p["path"] and info["dir"] == str(dest.resolve())
+    # a shoot that is not open: 400, and nothing on the shoot disk changed
+    assert TestClient(create_app(None)).get("/api/project").status_code == 400
+    assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_opening_a_project_file_remembers_its_folder(tmp_path, tmp_path_factory, monkeypatch):
+    """Open project: Save then writes back beside the file that was opened, like any project file."""
+    c = _shoot_client(tmp_path, n=1)
+    dest = tmp_path_factory.mktemp("handed")
+    assert c.post("/api/bundle/export", json={"dest": str(dest)}).status_code == 200
+    z = Path(_wait_export(c)["path"])
+    home = tmp_path_factory.mktemp("home2"); monkeypatch.setenv("PHOTOSORT_HOME", str(home))
+    c2 = TestClient(create_app(None))
+    assert c2.post("/api/bundle/import", json={"zip": str(z)}).status_code == 200
+    info = c2.get("/api/project").json()
+    assert info["path"] == str(z.resolve()) and info["exists"] is True and info["dir"] == str(dest.resolve())
+
+
+def test_launch_hands_over_the_double_clicked_file_once(tmp_path):
+    c = TestClient(create_app(None, open_file=tmp_path / "sorted_x.sorted"))
+    assert c.get("/api/launch").json() == {"open": str(tmp_path / "sorted_x.sorted")}
+    assert c.get("/api/launch").json() == {"open": None}
+    assert TestClient(create_app(None)).get("/api/launch").json() == {"open": None}

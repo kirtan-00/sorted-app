@@ -145,7 +145,7 @@ class BundleZipReq(BaseModel):
 
 
 class BundleExportReq(BaseModel):
-    dest: str | None = None                 # folder the scan file goes in; None = the export destination
+    dest: str | None = None                 # folder the project file goes in; None = the export destination
 
 
 class RevealReq(BaseModel):
@@ -193,11 +193,14 @@ def _save_recent(path_str: str) -> None:
     p.write_text(json.dumps(recent[:RECENT_MAX]))
 
 
-def create_app(root: Path | None = None) -> FastAPI:
+def create_app(root: Path | None = None, open_file: Path | None = None) -> FastAPI:
+    """open_file: a project file a double-click (or "serve --project") handed us; the UI collects it once
+    from GET /api/launch and runs the same load as the Open project button."""
     root = Path(root) if root is not None else None
     app = FastAPI(title="photosort")
     state = {
         "root": root,
+        "open_file": str(open_file) if open_file else None,
         "index": Index(root) if root is not None else None,
         "progress": {"stage": "idle", "done": 0, "total": 0},
         "running": False,
@@ -1617,7 +1620,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     # destination, and the reverse: install such a zip here and open the shoot without re-indexing.
 
     def _start_bundle_export(dest: Path | None) -> dict:
-        """Pack the open shoot's index into <dest>/<shoot>.photosort-index.zip in the background.
+        """Pack the open shoot's index into <dest>/sorted_<shoot>.sorted in the background.
         dest None means the export destination. A dest that is the shoot root or inside it is refused
         (bundle_path raises), as is one that is not a folder."""
         from . import bundle
@@ -1626,7 +1629,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             if root_at_start is None:
                 raise HTTPException(400, "no folder open")
             if state["running"]:
-                raise HTTPException(409, "cannot save the scan file while scanning")
+                raise HTTPException(409, "cannot save the project while scanning")
             if state["export"]["running"]:
                 raise HTTPException(409, "an export is already running")
             if dest is None:
@@ -1652,7 +1655,9 @@ def create_app(root: Path | None = None) -> FastAPI:
         def _run_export():
             try:
                 with awake.hold():
-                    state["export"]["path"] = str(bundle.export_bundle(root_at_start, base, progress=prog))
+                    out = bundle.export_bundle(root_at_start, base, progress=prog)
+                    state["export"]["path"] = str(out)
+                    _remember_project(root_at_start, out)
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
@@ -1666,23 +1671,89 @@ def create_app(root: Path | None = None) -> FastAPI:
     def export_bundle_api(req: BundleExportReq | None = None):
         return _start_bundle_export(Path(req.dest) if req and req.dest else None)
 
+    # ===== the project file: sorted_<shoot>.sorted, saved to one remembered place (Save), or wherever
+    # the picker says (Save to). The place is kept in the shoot's own index (project_path), so the next
+    # Save, and the next Mac that loads the file, know where it lives. =====
+    def _remember_project(root: Path, path: Path, saved: bool = True) -> None:
+        """saved False: the file was opened, not written; the save time inside it (the other Mac's) stands."""
+        conn = db.connect(root)
+        try:
+            db.set_meta(conn, "project_path", str(path))
+            if saved:
+                db.set_meta(conn, "project_saved_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+        finally:
+            conn.close()
+
+    def _project_info(root: Path) -> dict:
+        """name: the file name for this shoot. path: where it was last saved or loaded from (None until then),
+        exists: that file is there right now. dir: where Save writes next (the remembered folder, else the
+        default beside the shoot). saved_at: the last save on this Mac."""
+        from . import bundle
+        conn = db.connect(root)
+        try:
+            remembered = db.get_meta(conn, "project_path")
+            saved_at = db.get_meta(conn, "project_saved_at")
+        finally:
+            conn.close()
+        rp = Path(remembered) if remembered else None
+        if rp is not None and rp.parent.is_dir():
+            d = rp.parent
+        else:
+            d = bundle.default_project_dir(root)
+        try:
+            bundle.bundle_path(root, d)
+        except ValueError:
+            d = Path.home() / "Documents" / "sorted"
+        return {"name": bundle.project_name(root), "path": str(rp) if rp else None,
+                "exists": bool(rp and rp.is_file()), "dir": str(d), "saved_at": saved_at,
+                "default_dir": str(bundle.default_project_dir(root))}
+
+    @app.get("/api/project")
+    def get_project():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        return _project_info(state["root"])
+
+    @app.post("/api/project/save")
+    def save_project():
+        """Save: the project file into its remembered folder (or the default beside the shoot), no picker.
+        The folder is created if need be."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        d = Path(_project_info(state["root"])["dir"])
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"cannot create {d}: {e.strerror or e}")
+        return _start_bundle_export(d)
+
     @app.post("/api/bundle/export/choose")
     def export_bundle_choose():
-        """The native folder picker, opening on ~/Desktop/photosort-out (created if need be, and never a
-        chosen export disk, which may be the one that is unplugged), then the export into the pick."""
+        """Save to: the native folder picker, opening on the project folder (or the nearest folder that
+        exists), then the export into the pick."""
         # Same gates as the export, checked up front so nobody sits through the picker for an error.
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
-            raise HTTPException(409, "cannot save the scan file while scanning")
+            raise HTTPException(409, "cannot save the project while scanning")
         if state["export"]["running"]:
             raise HTTPException(409, "an export is already running")
-        start = export_root(); start.mkdir(parents=True, exist_ok=True)
+        start = Path(_project_info(state["root"])["dir"])
+        while not start.is_dir() and start.parent != start:
+            start = start.parent
         quoted = str(start).replace("\\", "\\\\").replace('"', '\\"')
-        path_str = _run_picker(f'POSIX path of (choose folder with prompt "Where should the scan file go?" default location (POSIX file "{quoted}"))', "folder")
+        path_str = _run_picker(f'POSIX path of (choose folder with prompt "Save the project file where?" default location (POSIX file "{quoted}"))', "folder")
         if path_str is None:
             return Response(status_code=204)
         return _start_bundle_export(Path(path_str))
+
+    @app.get("/api/launch")
+    def launch_request():
+        """The project file the app was started with (a double-click in the Finder), once: the UI loads it
+        the way Open project does, and a reload of the page does not load it again."""
+        f = state["open_file"]; state["open_file"] = None
+        return {"open": f}
+    # ===== end project file =====
 
     @app.post("/api/reveal")
     def reveal(req: RevealReq):
@@ -1701,9 +1772,9 @@ def create_app(root: Path | None = None) -> FastAPI:
     def _import_gates() -> None:
         # Same gates as _switch_root, checked up front so nobody sits through a picker for a 409.
         if state["running"]:
-            raise HTTPException(409, "cannot load a scan file while scanning")
+            raise HTTPException(409, "cannot open a project while scanning")
         if state["export"]["running"]:
-            raise HTTPException(409, "cannot load a scan file while an export is running")
+            raise HTTPException(409, "cannot open a project while an export is running")
 
     def _run_picker(script: str, what: str) -> str | None:
         """POSIX path from a macOS picker, or None when the user cancelled."""
@@ -1735,8 +1806,9 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(400, str(e))
         except sqlite3.Error:
             # index.db is in the zip but is not a SQLite file; import_bundle already removed its temp dir.
-            raise HTTPException(400, "that scan file is not readable")
+            raise HTTPException(400, "that project file is not readable")
         out = _switch_root(root)
+        _remember_project(root, zip_path.resolve(), saved=False)   # Save writes back beside the file that was opened
         # scan: from the installed index itself (an older bundle has no "scan" in its bundle.json), so the
         # UI can say "2,080 of 4,315 scanned, continue?" instead of quietly showing fewer items.
         scan = _scan_block(db.connect(root))
@@ -1746,7 +1818,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.post("/api/bundle/import/choose")
     def import_bundle_choose():
         _import_gates()
-        path_str = _run_picker('POSIX path of (choose file with prompt "Pick a scan file (.photosort-index.zip)" of type {"public.zip-archive"})', "bundle")
+        path_str = _run_picker('POSIX path of (choose file with prompt "Open a sorted project file (sorted_<shoot>.sorted)")', "project file")
         if path_str is None:
             return Response(status_code=204)
         zip_path = Path(path_str)

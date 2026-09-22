@@ -14,3 +14,4 @@ docs/site-screens/
 .uv/
 install.log
 BUILD
+.claude/

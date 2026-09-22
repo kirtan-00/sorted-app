@@ -163,7 +163,8 @@ def cmd_serve(a):
     import uvicorn, webbrowser, threading
     from .server import create_app
     folder = Path(a.folder) if a.folder else None
-    app = create_app(folder)
+    project = Path(a.project).expanduser() if getattr(a, "project", None) else None
+    app = create_app(folder, open_file=project)
     port = free_port(a.port)
     if port != a.port:
         sys.stderr.write(f"port {a.port} busy, using {port}\n")
@@ -208,7 +209,9 @@ def main(argv=None):
     s.add_argument("--include-raw", action="store_true"); s.add_argument("--web-size", type=int, default=None, help="long edge in px for photos")
     s.add_argument("--skip-videos", action="store_true", help="with --web-size: leave videos out"); s.set_defaults(fn=cmd_drive_export)
     s = sub.add_parser("serve"); s.add_argument("folder", nargs="?", help="photo folder; omit to open the picker in the app")
-    s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true"); s.set_defaults(fn=cmd_serve)
+    s.add_argument("--port", type=int, default=7777); s.add_argument("--open", action="store_true")
+    s.add_argument("--project", help="a sorted_<shoot>.sorted file to open as soon as the page loads (what a double-click in the Finder passes)")
+    s.set_defaults(fn=cmd_serve)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__":
