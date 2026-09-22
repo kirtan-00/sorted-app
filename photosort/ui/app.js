@@ -33,6 +33,8 @@
     shootTotal: 0,              // photos + videos from /api/stats, the M in "31 of 777 match"
     // ===== end combined filters =====
     searches: { recent: [], saved: [] },   // ===== search history: /api/searches, per shoot =====
+    days: [],                              // ===== days: /api/days, the shoot day by day =====
+    places: null,                          // ===== places: /api/places, the piles the map draws =====
     showCopies: false,          // ===== duplicates and bursts: false folds each set into one tile (fold=1), true shows every copy and frame =====
     folded: 0,                  // how many rows the folded tiles are hiding, from the last search
     scroll: {},                 // view name -> main.scrollTop when the user left it
@@ -141,7 +143,7 @@
     if (!t || !t.name && !t.id) return;
     var f = { id: t.id || "", name: t.name || "" };
     if (t.type === "checkbox" || t.type === "radio") f.value = t.type === "radio" ? t.value : t.checked;
-    else if (t.tagName === "SELECT") f.value = t.name === "person" || t.id === "person-select" || t.id === "recent-folders" ? (t.value ? "set" : "cleared") : t.value;
+    else if (t.tagName === "SELECT") f.value = t.name === "person" || t.id === "person-select" ? (t.value ? "set" : "cleared") : t.value;
     else if (t.type === "range" || t.type === "number") f.value = Number(t.value);
     else f.chars = (t.value || "").length;             // a text field: only how much was typed
     track("filter", f);
@@ -193,7 +195,7 @@
     if (switching) state.scroll[state.view] = mainEl.scrollTop;
     // ===== end scroll memory =====
     state.view = name;
-    // ===== nav selector: only the four view buttons; the "Check focus" link also lives in <nav> =====
+    // ===== nav selector: only the five view buttons; the "Check focus" link also lives in <nav> =====
     $$("header nav button[data-view]").forEach(function (b) {
       b.classList.toggle("on", b.dataset.view === name);
     });
@@ -215,6 +217,7 @@
     if (name === "people" && state.people.length === 0) loadPeople();
     if (name === "people") { loadReferences(); loadSuggestions(); }   // loadSuggestions: the "same person?" block below
     if (name === "categories") loadCategories();
+    if (name === "places") loadPlaces();               // ===== places: the map and the city list load on the first visit =====
     if (name === "index") loadScanHealth();            // ===== resume: the health line walks the disk when the tab opens =====
     mountDriveStrip();                                 // ===== Google Drive: the strip sits under whichever export row is showing =====
   }
@@ -237,9 +240,9 @@
   var ctxCount = $("#ctx-count");
   var ctxClearBtn = $("#ctx-clear");
   var viewSearch = $("#view-search");
-  var VIEWS = ["search", "people", "categories", "index"];
-  var TAB_NAMES = { people: "People", categories: "Categories" };
-  var CHIP_KINDS = ["person", "saved", "category", "cluster", "drone", "kind", "hide_bad", "hide_soft"];
+  var VIEWS = ["search", "people", "categories", "places", "index"];
+  var TAB_NAMES = { people: "People", categories: "Categories", places: "Places" };
+  var CHIP_KINDS = ["person", "saved", "category", "cluster", "day", "place", "drone", "kind", "hide_bad", "hide_soft"];
   try { history.scrollRestoration = "manual"; } catch (e) { /* not supported */ }
 
   function chipsKey(chips) { return JSON.stringify((chips || []).map(function (c) { return [c.kind, c.key]; })); }
@@ -260,6 +263,8 @@
       if (c.kind === "person") out.person = c.key;
       else if (c.kind === "category") out.category = c.key;
       else if (c.kind === "cluster") out.cluster = c.key;
+      else if (c.kind === "day") out.day = c.key;
+      else if (c.kind === "place") out.bbox = c.key;
       else if (c.kind === "drone") out.aerial = 1;
       else if (c.kind === "kind") out.kind = c.key;
       else if (c.kind === "hide_bad") out.hide_bad = 1;
@@ -274,6 +279,8 @@
     if (fd.get("person")) out.push({ kind: "person", key: Number(fd.get("person")), from: null });
     if (fd.get("category")) out.push({ kind: "category", key: fd.get("category"), from: null });
     if (fd.get("cluster")) out.push({ kind: "cluster", key: fd.get("cluster"), from: null });
+    if (fd.get("day")) out.push({ kind: "day", key: fd.get("day"), from: null });
+    if (fd.get("bbox")) out.push({ kind: "place", key: fd.get("bbox"), from: null });
     if (fd.get("aerial")) out.push({ kind: "drone", key: "drone", from: null });
     if (fd.get("kind")) out.push({ kind: "kind", key: fd.get("kind"), from: null });
     if (fd.get("hide_bad")) out.push({ kind: "hide_bad", key: "hide_bad", from: null });
@@ -305,6 +312,8 @@
     personSelect.value = c("person") ? String(c("person").key) : "";
     $("#category-filter").value = c("category") ? c("category").key : "";
     $("#cluster-filter").value = c("cluster") ? c("cluster").key : "";
+    $("#day-filter").value = c("day") ? c("day").key : "";
+    $("#bbox-filter").value = c("place") ? c("place").key : "";
     aerialOnly.checked = !!c("drone");
     var k = c("kind") ? c("kind").key : "";
     $$('#kind-select input[name="kind"]').forEach(function (r) { r.checked = r.value === k; });
@@ -322,6 +331,8 @@
     if (c.kind === "person") return personLabel(personById(c.key), c.key);
     if (c.kind === "cluster") return "discovered: " + (/^group \d+$/.test(c.key) ? "Unnamed " + c.key : c.key);
     if (c.kind === "kind") return c.key;
+    if (c.kind === "day") return dayLabel(c.key);
+    if (c.kind === "place") return boxLabel(c.key);
     if (c.kind === "hide_bad") return "no out of focus";
     if (c.kind === "hide_soft") return "no soft";
     return c.key;
@@ -331,6 +342,8 @@
     if (c.kind === "category") return "only the " + c.key + " category";
     if (c.kind === "cluster") return "only the discovered category " + c.key;
     if (c.kind === "drone") return "only drone shots";
+    if (c.kind === "day") return "only what was shot on " + dayLabel(c.key);
+    if (c.kind === "place") return "only what was shot around " + boxLabel(c.key);
     if (c.kind === "kind") return "only " + c.key;
     if (c.kind === "hide_bad") return "the focus check's out-of-focus rows are hidden";
     return "the focus check's soft rows are hidden too";
@@ -343,6 +356,7 @@
   // The bar: Back, one chip per filter with its own x, "31 of 777 match", Clear filters.
   function renderCtxBar() {
     var chips = state.chips;
+    renderDays();                                      // ===== days: the row for the day in force is lit =====
     ctxBar.hidden = !chips.length;
     viewSearch.classList.toggle("has-ctx", chips.length > 0);
     $$("header nav button[data-view]").forEach(function (b) {
@@ -533,7 +547,6 @@
 
   // ---------- folder ----------
   var folderNameEl = $("#folder-name");
-  var recentSelect = $("#recent-folders");
 
   function applyFolderInfo(info) {
     state.folder = info || { root: null, name: null, indexed: false };
@@ -548,7 +561,7 @@
   var welcomeDisk = $("#welcome-disk");
   function setWelcomeFrame(hasFolder) {
     document.body.classList.toggle("nofolder", !hasFolder);
-    ["header nav", "#folderbar", "#exportbar", "#inspector-toggle"].forEach(function (sel) {
+    ["header nav", "#shootbar", "#exportbar", "#inspector-toggle"].forEach(function (sel) {
       var el = $(sel);
       if (el) el.inert = !hasFolder;
     });
@@ -578,28 +591,143 @@
     }).catch(function () { /* non-fatal */ });
   }
 
-  function renderRecent() {
-    recentSelect.innerHTML = '<option value="">recent&hellip;</option>';
+  // ===== the shoots menu: the toolbar button is the open shoot's name, and it drops every shoot this Mac
+  // knows as a row (name, path, what is indexed, whether a project file was saved), then the three ways in to
+  // another one. /api/folder/recent carries the facts, so a row needs no extra call. Keyboard: arrow keys walk
+  // the rows and the actions, Enter runs one, Escape closes, a click outside closes. Not a native select. =====
+  var shootBtn = $("#shoot-menu-btn"), shootMenu = $("#shoot-menu"), shootList = $("#shoot-list");
+  var smItems = [];                                    // rows then actions, in the order the arrows walk them
+  var TICK_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.3l2.6 2.6L10 3.5"/></svg>';
+
+  function shootCounts(r) {
+    if (!r.items) return r.missing ? "not scanned here" : "nothing scanned yet";
+    var parts = [];
+    if (r.photos) parts.push(r.photos + (r.photos === 1 ? " photo" : " photos"));
+    if (r.videos) parts.push(r.videos + (r.videos === 1 ? " clip" : " clips"));
+    return parts.join(", ");
+  }
+  function shootNote(r) {
+    if (r.missing) return (r.disk || "the disk") + " not connected";
+    return r.project ? "project saved" : "no project file";
+  }
+  function renderShootRows() {
+    var counter = $("#sm-count");
+    if (counter) counter.textContent = state.recent.length > 7 ? String(state.recent.length) : "";
+    // a refresh mid-walk keeps the keyboard on the same shoot, not the same slot: the list can reorder
+    var was = smItems.indexOf(document.activeElement);
+    var wasPath = was >= 0 && smItems[was].dataset ? smItems[was].dataset.path : null;
+    shootList.innerHTML = "";
+    if (!state.recent.length) {
+      var e = document.createElement("div"); e.className = "sm-empty";
+      e.textContent = "No shoot has been opened on this Mac yet";
+      shootList.appendChild(e);
+      smRestore(was, wasPath);
+      return;
+    }
     state.recent.forEach(function (r) {
-      var opt = document.createElement("option");
-      opt.value = r.path;
-      opt.textContent = r.name || r.path;
-      recentSelect.appendChild(opt);
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "sm-row"; b.dataset.path = r.path;
+      if (r.open) b.classList.add("on");
+      if (r.missing) b.classList.add("missing");
+      b.title = r.missing
+        ? r.path + " is not on this Mac right now; connect " + (r.disk || "the disk") + " and open it again"
+        : (r.open ? "this shoot is open: " : "open this shoot: ") + r.path;
+      var tick = document.createElement("span"); tick.className = "sm-tick";
+      if (r.open) tick.innerHTML = TICK_SVG;
+      var main = document.createElement("span"); main.className = "sm-main";
+      var name = document.createElement("span"); name.className = "sm-name"; name.textContent = r.name || r.path;
+      var path = document.createElement("span"); path.className = "sm-path filename"; path.textContent = r.path;
+      main.appendChild(name); main.appendChild(path);
+      var facts = document.createElement("span"); facts.className = "sm-facts";
+      var count = document.createElement("span"); count.className = "sm-count"; count.textContent = shootCounts(r);
+      var note = document.createElement("span"); note.className = "sm-note"; note.textContent = shootNote(r);
+      if (r.missing) note.classList.add("warn");
+      facts.appendChild(count); facts.appendChild(note);
+      b.appendChild(tick); b.appendChild(main); b.appendChild(facts);
+      b.addEventListener("click", function () {
+        if (r.missing) {
+          closeShootMenu();
+          setStatus(r.name + " is not on this Mac right now; connect " + (r.disk || "the disk") + " and open it again", true);
+          return;
+        }
+        closeShootMenu();
+        if (r.open) return;
+        switchFolder(r.path);
+      });
+      shootList.appendChild(b);
     });
-    recentSelect.value = "";
-    // ===== welcome: the same folders as small links under the two buttons =====
+    smRestore(was, wasPath);
+  }
+  function smRestore(was, wasPath) {
+    smCollect();
+    if (was < 0 || shootMenu.hidden) return;
+    var again = wasPath ? smItems.map(function (el) { return el.dataset.path || ""; }).indexOf(wasPath) : -1;
+    smFocus(again >= 0 ? again : was);
+  }
+  function smCollect() {
+    smItems = $$(".sm-row", shootMenu).concat($$(".sm-action", shootMenu));
+  }
+  function smFocus(i) {
+    if (!smItems.length) return;
+    var k = Math.max(0, Math.min(i, smItems.length - 1));
+    smItems[k].focus();
+  }
+  function smIndex() { return smItems.indexOf(document.activeElement); }
+  function openShootMenu(focusFirst) {
+    shootMenu.hidden = false;
+    shootBtn.setAttribute("aria-expanded", "true");
+    renderShootRows();
+    if (focusFirst) smFocus(0);
+    loadRecent();                                      // fresh counts: a scan may have finished since the last load
+  }
+  function closeShootMenu(toButton) {
+    if (shootMenu.hidden) return;
+    shootMenu.hidden = true;
+    shootBtn.setAttribute("aria-expanded", "false");
+    if (toButton) shootBtn.focus();
+  }
+  shootBtn.addEventListener("click", function () {
+    if (shootMenu.hidden) openShootMenu(false); else closeShootMenu();
+  });
+  shootBtn.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") { e.preventDefault(); if (shootMenu.hidden) openShootMenu(true); else smFocus(0); }
+    else if (e.key === "Escape" && !shootMenu.hidden) { e.preventDefault(); e.stopPropagation(); closeShootMenu(); }
+  });
+  shootMenu.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") { e.preventDefault(); smFocus(smIndex() + 1); return; }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (smIndex() <= 0) closeShootMenu(true); else smFocus(smIndex() - 1);
+      return;
+    }
+    if (e.key === "Home") { e.preventDefault(); smFocus(0); return; }
+    if (e.key === "End") { e.preventDefault(); smFocus(smItems.length - 1); return; }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeShootMenu(true); return; }
+    if (e.key === "Tab") closeShootMenu();
+  });
+  document.addEventListener("mousedown", function (e) {
+    if (shootMenu.hidden) return;
+    if (shootBtn.contains(e.target) || shootMenu.contains(e.target)) return;
+    closeShootMenu();
+  });
+
+  function renderRecent() {
+    if (!shootMenu.hidden) renderShootRows();
+    // ===== welcome: the same shoots as small links under the two buttons =====
     var box = $("#welcome-recent");
     $$(".link", box).forEach(function (b) { b.remove(); });
-    state.recent.forEach(function (r) {
+    var rows = state.recent.filter(function (r) { return !r.open; });
+    rows.forEach(function (r) {
       var b = document.createElement("button");
       b.type = "button"; b.className = "link small";
       b.textContent = r.name || r.path; b.title = r.path;
       b.addEventListener("click", function () { switchFolder(r.path); });
       box.appendChild(b);
     });
-    box.hidden = state.recent.length === 0;
+    box.hidden = rows.length === 0;
     // ===== end welcome =====
   }
+  // ===== end the shoots menu =====
 
   // Reached after any folder switch: reset per-folder UI state, then either land
   // on the Index tab (fresh folder, nothing indexed yet) or refresh the current view.
@@ -630,6 +758,8 @@
     state.scroll = {};
     // ===== end navigation =====
     closeHistory(); loadSearches();                   // ===== search history: the new shoot's list =====
+    daysAll = false; loadDays();                     // ===== days: the new shoot's days =====
+    state.places = null; placeCount();                // ===== places: the count next to the tab; the map itself loads on the first visit =====
     state.showCopies = false;                          // ===== duplicates and bursts: folded again on a new shoot =====
     if ($("#show-copies")) $("#show-copies").checked = false;
     loadPrefs(); loadExports();                        // ===== export presets and history: this shoot's =====
@@ -743,11 +873,12 @@
     });
   });
 
-  $("#open-folder").addEventListener("click", openFolderPicker);
-  recentSelect.addEventListener("change", function () {
-    var path = recentSelect.value;
-    if (path) switchFolder(path);
-  });
+  // ===== the shoots menu: its three ways in. Open a folder opens what is picked (a folder with nothing
+  // scanned lands on the Scan tab); Scan another folder picks one and starts the scan there and then;
+  // Open a project file is the file picker. All three are the code paths the welcome screen already uses. =====
+  $("#sm-open-folder").addEventListener("click", function () { closeShootMenu(); openFolderPicker(); });
+  $("#sm-open-project").addEventListener("click", function () { closeShootMenu(); importBundle(); });
+  $("#sm-scan-another").addEventListener("click", function () { closeShootMenu(); scanAnotherFolder(); });
 
   // ---------- search ----------
   var form = $("#q");
@@ -787,6 +918,10 @@
     if (kind) params.kind = kind;
     var cluster = fd.get("cluster");
     if (cluster) params.cluster = cluster;
+    // ===== sort: the order of an unsearched grid. A query ranks by match, so the control is greyed out then. =====
+    var sort = fd.get("sort");
+    if (sort) params.sort = sort;
+    // ===== end sort =====
     if (fd.get("aerial")) params.aerial = 1;
     // ===== focus filters: hide_bad drops the bad rows, hide_soft drops soft and bad; unchecked rows are never hidden =====
     if (fd.get("hide_bad")) params.hide_bad = 1;
@@ -796,6 +931,438 @@
   }
 
   function num(x) { return Number(x).toLocaleString("en-US"); }
+
+  // ===== sort =====
+  // Bytes the way a person reads them: 4.2 GB, 812 MB, 96 KB.
+  function bytes(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + " GB";
+    if (n >= 1e6) return Math.round(n / 1e6) + " MB";
+    if (n >= 1e3) return Math.round(n / 1e3) + " KB";
+    return n + " B";
+  }
+  function shortDate(s) {
+    if (!s) return "";
+    var t = String(s).replace(" ", "T");
+    var day = dayLabel(t.slice(0, 10));
+    var hm = t.slice(11, 16);
+    return hm ? day + " " + hm : day;
+  }
+  // What a tile shows while a sort is on: the very fact it is ordered by, or nothing on the default order.
+  function sortStamp(r, sort) {
+    if (sort === "newest") return shortDate(r.when || r.taken_at);
+    if (sort === "biggest" || sort === "smallest") return bytes(r.size);
+    if (sort === "longest") return r.kind === "video" ? mmss(r.duration) : "still";
+    if (sort === "name") return (r.rel || "").split("/").pop();
+    return "";
+  }
+  var SORT_WORDS = { newest: "newest first", biggest: "biggest first", smallest: "smallest first",
+                     name: "by file name", longest: "longest clip first" };
+  var sortSel = $("#sort-select");
+  // A text or image query scores every photo, so any other order would throw the query away. Say so rather
+  // than quietly ignoring the control.
+  function syncSortControl(ranked) {
+    sortSel.disabled = ranked;
+    sortSel.title = ranked ? "a search comes back best match first; clear the search to sort"
+                           : "the order of the grid";
+  }
+  // ===== end sort =====
+
+  // ===== days: the shoot broken into shooting days in the sidebar. One row per day with a count; clicking a
+  // row is a day chip like any other filter, so Back and Clear filters work on it unchanged. =====
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function dayLabel(iso) {
+    var p = String(iso).split("-");
+    if (p.length !== 3) return iso;
+    var m = MONTHS[Number(p[1]) - 1];
+    return m ? Number(p[2]) + " " + m : iso;
+  }
+  // A box chip reads as the place at the middle of it, which is what the person clicked.
+  function boxLabel(key) {
+    var p = String(key).split(",").map(Number);
+    if (p.length !== 4 || p.some(isNaN)) return key;
+    return placeName((p[0] + p[2]) / 2, (p[1] + p[3]) / 2);
+  }
+  var daysGroup = $("#days-group"), daysList = $("#days-list"), daysCount = $("#days-count");
+  var DAYS_SHOWN = 8;
+  var daysAll = false;
+  function loadDays() {
+    if (!(state.folder && state.folder.root)) { state.days = []; renderDays(); return Promise.resolve(); }
+    return api("/api/days").then(function (d) {
+      state.days = d.days || [];
+      renderDays();
+    }).catch(function () { /* the list is a convenience; a failed load leaves the old one */ });
+  }
+  function renderDays() {
+    if (!daysGroup) return;                            // renderCtxBar can run before this block is set up
+    var days = state.days || [];
+    daysList.innerHTML = "";
+    daysGroup.hidden = daysList.hidden = days.length < 2;   // one day is not a timeline
+    if (days.length < 2) return;
+    daysCount.textContent = String(days.length);
+    var on = chipOf("day");
+    var shown = daysAll ? days : days.slice(0, DAYS_SHOWN);
+    shown.forEach(function (d) {
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = "day-row" + (on && on.key === d.day ? " on" : "");
+      row.title = num(d.n) + " files, " + bytes(d.bytes) + (d.videos ? ", " + num(d.videos) + " clips" : "");
+      var name = document.createElement("span");
+      name.className = "day-name"; name.textContent = dayLabel(d.day);
+      var n = document.createElement("span");
+      n.className = "day-n mono"; n.textContent = num(d.n);
+      row.appendChild(name); row.appendChild(n);
+      row.addEventListener("click", function () { pickDay(d.day); });
+      daysList.appendChild(row);
+    });
+    if (days.length > DAYS_SHOWN) {
+      var more = document.createElement("button");
+      more.type = "button"; more.className = "link small days-more";
+      more.textContent = daysAll ? "Show fewer" : "Show all " + days.length;
+      more.addEventListener("click", function () { daysAll = !daysAll; renderDays(); });
+      daysList.appendChild(more);
+    }
+  }
+  // Clicking the day already on takes it off again, the way the category tiles behave.
+  function pickDay(day) {
+    var on = chipOf("day");
+    var next = (on && on.key === day) ? state.chips.filter(function (c) { return c.kind !== "day"; })
+                                      : addChip({ kind: "day", key: day, from: null });
+    applyChips(next);
+    runSearch(ctxParams(state.chips));
+    navPush();
+  }
+  // ===== end days =====
+
+  // ===== places: where the shoot was shot, drawn on a canvas. The world outline (Natural Earth 1:110m,
+  // public domain) and the city list (Natural Earth 1:10m populated places) ship with the app as two small
+  // files, so the map draws with no tile server and no network call of any kind. A pile of photographs is a
+  // 25 km cell; clicking one filters Search to the box it covers. =====
+  var placesWrap = $("#places-wrap"), placesCanvas = $("#places-map"), placesTip = $("#places-tip");
+  var placesEmpty = $("#places-empty"), placeRows = $("#place-rows"), placesSummary = $("#places-summary");
+  var placesScale = $("#places-scale"), placesScaleText = $("#places-scale-text");
+  var world = null, cities = null;                     // loaded once, on the first visit to the tab
+  var mapView = { lat: 20, lon: 0, k: 2 };             // k: pixels per degree of longitude
+  var mapDrag = null, mapBox = null, mapHot = null;
+
+  function loadAsset(name, into) {
+    return fetch("/ui/" + name).then(function (r) { return r.json(); }).then(into).catch(function () { /* the map simply draws without it */ });
+  }
+  // The counts alone, for the number next to the tab. The two map assets wait for the first visit.
+  function placeCount() {
+    if (!(state.folder && state.folder.root)) { state.places = null; return Promise.resolve(); }
+    return api("/api/places").then(function (d) { state.places = d; renderPlaces(); })
+      .catch(function () { state.places = null; });
+  }
+  function loadPlaces() {
+    var first = world === null;
+    var waits = [];
+    if (first) {
+      waits.push(loadAsset("world.json", function (d) { world = d; }));
+      waits.push(loadAsset("places.json", function (d) { cities = d; }));
+    }
+    waits.push(api("/api/places").then(function (d) { state.places = d; }).catch(function () { state.places = null; }));
+    return Promise.all(waits).then(function () {
+      renderPlaces();
+      if (first && state.places && state.places.bounds) fitMap();
+    });
+  }
+  // The nearest city to a point, and how far off it is. Names come from the shipped list only: nothing is
+  // looked up, so a place in open country is named after the town it is nearest to, with "near" in front.
+  function nearestCity(lat, lon) {
+    if (!cities || !cities.places || !cities.places.length) return null;
+    var sc = cities.scale, best = null, bestD = Infinity;
+    var cosLat = Math.cos(lat * Math.PI / 180);
+    for (var i = 0; i < cities.places.length; i++) {
+      var c = cities.places[i];
+      var dy = c[2] / sc - lat, dx = (c[3] / sc - lon) * cosLat;
+      var d = dy * dy + dx * dx;
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    if (!best) return null;
+    return { name: best[0], country: best[1], km: Math.sqrt(bestD) * 111.0 };
+  }
+  function placeName(lat, lon) {
+    var c = nearestCity(lat, lon);
+    if (!c) return lat.toFixed(3) + ", " + lon.toFixed(3);
+    if (c.km <= 12) return c.name;
+    if (c.km <= 120) return "near " + c.name;
+    return c.country || (lat.toFixed(2) + ", " + lon.toFixed(2));
+  }
+  function placeWhere(lat, lon) {
+    var c = nearestCity(lat, lon);
+    return c && c.country ? c.country : lat.toFixed(3) + ", " + lon.toFixed(3);
+  }
+
+  // ===== the projection: plate carree, one scale for both axes, so the outline and the points agree =====
+  function mapSize() {
+    return { w: placesCanvas.clientWidth || 800, h: placesCanvas.clientHeight || 400 };
+  }
+  function toX(lon, s) { return (lon - mapView.lon) * mapView.k + s.w / 2; }
+  function toY(lat, s) { return (mapView.lat - lat) * mapView.k + s.h / 2; }
+  function toLon(x, s) { return (x - s.w / 2) / mapView.k + mapView.lon; }
+  function toLat(y, s) { return mapView.lat - (y - s.h / 2) / mapView.k; }
+  function clampView() {
+    var s = mapSize();
+    mapView.k = Math.max(s.w / 360, Math.min(mapView.k, 40000));
+    mapView.lat = Math.max(-85, Math.min(85, mapView.lat));
+    mapView.lon = Math.max(-180, Math.min(180, mapView.lon));
+  }
+  function fitMap() {
+    var b = state.places && state.places.bounds;
+    var s = mapSize();
+    if (!b) { mapView = { lat: 20, lon: 0, k: s.w / 360 }; drawMap(); return; }
+    var dLat = Math.max(b.north - b.south, 0.02), dLon = Math.max(b.east - b.west, 0.02);
+    mapView.lat = (b.north + b.south) / 2;
+    mapView.lon = (b.east + b.west) / 2;
+    mapView.k = Math.min(s.h / (dLat * 1.6), s.w / (dLon * 1.6));
+    clampView(); drawMap();
+  }
+  function worldMap() {
+    var s = mapSize();
+    mapView = { lat: 12, lon: 20, k: s.w / 360 };
+    drawMap();
+  }
+
+  // Blue for a handful, amber for a pile, white for the place the shoot actually happened.
+  function heatColour(t) {
+    var stops = [[38, 96, 160], [38, 128, 235], [217, 164, 65], [255, 240, 214]];
+    var f = Math.max(0, Math.min(0.999, t)) * (stops.length - 1);
+    var i = Math.floor(f), m = f - i, a = stops[i], b = stops[i + 1];
+    return "rgb(" + Math.round(a[0] + (b[0] - a[0]) * m) + "," + Math.round(a[1] + (b[1] - a[1]) * m) + "," +
+           Math.round(a[2] + (b[2] - a[2]) * m) + ")";
+  }
+
+  function drawMap() {
+    var s = mapSize();
+    var dpr = window.devicePixelRatio || 1;
+    placesCanvas.width = Math.round(s.w * dpr); placesCanvas.height = Math.round(s.h * dpr);
+    var g = placesCanvas.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = "#0d0f12"; g.fillRect(0, 0, s.w, s.h);
+    // the land
+    if (world) {
+      g.lineWidth = 1; g.strokeStyle = "rgba(255,255,255,0.22)"; g.fillStyle = "rgba(255,255,255,0.055)";
+      var sc = world.scale;
+      for (var r = 0; r < world.rings.length; r++) {
+        var ring = world.rings[r];
+        g.beginPath();
+        for (var i = 0; i < ring.length; i += 2) {
+          var x = toX(ring[i] / sc, s), y = toY(ring[i + 1] / sc, s);
+          if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+        }
+        g.closePath(); g.fill(); g.stroke();
+      }
+    }
+    var clusters = (state.places && state.places.clusters) || [];
+    if (!clusters.length) { drawScale(g, s); return; }
+    var maxN = clusters[0].n || 1;
+    // the heat: every pile as a soft additive pool, so two piles near each other read as one warm area
+    g.globalCompositeOperation = "lighter";
+    clusters.forEach(function (c) {
+      var t = Math.sqrt(c.n / maxN);
+      var x = toX(c.lon, s), y = toY(c.lat, s);
+      var rad = Math.max(14, Math.min(90, 14 + 60 * t));
+      var grd = g.createRadialGradient(x, y, 0, x, y, rad);
+      grd.addColorStop(0, "rgba(255,190,90," + (0.30 + 0.45 * t).toFixed(3) + ")");
+      grd.addColorStop(1, "rgba(38,128,235,0)");
+      g.fillStyle = grd;
+      g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
+    });
+    g.globalCompositeOperation = "source-over";
+    // the cores, with a count on the ones worth naming
+    clusters.forEach(function (c) {
+      var t = Math.sqrt(c.n / maxN);
+      var x = toX(c.lon, s), y = toY(c.lat, s), rad = 2.5 + 6 * t;
+      g.fillStyle = heatColour(t);
+      g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
+      if (mapHot === c) {
+        g.strokeStyle = "rgba(255,255,255,0.9)"; g.lineWidth = 1.5;
+        g.beginPath(); g.arc(x, y, rad + 4, 0, Math.PI * 2); g.stroke();
+      }
+    });
+    // the box being dragged
+    if (mapBox) {
+      g.strokeStyle = "rgba(255,255,255,0.8)"; g.lineWidth = 1;
+      g.setLineDash([4, 3]);
+      g.strokeRect(Math.min(mapBox.x0, mapBox.x1), Math.min(mapBox.y0, mapBox.y1),
+                   Math.abs(mapBox.x1 - mapBox.x0), Math.abs(mapBox.y1 - mapBox.y0));
+      g.setLineDash([]);
+    }
+    drawScale(g, s);
+  }
+  function drawScale(g, s) {
+    // 60 px of bar, rounded to something a person reads
+    var km = 60 / mapView.k * 111.0 * Math.cos(mapView.lat * Math.PI / 180);
+    var nice = [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+    var pick = nice[0];
+    for (var i = 0; i < nice.length; i++) if (nice[i] <= km) pick = nice[i];
+    placesScale.hidden = false;
+    placesScaleText.textContent = pick >= 1 ? pick + " km" : Math.round(km * 1000) + " m";
+    placesScale.querySelector(".places-scale-bar").style.width =
+      Math.round(pick / (111.0 * Math.cos(mapView.lat * Math.PI / 180)) * mapView.k) + "px";
+  }
+
+  function clusterAt(x, y) {
+    var s = mapSize(), clusters = (state.places && state.places.clusters) || [];
+    var best = null, bestD = 18 * 18;
+    clusters.forEach(function (c) {
+      var dx = toX(c.lon, s) - x, dy = toY(c.lat, s) - y, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = c; }
+    });
+    return best;
+  }
+  function boxOf(c) {
+    // a little air around a single-point pile so the filter is not a zero-width box
+    var pad = 0.002;
+    return [(c.south - pad).toFixed(5), (c.west - pad).toFixed(5), (c.north + pad).toFixed(5), (c.east + pad).toFixed(5)].join(",");
+  }
+  function goToPlace(c) {
+    jumpTo({ kind: "place", key: boxOf(c), from: "places" }, function () { runSearch(ctxParams(state.chips)); });
+  }
+
+  function renderPlaces() {
+    var d = state.places;
+    var navCount = $("#nav-place-count");
+    if (!d) { placesSummary.textContent = ""; navCount.textContent = ""; return; }
+    var clusters = d.clusters || [];
+    navCount.textContent = clusters.length ? String(clusters.length) : "";
+    placesSummary.innerHTML = "";
+    var strong = document.createElement("b");
+    strong.textContent = num(d.located) + " of " + num(d.total);
+    placesSummary.appendChild(strong);
+    placesSummary.appendChild(document.createTextNode(
+      " located, in " + num(clusters.length) + (clusters.length === 1 ? " place" : " places")));
+    // Once the pass has run, re-running it is a long shot (new files are read while they are indexed), so the
+    // button stops shouting. It stays reachable: a pass run with the disk unplugged has to be repeatable.
+    var readBtn = $("#places-read");
+    readBtn.textContent = d.read_at ? "Read again" : "Read locations";
+    readBtn.hidden = d.unlocated === 0;
+    readBtn.classList.toggle("btn", !d.read_at);
+    readBtn.classList.toggle("link", !!d.read_at);
+    placesEmpty.hidden = clusters.length > 0;
+    if (!clusters.length) {
+      placesEmpty.innerHTML = "";
+      var b = document.createElement("b");
+      b.textContent = d.read_at ? "Nothing in this shoot carries a location" : "No locations read yet";
+      var p1 = document.createElement("p");
+      p1.textContent = d.read_at
+        ? "Phones and drones write one into every file. Most cameras never do, unless they were paired with a phone on the day."
+        : "The files were indexed before sorted read locations. Read locations goes through them once; it only reads, it never changes a file.";
+      placesEmpty.appendChild(b); placesEmpty.appendChild(p1);
+    }
+    placeRows.innerHTML = "";
+    clusters.slice(0, 40).forEach(function (c) {
+      var row = document.createElement("button");
+      row.type = "button"; row.className = "place-row";
+      row.title = "see these " + num(c.n) + " in Search";
+      var name = document.createElement("span");
+      name.textContent = placeName(c.lat, c.lon);
+      var where = document.createElement("span");
+      where.className = "place-where"; where.textContent = placeWhere(c.lat, c.lon);
+      var n = document.createElement("span");
+      n.className = "place-n mono"; n.textContent = num(c.n);
+      row.appendChild(name); row.appendChild(where); row.appendChild(n);
+      row.addEventListener("click", function () { goToPlace(c); });
+      row.addEventListener("mouseenter", function () { mapHot = c; drawMap(); });
+      row.addEventListener("mouseleave", function () { mapHot = null; drawMap(); });
+      placeRows.appendChild(row);
+    });
+    drawMap();
+  }
+
+  // ===== the map's hands: drag to pan, wheel to zoom on the pointer, shift-drag a box to filter =====
+  placesCanvas.addEventListener("mousedown", function (e) {
+    var s = mapSize(), r = placesCanvas.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    if (e.shiftKey) { mapBox = { x0: x, y0: y, x1: x, y1: y }; placesCanvas.classList.add("boxing"); }
+    else { mapDrag = { x: x, y: y, lat: mapView.lat, lon: mapView.lon, moved: false }; placesCanvas.classList.add("dragging"); }
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", function (e) {
+    if (!mapDrag && !mapBox) return;
+    var r = placesCanvas.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    if (mapBox) { mapBox.x1 = x; mapBox.y1 = y; drawMap(); return; }
+    if (Math.abs(x - mapDrag.x) + Math.abs(y - mapDrag.y) > 2) mapDrag.moved = true;
+    mapView.lon = mapDrag.lon - (x - mapDrag.x) / mapView.k;
+    mapView.lat = mapDrag.lat + (y - mapDrag.y) / mapView.k;
+    clampView(); drawMap();
+  });
+  window.addEventListener("mouseup", function (e) {
+    var s = mapSize(), r = placesCanvas.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    if (mapBox) {
+      var box = mapBox; mapBox = null; placesCanvas.classList.remove("boxing");
+      drawMap();
+      if (Math.abs(box.x1 - box.x0) > 6 && Math.abs(box.y1 - box.y0) > 6) {
+        var lat = function (v) { return Math.max(-90, Math.min(90, v)); };
+        var lon = function (v) { return Math.max(-180, Math.min(180, v)); };
+        var south = lat(toLat(Math.max(box.y0, box.y1), s)), north = lat(toLat(Math.min(box.y0, box.y1), s));
+        var west = lon(toLon(Math.min(box.x0, box.x1), s)), east = lon(toLon(Math.max(box.x0, box.x1), s));
+        jumpTo({ kind: "place", key: [south.toFixed(5), west.toFixed(5), north.toFixed(5), east.toFixed(5)].join(","), from: "places" },
+               function () { runSearch(ctxParams(state.chips)); });
+      }
+      return;
+    }
+    if (!mapDrag) return;
+    var wasDrag = mapDrag.moved;
+    mapDrag = null; placesCanvas.classList.remove("dragging");
+    if (!wasDrag && state.view === "places") {
+      var c = clusterAt(x, y);
+      if (c) goToPlace(c);
+    }
+  });
+  placesCanvas.addEventListener("mousemove", function (e) {
+    if (mapDrag || mapBox) { placesTip.hidden = true; return; }
+    var r = placesCanvas.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    var c = clusterAt(x, y);
+    if (c !== mapHot) { mapHot = c; drawMap(); }
+    if (!c) { placesTip.hidden = true; return; }
+    placesTip.hidden = false;
+    placesTip.textContent = placeName(c.lat, c.lon) + "  " + num(c.n);
+    placesTip.style.left = Math.min(x + 12, (placesWrap.clientWidth || 800) - 160) + "px";
+    placesTip.style.top = Math.max(y - 30, 4) + "px";
+  });
+  placesCanvas.addEventListener("mouseleave", function () {
+    placesTip.hidden = true;
+    if (mapHot) { mapHot = null; drawMap(); }
+  });
+  placesCanvas.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    var s = mapSize(), r = placesCanvas.getBoundingClientRect();
+    var x = e.clientX - r.left, y = e.clientY - r.top;
+    var lon0 = toLon(x, s), lat0 = toLat(y, s);
+    mapView.k *= Math.exp(-e.deltaY * 0.0025);
+    clampView();
+    mapView.lon = lon0 - (x - s.w / 2) / mapView.k;
+    mapView.lat = lat0 + (y - s.h / 2) / mapView.k;
+    clampView(); drawMap();
+  }, { passive: false });
+  $("#places-fit").addEventListener("click", fitMap);
+  $("#places-world").addEventListener("click", worldMap);
+  window.addEventListener("resize", function () { if (state.view === "places") drawMap(); });
+
+  // The catch-up pass: read the location out of every file that has none. Reads metadata, changes nothing.
+  $("#places-read").addEventListener("click", function () {
+    var btn = $("#places-read");
+    btn.disabled = true;
+    api("/api/places/read", { method: "POST" }).then(function (d) {
+      setStatus("reading locations from " + num(d.total) + " files");
+      var poll = setInterval(function () {
+        api("/api/places/progress").then(function (p) {
+          if (p.running) { setStatus("reading locations, " + num(p.done) + " of " + num(p.total)); return; }
+          clearInterval(poll); btn.disabled = false;
+          var c = p.counts || {};
+          setStatus(p.error ? "reading locations failed: " + p.error
+                            : "found a location on " + num(c.found || 0) + " of " + num(c.read || 0) + " files");
+          loadPlaces();
+        }).catch(function () { clearInterval(poll); btn.disabled = false; });
+      }, 700);
+    }).catch(function (err) { btn.disabled = false; setStatus("could not read locations: " + err.message); });
+  });
+  // ===== end places =====
 
   var PAGE = 200;
   // Two searches can be in flight at once (a radio change fires one, the chip sync another), and the slower
@@ -1065,6 +1632,10 @@
   }
   // ===== end grid selection model =====
   function renderGrid() {
+    // A text or image query ranks the whole shoot: "total" is then the shoot size, "select all matching"
+    // would select everything, and the sort control has nothing to do.
+    var ranked = !!(state.lastParams.q || state.lastParams.image_id);
+    syncSortControl(ranked);
     gridEl.innerHTML = "";
     resultById = new Map();
     hoveredId = null;
@@ -1116,6 +1687,15 @@
         card.appendChild(grp);
       }
       // ===== end duplicates and bursts =====
+      // ===== sort: the ordering fact on the tile, so the order is visible and not just asserted =====
+      var stampText = ranked ? "" : sortStamp(r, state.lastParams.sort);
+      if (stampText) {
+        var stamp = document.createElement("div");
+        stamp.className = "badge stamp mono";
+        stamp.textContent = stampText;
+        card.appendChild(stamp);
+      }
+      // ===== end sort =====
 
       card.addEventListener("click", function (e) { clickCard(e, r, card); });
       card.addEventListener("dblclick", function () {
@@ -1125,12 +1705,10 @@
     });
     var more = $("#more-row");
     more.hidden = state.results.length === 0;
-    // A text or image query ranks the whole shoot, so "total" is the shoot size and
-    // "select all matching" would select everything: only filter-only searches get it.
-    var ranked = !!(state.lastParams.q || state.lastParams.image_id);
     // ===== duplicates and bursts: say how many rows the tiles are hiding, so a filtered count is never a surprise =====
     var folded = state.folded ? ", " + num(state.folded) + " " + (state.folded === 1 ? "copy" : "copies") + " folded" : "";
-    $("#shown-count").textContent = (ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown") + folded;
+    var ordered = (!ranked && SORT_WORDS[state.lastParams.sort]) ? ", " + SORT_WORDS[state.lastParams.sort] : "";
+    $("#shown-count").textContent = (ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown") + folded + ordered;
     $("#shown-count").title = state.folded ? "duplicates and burst frames are one tile each; tick Show every copy in the sidebar to see them all" : "";
     $("#show-more").hidden = state.results.length >= state.total;
     $("#select-matching").hidden = ranked;
@@ -1158,7 +1736,15 @@
     selbar.hidden = shown === 0 && n === 0;
     selbar.classList.toggle("has-sel", n > 0);
     selectAllTop.hidden = shown === 0;
-    selcount.textContent = n + " selected" + (shown ? " of " + shown + " shown" : "");
+    // How much the selection weighs, so an export is never a surprise. Only when every selected row is on
+    // screen: after "select all matching" the rest have not been loaded and a partial total would lie.
+    var weight = 0, allHere = n > 0;
+    state.selected.forEach(function (id) {
+      var r = resultById.get(id);
+      if (r) weight += Number(r.size) || 0; else allHere = false;
+    });
+    if (!allHere) weight = 0;
+    selcount.textContent = n + " selected" + (shown ? " of " + shown + " shown" : "") + (weight ? ", " + bytes(weight) : "");
     renderInspector();                                 // the inspector follows the selection
   }
 
@@ -1200,10 +1786,12 @@
         }
         clearInterval(exportTimer); exportTimer = null;
         // ===== project file: its own end line, and the card shows the new place and time =====
-        if (p.what === "bundle") {
+        if (p.what === "bundle" || p.what === "copy") {
+          var copy = p.what === "copy";                // a copy leaves the card alone; loadProject proves it did
           loadProject();
-          if (p.error) { setStatus("could not save the project: " + p.error, true); return; }
-          setStatus("project saved: " + p.path + (p.failed ? " (" + p.failed + " thumbnails could not be read)" : ""), true);
+          if (p.error) { setStatus((copy ? "could not save a copy: " : "could not save the project: ") + p.error, true); return; }
+          var tail = p.failed ? " (" + p.failed + " thumbnails could not be read)" : "";
+          setStatus((copy ? "copy saved: " : "project saved: ") + p.path + tail, true);
           return;
         }
         // ===== end project file =====
@@ -1757,8 +2345,8 @@
       if (qField.value) { qField.value = ""; runSearch(); } else qField.blur();
       return;
     }
-    // ===== navigation keys: command-1 to command-4 switch tabs from anywhere; Esc on a filtered Search goes back =====
-    if (cmd && !e.shiftKey && !e.altKey && /^[1-4]$/.test(e.key) && state.folder && state.folder.root) {
+    // ===== navigation keys: command-1 to command-5 switch tabs from anywhere; Esc on a filtered Search goes back =====
+    if (cmd && !e.shiftKey && !e.altKey && /^[1-5]$/.test(e.key) && state.folder && state.folder.root) {
       e.preventDefault();
       goView(VIEWS[Number(e.key) - 1]);
       return;
@@ -2911,6 +3499,7 @@
     var j = sc && sc.interrupted;
     if (!j) return "";
     if (j.kind === "focus") return "The last focus check stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
+    if (j.kind === "places") return "The last locations read stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
     return "The last scan stopped while " + (STAGE_AT[j.stage] || j.stage || "scanning") + ": ";
   }
 
@@ -2947,7 +3536,7 @@
     } else {
       scanBarText.textContent = interruptedLine(sc) + scanSummary(sc) + ". Search covers only what is scanned so far.";
       scanBarAwake.hidden = true;
-      scanBarContinue.hidden = !!(sc.interrupted && sc.interrupted.kind === "focus" && !sc.pending && !sc.unembedded);
+      scanBarContinue.hidden = !!(sc.interrupted && (sc.interrupted.kind === "focus" || sc.interrupted.kind === "places") && !sc.pending && !sc.unembedded);
     }
   }
   function renderAwake(p) {
@@ -2955,7 +3544,8 @@
   }
 
   // The health line: items on disk vs scanned vs searchable vs checked for faces, and one button for the gap.
-  var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Detect faces now", focus: "Finish the focus check" };
+  var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Detect faces now",
+                    focus: "Finish the focus check", places: "Finish reading locations" };
   var healthFix = null;
   function renderScanHealth(h) {
     if (!h) { scanHealthText.textContent = state.folder && state.folder.root ? "Checking the folder…" : ""; scanFix.hidden = true; healthFix = null; return; }
@@ -2991,6 +3581,7 @@
     if (healthFix === "rescan") return startIndexJob({ faces: $("#faces").checked, retry_errors: false }, "scanning the new files…");
     if (healthFix === "faces") return scanFacesNow();
     if (healthFix === "focus") return checkFocusBtn.click();
+    if (healthFix === "places") { goView("places"); return $("#places-read").click(); }
   });
   // ===== end resume =====
 
@@ -3056,8 +3647,13 @@
     projectName.textContent = info.name;
     projectDir.textContent = shortDir(info.dir); projectDir.title = info.dir;
     projectReveal.hidden = !info.exists;
-    projectState.className = "project-state";
-    if (info.exists && info.saved_at) {
+    projectState.className = "project-state"; projectState.title = "";
+    if (info.exists && info.opened) {
+      // the file was opened here, not written here: the time inside it is the Mac that made it, so say so
+      projectState.textContent = "Opened from this file" + (info.saved_at ? ", saved " + info.saved_at.slice(0, 16) + " where it was made" : "");
+      projectState.classList.add("saved");
+      projectState.title = "Save project writes back over " + info.path;
+    } else if (info.exists && info.saved_at) {
       projectState.textContent = "Saved " + info.saved_at.slice(0, 16);
       projectState.classList.add("saved");
     } else if (info.exists) {
@@ -3091,6 +3687,18 @@
       pollExportProgress("saving the project");
     }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
   });
+  // ===== Save a copy: one more file, written wherever the picker says. Save to moves the project file and
+  // every Save after it follows; a copy changes nothing about the shoot, which is the whole difference. =====
+  $("#bundle-copy").addEventListener("click", function () {
+    if (!(state.folder && state.folder.root)) { setStatus("open a shoot first"); return; }
+    setStatus("waiting for the folder picker…", true);
+    pickerPost("/api/bundle/copy/choose").then(function (res) {
+      if (!res) { setStatus("copy cancelled"); return; }
+      setStatus("writing the copy…", true);
+      pollExportProgress("writing the copy");
+    }).catch(function (err) { setStatus("could not save a copy: " + err.message, true); });
+  });
+  // ===== end Save a copy =====
   // command S saves the project from anywhere in the app (the browser's own Save page is never what anyone wants here)
   document.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
@@ -3152,13 +3760,21 @@
   // Scan a disk or folder: the folder picker; a folder with nothing scanned yet starts the scan at once with the
   // welcome's faces choice (mirrored into the Scan tab's box); a scanned one just opens. Open a project file: importBundle.
   var welcomeFaces = $("#welcome-faces");
-  $("#welcome-scan").addEventListener("click", function () {
-    openFolderPicker().then(function (info) {
-      if (!info || !folderOpen(info) || info.indexed) return;
-      $("#faces").checked = welcomeFaces.checked;
-      startIndexJob({ faces: welcomeFaces.checked, retry_errors: false }, "scan started…");
+  // Pick a folder and, if sorted has never read it, start the scan there and then. The welcome button, the
+  // shoots menu and the Scan tab all come through here; the welcome's faces tick is the one the welcome
+  // screen shows, the Scan tab's box everywhere else (they mirror each other).
+  function scanAnotherFolder(facesBox) {
+    var box = facesBox || $("#faces");
+    return openFolderPicker().then(function (info) {
+      if (!info || !folderOpen(info) || info.indexed) return info;
+      $("#faces").checked = box.checked;
+      welcomeFaces.checked = box.checked;
+      startIndexJob({ faces: box.checked, retry_errors: false }, "scan started…");
+      return info;
     });
-  });
+  }
+  $("#welcome-scan").addEventListener("click", function () { scanAnotherFolder(welcomeFaces); });
+  $("#scan-another").addEventListener("click", function () { scanAnotherFolder($("#faces")); });
   $("#welcome-load").addEventListener("click", importBundle);
   $("#welcome-help").addEventListener("click", function () { setHelp(true); });
   // ===== end welcome =====
@@ -3530,6 +4146,8 @@
     loadPeople();
     loadCategories();                                  // fills the count beside the Categories nav row
     loadSearches();                                    // ===== search history: the sidebar chips =====
+    loadDays();                                        // ===== days: the sidebar day list =====
+    placeCount();                                      // ===== places: the count next to the tab =====
     loadPrefs(); loadExports();                        // ===== export presets and history =====
     // ===== navigation boot: a person filter goes out explicitly, the select has no options yet; a saved name is a find =====
     applyChips(chips);

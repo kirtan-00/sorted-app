@@ -240,8 +240,85 @@ header { display: contents; }
 #folder-name { font-size: 18px; font-weight: 600; color: var(--g800); overflow: hidden; text-overflow: ellipsis; max-width: 34vw; }
 #stats { font-size: 12px; color: var(--g600); overflow: hidden; text-overflow: ellipsis; }
 .tb-spring { flex: 1; min-width: 8px; }
-#folderbar { display: flex; align-items: center; gap: 8px; flex: none; }
-#recent-folders { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+
+/* the shoots menu: the open shoot's name is the button; the panel under it lists every shoot this Mac knows
+   as a row (name, path, what is indexed, whether a project file was saved) and then the ways in to another */
+#shootbar { position: relative; display: flex; align-items: center; min-width: 0; flex: 0 1 auto; }
+.shoot-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition: background-color var(--ease), border-color var(--ease);
+}
+.shoot-trigger:hover { background: var(--g200); border-color: var(--g300); }
+.shoot-trigger[aria-expanded="true"] { background: var(--g200); border-color: var(--g400); }
+.shoot-trigger .tb-title { flex: 1 1 auto; min-width: 0; }
+.shoot-trigger .shoot-mark { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--g500); stroke-width: 1.3; stroke-linejoin: round; }
+.shoot-trigger .shoot-chev { width: 10px; height: 10px; flex: none; fill: none; stroke: var(--g500); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.shoot-trigger:hover .shoot-mark, .shoot-trigger:hover .shoot-chev { stroke: var(--g700); }
+.shoot-trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.shoot-menu {
+  position: absolute;
+  top: 40px;
+  left: 0;
+  z-index: 20;
+  width: 460px;
+  max-width: 88vw;
+  padding: 4px 0 6px;
+  background: var(--g100);
+  border: 1px solid var(--g300);
+  border-radius: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  white-space: normal;
+}
+.sm-group { padding: 6px 12px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g500); }
+/* exactly seven rows of 45px: a row is never cut in half, which reads as a broken panel rather than as
+   "there is more". The count next to the heading is what says there is more. */
+.sm-list { max-height: 315px; overflow: hidden auto; }
+.sm-row, .sm-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 12px 6px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--g700);
+  font: inherit;
+  text-align: left;
+}
+.sm-row:hover, .sm-action:hover { background: var(--g200); color: var(--g800); }
+.sm-row:focus-visible, .sm-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.sm-row.on { border-left-color: var(--blue); background: var(--g75); }
+.sm-row.missing { color: var(--g500); }
+.sm-tick { width: 14px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--blue); }
+.sm-tick svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sm-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sm-name { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm-path { color: var(--g500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.sm-path::before, .sm-path::after { content: "\200E"; }
+.sm-facts { flex: none; max-width: 40%; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; text-align: right; }
+.sm-count { font-size: 12px; color: var(--g600); white-space: nowrap; }
+.sm-note { font-size: 11px; color: var(--g500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.sm-note.warn { color: var(--notice); }
+.sm-empty { padding: 8px 12px 10px; font-size: 13px; color: var(--g500); }
+.sm-actions { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--g200); }
+.sm-action svg { width: 16px; height: 16px; flex: none; margin-left: 4px; fill: none; stroke: var(--g500); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.sm-action:hover svg { stroke: var(--g700); }
+.sm-action-t { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 14px; }
+.sm-action-s { font-size: 12px; color: var(--g500); }
+/* end the shoots menu */
 #exportbar { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
 #export-dest {
   font-size: 12px;
@@ -389,7 +466,7 @@ body:not(.insp) #inspector { border-left-width: 0; }   /* a closed 0 px column m
 
 /* no folder open: the frame stays, dimmed and inert (app.js sets body.nofolder and the inert attributes); main holds the welcome */
 body.nofolder { grid-template-columns: 200px 1fr 0px; }
-body.nofolder nav, body.nofolder .tb-title, body.nofolder #folderbar, body.nofolder #exportbar, body.nofolder #inspector-toggle { opacity: 0.35; }
+body.nofolder nav, body.nofolder #shootbar, body.nofolder #exportbar, body.nofolder #inspector-toggle { opacity: 0.35; }
 body.nofolder #inspector { display: none; }
 #view-nofolder { align-items: center; justify-content: center; padding: 40px 32px; }
 .welcome { width: 100%; max-width: 640px; display: flex; flex-direction: column; gap: 20px; }
@@ -773,6 +850,10 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 }
 #grid .badge.drone { right: auto; left: 8px; }
 #grid .badge.drone::before { display: none; }
+/* the sort stamp: the fact the grid is ordered by (a date, a size, a length), top right, only while a sort
+   other than the default is on. The tiles stay captionless the rest of the time. */
+#grid .badge.stamp { right: 8px; top: 8px; bottom: auto; left: auto; font-weight: 400; color: var(--g700); }
+#grid .badge.stamp::before { display: none; }
 /* duplicates and bursts: "x2" or "burst of 12", top left, clear of the drone and clip badges */
 #grid .badge.group { right: auto; bottom: auto; left: 8px; top: 8px; }
 #grid .badge.group::before { display: none; }
@@ -1190,3 +1271,93 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 #reorg-status-text { color: var(--g800); }
 
 .insp-reveal { margin: 2px 0 8px; }
+
+/* ===== days: the shoot broken into shooting days in the sidebar, count on the right, click for that day =====
+   Built from the capture time when the file has one and from its mtime when it does not, so nothing falls out
+   of the list. Eight days show; the rest are behind "show all". */
+.days-list { display: flex; flex-direction: column; gap: 1px; }
+.day-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--g700);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.day-row:hover { background: var(--g200); color: var(--g900); }
+.day-row.on { background: var(--g300); color: var(--g900); }
+.day-row .day-n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--g600); font-size: 11px; }
+.day-row:hover .day-n, .day-row.on .day-n { color: var(--g800); }
+.days-more { align-self: flex-start; padding: 2px 6px; }
+.nav-sub { color: var(--g500); font-weight: 400; font-variant-numeric: tabular-nums; }
+
+/* ===== places: where the shoot was shot. A canvas, a world outline shipped with the app (Natural Earth,
+   public domain) and the piles of photographs drawn over it. No tiles, no map server, no network. ===== */
+.places-summary { color: var(--g700); font-size: 12px; }
+.places-summary b { color: var(--g900); font-weight: 600; }
+.places-wrap {
+  position: relative;
+  height: 62vh;
+  min-height: 320px;
+  margin: 0 0 16px;
+  border-radius: 6px;
+  background: #0d0f12;
+  overflow: hidden;
+}
+.places-map { display: block; width: 100%; height: 100%; cursor: grab; }
+.places-map.dragging { cursor: grabbing; }
+.places-map.boxing { cursor: crosshair; }
+.places-tip {
+  position: absolute;
+  pointer-events: none;
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--g900);
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid var(--g300);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.places-scale { position: absolute; left: 12px; bottom: 12px; display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--g600); }
+.places-scale-bar { display: block; width: 60px; height: 1px; background: var(--g500); box-shadow: 0 -3px 0 -2px var(--g500), 0 3px 0 -2px var(--g500); }
+.places-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  color: var(--g600);
+  font-size: 13px;
+}
+.places-empty b { color: var(--g800); font-weight: 600; font-size: 14px; }
+.place-rows { display: flex; flex-direction: column; }
+.place-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--g200);
+  background: none;
+  color: var(--g800);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.place-row:hover { background: var(--g200); color: var(--g900); }
+.place-row .place-where { color: var(--g600); font-size: 11px; }
+.place-row .place-n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--g700); font-size: 12px; }

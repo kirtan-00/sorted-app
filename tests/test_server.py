@@ -261,6 +261,44 @@ def test_folder_recent_lists_switched_path(tmp_path):
     assert any(r["path"] == str(tmp_path) for r in recent)
 
 
+def test_folder_recent_carries_counts_project_and_missing(tmp_path, tmp_path_factory):
+    """The shoots menu reads the list once a page load, so every row carries what it needs without
+    opening the shoot: how much is indexed, the project file saved for it, and whether the folder is
+    reachable right now. A path with no index must not gain one just by being listed."""
+    import json as _json
+    from photosort.config import app_home, shoot_slug
+    shoot = tmp_path / "Day 1"; shoot.mkdir()
+    from conftest import make_image
+    make_image(shoot, "a.jpg"); make_image(shoot, "b.jpg", seed=2)
+    index_folder(shoot, faces=False, workers=1, embed=False)
+    gone = tmp_path / "Unplugged"                      # never on this Mac, and never indexed
+    (app_home()).mkdir(parents=True, exist_ok=True)
+    (app_home() / "recent.json").write_text(_json.dumps([str(gone)]))
+    c = TestClient(create_app(None))
+    c.post("/api/folder", json={"path": str(shoot)})
+    rows = {r["path"]: r for r in c.get("/api/folder/recent").json()["recent"]}
+    here = rows[str(shoot.resolve())]
+    assert here["name"] == "Day 1" and here["photos"] == 2 and here["videos"] == 0 and here["items"] == 2
+    assert here["indexed"] is True and here["missing"] is False and here["open"] is True and here["project"] is None
+    away = rows[str(gone)]
+    assert away["missing"] is True and away["items"] == 0 and away["indexed"] is False and away["open"] is False
+    assert not (app_home() / shoot_slug(gone)).exists()      # listing a shoot never builds an index for it
+    # once the project file is saved, the row says where it is
+    assert c.post("/api/bundle/export", json={"dest": str(tmp_path_factory.mktemp("kept"))}).status_code == 200
+    z = Path(_wait_export(c)["path"])
+    rows = {r["path"]: r for r in c.get("/api/folder/recent").json()["recent"]}
+    assert rows[str(shoot.resolve())]["project"] == str(z)
+
+
+def test_folder_recent_lists_the_open_shoot_even_when_it_was_never_switched_to(tmp_path):
+    """A folder the app was started with is not in recent.json, and the menu still has to show it as open."""
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    rows = TestClient(create_app(tmp_path)).get("/api/folder/recent").json()["recent"]
+    assert rows[0]["path"] == str(tmp_path) and rows[0]["open"] is True and rows[0]["photos"] == 1
+
+
 def test_folder_choose_returns_204_when_picker_gives_nothing(tmp_path, monkeypatch):
     import subprocess as sp
     def fake_run(*a, **k):
@@ -2337,6 +2375,81 @@ def test_opening_a_project_file_remembers_its_folder(tmp_path, tmp_path_factory,
     assert info["path"] == str(z.resolve()) and info["exists"] is True and info["dir"] == str(dest.resolve())
 
 
+# ===== Save a copy: one more file written wherever it is wanted, and nothing about the shoot moves =====
+def test_project_copy_writes_the_file_without_moving_the_remembered_folder(tmp_path, tmp_path_factory):
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=2)
+    home = tmp_path_factory.mktemp("home_dir")
+    assert c.post("/api/bundle/export", json={"dest": str(home)}).status_code == 200
+    _wait_export(c)
+    before = c.get("/api/project").json()
+    assert before["dir"] == str(home.resolve()) and before["saved_at"]
+    time.sleep(1.05)                                   # the stamp has one-second resolution: a move would show
+    away = tmp_path_factory.mktemp("for_the_editor")
+    r = c.post("/api/bundle/copy", json={"dest": str(away)})
+    assert r.status_code == 200, r.text
+    p = _wait_export(c)
+    assert p["error"] is None and p["what"] == "copy"
+    copy = Path(p["path"])
+    assert copy == away.resolve() / before["name"] and inspect_bundle(copy)["photos"] == 2
+    after = c.get("/api/project").json()
+    assert after["dir"] == before["dir"] and after["path"] == before["path"] and after["saved_at"] == before["saved_at"]
+    assert Path(before["path"]).is_file()              # the real save is still where it was
+    # a copy into the folder Save project writes to would overwrite that save under the old stamp
+    bad = c.post("/api/bundle/copy", json={"dest": str(home)})
+    assert bad.status_code == 400 and "Save project" in bad.json()["detail"]
+    assert c.post("/api/bundle/copy", json={}).status_code == 400
+    assert TestClient(create_app(None)).post("/api/bundle/copy", json={"dest": str(away)}).status_code == 400
+
+
+def test_project_copy_choose_runs_the_picker(tmp_path, tmp_path_factory, monkeypatch):
+    import subprocess as sp
+    c = _shoot_client(tmp_path, n=1)
+    picked = tmp_path_factory.mktemp("picked_copy")
+    calls = []
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, returncode=0, stdout=str(picked) + "\n", stderr="")
+    monkeypatch.setattr("photosort.server.subprocess.run", fake_run)
+    r = c.post("/api/bundle/copy/choose")
+    assert r.status_code == 200, r.text
+    assert "Save a copy of the project file where?" in calls[-1][-1]
+    p = _wait_export(c)
+    assert p["error"] is None and Path(p["path"]).parent == picked.resolve()
+    info = c.get("/api/project").json()
+    assert info["path"] is None and info["saved_at"] is None      # a copy is not a save
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda cmd, *a, **k: sp.CompletedProcess(cmd, returncode=1, stdout="", stderr=""))
+    assert c.post("/api/bundle/copy/choose").status_code == 204
+
+
+def test_an_opened_project_file_says_so_and_saves_back_over_itself(tmp_path, tmp_path_factory, monkeypatch):
+    """The file someone sent you: the card must not claim this Mac saved it, and Save must write back to
+    the same file, with a stamp of its own."""
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=2)
+    handed = tmp_path_factory.mktemp("handed_over")
+    assert c.post("/api/project/save").status_code == 200
+    _wait_export(c)
+    # the stamp the handed-over file carries is the one in the index when it was packed, so read it now
+    theirs = c.get("/api/project").json()["saved_at"]
+    assert c.post("/api/bundle/export", json={"dest": str(handed)}).status_code == 200
+    z = Path(_wait_export(c)["path"])
+    home = tmp_path_factory.mktemp("home3"); monkeypatch.setenv("PHOTOSORT_HOME", str(home))
+    c2 = TestClient(create_app(None))
+    assert c2.post("/api/bundle/import", json={"zip": str(z)}).status_code == 200
+    info = c2.get("/api/project").json()
+    assert info["opened"] is True and info["exists"] is True and info["dir"] == str(handed.resolve())
+    assert info["saved_at"] == theirs                  # the stamp inside the file is the other Mac's, and is labelled
+    time.sleep(1.05)
+    assert c2.post("/api/project/save").status_code == 200
+    p = _wait_export(c2)
+    assert p["error"] is None and Path(p["path"]) == z and inspect_bundle(z)["photos"] == 2
+    again = c2.get("/api/project").json()
+    assert again["opened"] is False and again["path"] == str(z) and again["saved_at"] != theirs
+# ===== end Save a copy =====
+
+
 def test_launch_hands_over_the_double_clicked_file_once(tmp_path):
     c = TestClient(create_app(None, open_file=tmp_path / "sorted_x.sorted"))
     assert c.get("/api/launch").json() == {"open": str(tmp_path / "sorted_x.sorted")}
@@ -2366,3 +2479,52 @@ def test_reveal_ids_opens_the_finder_for_the_selected_files(tmp_path, monkeypatc
     assert c.post("/api/reveal/ids", json={"ids": ids}).status_code == 400
     assert c.post("/api/reveal/ids", json={"ids": []}).status_code == 400
     assert TestClient(create_app(None)).post("/api/reveal/ids", json={"ids": [1]}).status_code == 400
+
+
+# ===== sort: the order of an unsearched grid, and the shoot day by day =====
+
+def _three(tmp_path):
+    from conftest import make_image
+    from photosort import db
+    for i, name in enumerate(["b.jpg", "c.jpg", "a.jpg"]):
+        make_image(tmp_path, name, seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    for name, taken, size in [("a.jpg", "2026-01-01T09:00:00", 100),
+                              ("b.jpg", "2026-01-02T09:00:00", 5000),
+                              ("c.jpg", "2026-01-03T09:00:00", 900000)]:
+        conn.execute("UPDATE photos SET taken_at=?, size=? WHERE rel=?", (taken, size, name))
+    conn.commit()
+    return TestClient(create_app(tmp_path))
+
+def test_search_takes_a_sort(tmp_path):
+    c = _three(tmp_path)
+    def rels(**kw):
+        return [r["rel"] for r in c.get("/api/search", params=kw).json()["results"]]
+    assert rels() == ["a.jpg", "b.jpg", "c.jpg"]
+    assert rels(sort="newest") == ["c.jpg", "b.jpg", "a.jpg"]
+    assert rels(sort="biggest") == ["c.jpg", "b.jpg", "a.jpg"]
+    assert rels(sort="") == ["a.jpg", "b.jpg", "c.jpg"]
+    # "select all matching" follows what the grid shows, so it takes the same order
+    newest = [r["id"] for r in c.get("/api/search", params={"sort": "newest"}).json()["results"]]
+    assert c.get("/api/search/ids", params={"sort": "newest"}).json()["ids"] == newest
+    bad = c.get("/api/search", params={"sort": "sideways"})
+    assert bad.status_code == 400 and "sort must be one of" in bad.json()["detail"]
+
+def test_search_results_carry_the_size_and_the_time_they_are_sorted_on(tmp_path):
+    c = _three(tmp_path)
+    row = c.get("/api/search", params={"sort": "biggest"}).json()["results"][0]
+    assert row["size"] == 900000 and row["when"] == "2026-01-03T09:00:00"
+
+def test_days_lists_the_shoot_day_by_day(tmp_path):
+    c = _three(tmp_path)
+    days = c.get("/api/days").json()["days"]
+    assert [d["day"] for d in days] == ["2026-01-01", "2026-01-02", "2026-01-03"]
+    assert sum(d["n"] for d in days) == 3
+
+def test_day_filter_keeps_one_day(tmp_path):
+    c = _three(tmp_path)
+    rows = c.get("/api/search", params={"day": "2026-01-02"}).json()
+    assert [r["rel"] for r in rows["results"]] == ["b.jpg"] and rows["total"] == 1
+    bad = c.get("/api/search", params={"day": "18 Sep"})
+    assert bad.status_code == 400 and "YYYY-MM-DD" in bad.json()["detail"]

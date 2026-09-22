@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from . import config as _cfg
+from .features import latlon_ok
 from .config import (PREVIEW_EDGE, VIDEO_FRAMES, SCENE_THRESHOLD, MAX_SEGMENTS, MIN_SEGMENT_S, SCENE_MIN_DURATION_S,
                      SCENE_MAX_DURATION_S, LONG_SEGMENT_S, FFMPEG_HWACCEL, SCENE_STEP_S, FRAME_STEP_S, INTRA_PROBE_PACKETS)
 
@@ -80,6 +81,17 @@ def _norm_time(s: str | None) -> str | None:
 def _dji(value: str | None) -> bool:
     return bool(value) and value.strip().upper().startswith("DJI")
 
+# ISO 6709 as the containers write it: "+23.0225+072.5714+055.000/", latitude then longitude, the altitude
+# and the trailing slash optional. Only the first two signed numbers are wanted.
+_ISO6709 = re.compile(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
+
+def _iso6709(value: str | None) -> tuple[float | None, float | None]:
+    """An ISO 6709 location tag as (lat, lon); (None, None) when it does not parse or is not a real fix."""
+    m = _ISO6709.match((value or "").strip())
+    if not m:
+        return None, None
+    return latlon_ok(float(m.group(1)), float(m.group(2)))
+
 def aerial_by_name(path: Path) -> bool:
     """A DJI_ filename (case-insensitive) or a <stem>.SRT telemetry sidecar next to the file: DJI writes one
     per clip (Sony and phones never do). Deterministic, no model. Only ever stats the sidecar."""
@@ -91,8 +103,9 @@ def aerial_by_name(path: Path) -> bool:
 def probe(path: Path) -> dict:
     """duration (s), width, height, codec (codec_name) and pix_fmt of the first video stream, plus taken_at
     (the creation_time tag, normalised), camera (make/model tags, else a DJI encoder tag) when the container
-    carries them, else None, and aerial: a DJI encoder/make/model/comment tag, a DJI_ filename or an .SRT
-    sidecar. (codec, pix_fmt) is the hardware-decode key the frame and scene passes take."""
+    carries them, else None, aerial: a DJI encoder/make/model/comment tag, a DJI_ filename or an .SRT
+    sidecar, and lat, lon from the container's ISO 6709 location tag when it has one.
+    (codec, pix_fmt) is the hardware-decode key the frame and scene passes take."""
     out = _run([_bin("ffprobe"), "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)], timeout=60)
     try:
         info = json.loads(out.stdout or b"{}")
@@ -125,8 +138,16 @@ def probe(path: Path) -> dict:
     aerial = any(_dji(low.get(k)) for k in ("encoder", "make", "model", "comment")) or aerial_by_name(path)
     if camera is None and _dji(low.get("encoder")):
         camera = low["encoder"].strip()
+    # Where it was shot, from the container only: Apple writes the iso6709 tag, Android and DJI write
+    # location (location-eng is the same value under its language tag). Nothing is ever looked up.
+    lat = lon = None
+    for k in ("com.apple.quicktime.location.iso6709", "location", "location-eng"):
+        if low.get(k):
+            lat, lon = _iso6709(low[k])
+            if lat is not None:
+                break
     return dict(duration=duration, width=w, height=h, codec=v.get("codec_name"), pix_fmt=v.get("pix_fmt"), fps=fps,
-                taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial)
+                taken_at=_norm_time(low.get("creation_time")), camera=camera, aerial=aerial, lat=lat, lon=lon)
 
 def _fps(rate: str | None) -> float:
     """ffprobe's "60/1" or "30000/1001" as a float; 0.0 when missing or "0/0"."""

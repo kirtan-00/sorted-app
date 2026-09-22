@@ -9,6 +9,7 @@ from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WO
 from .walk import find_images, quick_hash
 from .decode import load_preview
 from .features import phash, exif_info, sharpness_tiles, to_gray
+from .places import READ_KEY as _PLACES_READ_KEY
 
 class SourceUnavailable(RuntimeError):
     """The shoot root is not there (disk unplugged, wrong mount) while the index already holds photos.
@@ -47,7 +48,7 @@ def _process_video(root: str, rel: str, out: dict) -> None:
         width=info["width"] or im.width, height=info["height"] or im.height,
         taken_at=info["taken_at"] or video.mtime_iso(st.st_mtime), camera=info["camera"], phash=phash(im),
         sharp_tile=p90, sharp_max=mx, sharp_eye=None, sharp=p90, n_faces=0, status="ok",
-        kind="video", duration=info["duration"], aerial=int(info["aerial"]))
+        kind="video", duration=info["duration"], aerial=int(info["aerial"]), lat=info["lat"], lon=info["lon"])
     out["segments"] = []
     for i, (a, b) in enumerate(segs):
         k = min(range(len(frames)), key=lambda k: abs(frames[k][0] - (a + b) / 2))
@@ -78,7 +79,7 @@ def process_one(args: tuple[str, str, bool]) -> dict:
             width=info["width"] or im.width, height=info["height"] or im.height, taken_at=info["taken_at"],
             camera=info["camera"], phash=phash(im), sharp_tile=p90, sharp_max=mx, sharp_eye=eye,
             sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok", kind="photo",
-            aerial=int(info["aerial"]))
+            aerial=int(info["aerial"]), lat=info["lat"], lon=info["lon"])
         out["faces"] = [dict(x=f.x, y=f.y, w=f.w, h=f.h, score=f.score, landmarks=json.dumps(f.landmarks.tolist()),
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
     except Exception as e:
@@ -167,7 +168,11 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         db.finish_job(conn, job["id"], "failed", error=f"{type(e).__name__}: {e}")
         raise
     stats["seconds"] = round(time.time() - t0, 1)
-    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))"); conn.commit()
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('last_index', datetime('now'))")
+    # Locations were read out of every file in this pass, so the Places tab has nothing to catch up on: a
+    # shoot indexed by this version must not be offered the catch-up pass (see places.READ_KEY).
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?, datetime('now'))", (_PLACES_READ_KEY,))
+    conn.commit()
     db.finish_job(conn, job["id"], "done", progress={"stage": "done", "done": stats["total"], "total": stats["total"], "faces": faces})
     db.analyze(conn)      # row counts changed: the planner's statistics follow (14 ms at 20k rows)
     job["id"] = None

@@ -192,3 +192,67 @@ def test_bursts_fold_by_second_frame_number_and_embedding(tmp_path):
     # an image query keeps the best-scoring frame of the burst as its tile
     like = ix.search(image_id=ids["s/DSC00012.jpg"], filters=Filters(fold=True))
     assert like[0]["group"]["n"] == 3 and like[0]["rel"] in ("s/DSC00010.jpg", "s/DSC00011.jpg", "s/DSC00012.jpg")
+
+# ===== sort: the order of an unsearched grid =====
+
+def _sorted_fixture(tmp_path):
+    """Three photos with sizes and times set by hand: a.jpg oldest and smallest, c.jpg newest and biggest."""
+    from conftest import make_image
+    for i, name in enumerate(["b.jpg", "c.jpg", "a.jpg"]):
+        make_image(tmp_path, name, seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    for name, taken, size in [("a.jpg", "2026-01-01T09:00:00", 100),
+                              ("b.jpg", "2026-01-02T09:00:00", 5000),
+                              ("c.jpg", "2026-01-03T09:00:00", 900000)]:
+        conn.execute("UPDATE photos SET taken_at=?, size=? WHERE rel=?", (taken, size, name))
+    conn.commit()
+    return Index(tmp_path)
+
+def test_sort_orders_by_date_and_by_size(tmp_path):
+    ix = _sorted_fixture(tmp_path)
+    assert [r["rel"] for r in ix.search()] == ["a.jpg", "b.jpg", "c.jpg"]
+    assert [r["rel"] for r in ix.search(sort="oldest")] == ["a.jpg", "b.jpg", "c.jpg"]
+    assert [r["rel"] for r in ix.search(sort="newest")] == ["c.jpg", "b.jpg", "a.jpg"]
+    assert [r["rel"] for r in ix.search(sort="biggest")] == ["c.jpg", "b.jpg", "a.jpg"]
+    assert [r["rel"] for r in ix.search(sort="smallest")] == ["a.jpg", "b.jpg", "c.jpg"]
+    assert [r["rel"] for r in ix.search(sort="name")] == ["a.jpg", "b.jpg", "c.jpg"]
+
+def test_sort_paging_is_stable(tmp_path):
+    ix = _sorted_fixture(tmp_path)
+    first = [r["rel"] for r in ix.search(sort="newest", limit=2, offset=0)]
+    rest = [r["rel"] for r in ix.search(sort="newest", limit=2, offset=2)]
+    assert first + rest == ["c.jpg", "b.jpg", "a.jpg"]
+
+def test_a_file_without_a_capture_time_sorts_on_its_mtime(tmp_path):
+    """A screenshot or an export carries no EXIF time. It belongs on the day it was written, not at the end
+    of the shoot behind everything that does have one."""
+    import os
+    from conftest import make_image
+    make_image(tmp_path, "shot.jpg", seed=1); make_image(tmp_path, "screenshot.png", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET taken_at='2026-05-01T10:00:00' WHERE rel='shot.jpg'")
+    conn.execute("UPDATE photos SET taken_at=NULL, mtime=? WHERE rel='screenshot.png'",
+                 (__import__("datetime").datetime(2026, 4, 1, 10).timestamp(),))
+    conn.commit()
+    ix = Index(tmp_path)
+    assert [r["rel"] for r in ix.search()] == ["screenshot.png", "shot.jpg"]
+    assert [r["rel"] for r in ix.search(sort="newest")] == ["shot.jpg", "screenshot.png"]
+
+def test_a_search_keeps_its_ranking_whatever_the_sort_says(tmp_path):
+    """A query scores every photo, so ordering the answer any other way throws the query away."""
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", kind="sharp")
+    Image.new("RGB", (900, 600), (200, 30, 30)).save(tmp_path / "red.jpg")
+    index_folder(tmp_path, faces=False, workers=1)
+    ix = Index(tmp_path)
+    assert ix.search(text="a red wall", sort="name")[0]["rel"] == "red.jpg"
+
+def test_days_counts_the_shoot_day_by_day(tmp_path):
+    ix = _sorted_fixture(tmp_path)
+    days = ix.days()
+    assert [d["day"] for d in days] == ["2026-01-01", "2026-01-02", "2026-01-03"]
+    assert [d["n"] for d in days] == [1, 1, 1]
+    assert [d["bytes"] for d in days] == [100, 5000, 900000]
+    assert all(d["videos"] == 0 for d in days)

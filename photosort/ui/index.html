@@ -12,15 +12,37 @@
 <header>
   <div class="toolbar">
     <h1>sorted</h1>
-    <div class="tb-title">
-      <span id="folder-name" title=""></span>
-      <span id="stats"></span>
+    <!-- the shoots menu: the open shoot's name is the button, and it drops the list of every shoot this Mac
+         knows, each with what is indexed and whether a project file was saved, then the ways in to another one -->
+    <div id="shootbar">
+      <button type="button" id="shoot-menu-btn" class="shoot-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="shoot-menu" title="the open shoot: switch to another, open a folder or a project file, or scan another folder">
+        <svg class="shoot-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.2a1.2 1.2 0 0 1 1.2-1.2h3L7.2 4.5h6.1a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2H2.7a1.2 1.2 0 0 1-1.2-1.2z"/></svg>
+        <span class="tb-title">
+          <span id="folder-name" title=""></span>
+          <span id="stats"></span>
+        </span>
+        <svg class="shoot-chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4L5 7l3-3"/></svg>
+      </button>
+      <div id="shoot-menu" class="shoot-menu" hidden>
+        <div class="sm-group">Shoots on this Mac <span id="sm-count" class="nav-sub"></span></div>
+        <div id="shoot-list" class="sm-list"></div>
+        <div class="sm-actions">
+          <button type="button" class="sm-action" id="sm-open-folder" title="pick a shoot folder on this Mac and open it">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.2a1.2 1.2 0 0 1 1.2-1.2h3L7.2 4.5h6.1a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2H2.7a1.2 1.2 0 0 1-1.2-1.2z"/></svg>
+            <span class="sm-action-t">Open a folder…<span class="sm-action-s">a folder this Mac has scanned before</span></span>
+          </button>
+          <button type="button" class="sm-action" id="sm-open-project" title="open a sorted project file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6L13 5v9a.8.8 0 0 1-.8.8H3.5a.8.8 0 0 1-.8-.8V2.3a.8.8 0 0 1 .8-.8z"/><path d="M9.5 1.5V5H13"/></svg>
+            <span class="sm-action-t">Open a project file…<span class="sm-action-s">a sorted_&lt;shoot&gt;.sorted from any Mac</span></span>
+          </button>
+          <button type="button" class="sm-action" id="sm-scan-another" title="pick another folder and start scanning it now">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg>
+            <span class="sm-action-t">Scan another folder…<span class="sm-action-s">a folder sorted has never read; the scan starts at once</span></span>
+          </button>
+        </div>
+      </div>
     </div>
     <span class="tb-spring"></span>
-    <div id="folderbar">
-      <select id="recent-folders" title="open a recent shoot"><option value="">Recent</option></select>
-      <button type="button" id="open-folder" class="btn" title="open a shoot folder on this Mac">Open folder</button>
-    </div>
     <div id="exportbar">
       <span id="export-dest"></span>
       <button type="button" id="export-dest-change" class="link" title="pick another disk for exports">Change</button>
@@ -43,6 +65,9 @@
     <button type="button" data-view="categories" title="categories found in the shoot">
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
     </button>
+    <button type="button" data-view="places" title="where the shoot was shot">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M1.7 8h12.6"/><path d="M8 1.7c1.8 2 2.7 4 2.7 6.3s-.9 4.3-2.7 6.3c-1.8-2-2.7-4-2.7-6.3S6.2 3.7 8 1.7z"/></svg><span>Places</span><span id="nav-place-count" class="nav-count"></span>
+    </button>
     <button type="button" data-view="index" title="scan this folder, save or open the project file">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Scan</span>
     </button>
@@ -60,6 +85,8 @@
       <span id="focus-status" title="how much of the shoot has been through the focus check">focus not checked</span>
       <button type="button" id="check-focus" class="link small" title="score every photo and clip once; photos are free, clips take seconds">Check focus</button>
     </div>
+    <div class="nav-group" id="days-group" hidden>Days <span id="days-count" class="nav-sub"></span></div>
+    <div id="days-list" class="days-list nav-row" hidden></div>
     <div class="nav-group" id="saved-group" hidden>Saved searches</div>
     <div id="saved-searches" class="saved-searches nav-row" hidden></div>
   </nav>
@@ -110,9 +137,19 @@
         <option value="group">Group of 3+</option>
       </select>
       <select name="person" id="person-select" title="only a particular person"><option value="">anyone</option></select>
+      <select name="sort" id="sort-select" title="the order of the grid; a search always comes back best match first">
+        <option value="">Oldest first</option>
+        <option value="newest">Newest first</option>
+        <option value="biggest">Biggest files</option>
+        <option value="smallest">Smallest files</option>
+        <option value="name">File name</option>
+        <option value="longest">Longest clip</option>
+      </select>
       <button type="submit" class="btn primary" title="run the search (Enter)">Find</button>
       <input type="hidden" name="category" id="category-filter" value="">
       <input type="hidden" name="cluster" id="cluster-filter" value="">
+      <input type="hidden" name="day" id="day-filter" value="">
+      <input type="hidden" name="bbox" id="bbox-filter" value="">
       <span class="spring"></span>
       <button type="button" id="selectall-top" class="link" hidden title="select every card shown (command-A)">Select all shown</button>
     </form>
@@ -129,7 +166,7 @@
       <span id="scanbar-awake" class="scanbar-awake" hidden title="caffeinate holds the Mac awake until the scan ends">keeping the Mac awake</span>
       <span class="spring"></span>
       <button type="button" id="scanbar-continue" class="btn small primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
-      <button type="button" id="scanbar-tab" class="link" title="the Scan tab (command-4)">Scan tab</button>
+      <button type="button" id="scanbar-tab" class="link" title="the Scan tab (command-5)">Scan tab</button>
     </div>
     </div>
     <div id="grid" class="grid" role="grid" aria-label="results"></div>
@@ -244,6 +281,26 @@
     </div>
   </section>
 
+  <section id="view-places" hidden>
+    <div class="subbar">
+      <span id="places-summary" class="places-summary"></span>
+      <span class="spring"></span>
+      <button type="button" id="places-fit" class="btn small" title="frame everything this shoot has a location for">Fit</button>
+      <button type="button" id="places-world" class="btn small" title="pull back to the whole world">World</button>
+      <button type="button" id="places-read" class="btn" title="read the location out of every file that has none; the file is only read, never changed">Read locations</button>
+    </div>
+    <div id="places-wrap" class="places-wrap">
+      <canvas id="places-map" class="places-map"></canvas>
+      <div id="places-scale" class="places-scale" hidden><span class="places-scale-bar"></span><span id="places-scale-text" class="mono"></span></div>
+      <div id="places-tip" class="places-tip mono" hidden></div>
+      <div id="places-empty" class="places-empty" hidden></div>
+    </div>
+    <div class="panel" data-panel="place-list">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Places in this shoot <span class="sub">a row opens that place in Search</span></button>
+      <div class="panel-body"><div id="place-rows" class="place-rows"></div></div>
+    </div>
+  </section>
+
   <section id="view-categories" hidden>
     <div class="subbar">
       <button type="button" id="categorise" class="btn" title="sort the shoot into categories with the on-device model">Categorise</button>
@@ -282,6 +339,7 @@
   <section id="view-index" hidden>
     <div class="subbar">
       <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder">Scan this folder</button>
+      <button type="button" id="scan-another" class="link" title="pick another folder and start scanning it now; this shoot stays scanned and can be opened again from the shoots menu">Scan another folder…</button>
       <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
       <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
       <span class="spring"></span>
@@ -299,7 +357,8 @@
           </div>
           <div class="project-actions">
             <button type="button" id="project-save" class="btn primary" title="save the project file to the folder above (command S)">Save project</button>
-            <button type="button" id="bundle-export" class="btn" title="pick another folder for the project file; it is remembered">Save to…</button>
+            <button type="button" id="bundle-export" class="btn" title="move the project file: pick another folder, and every Save from now on writes there">Save to…</button>
+            <button type="button" id="bundle-copy" class="btn" title="write one extra copy somewhere else, to hand over; the folder above and the saved time do not change">Save a copy…</button>
             <button type="button" id="bundle-reveal" class="btn" hidden title="show the project file in the Finder">Show in Finder</button>
           </div>
         </div>
@@ -400,6 +459,8 @@
         <p>"Show in Finder" (in the inspector, on the selection bar, or command shift R) opens the file's own folder with it highlighted, the way an editor reveals a clip. Up to 20 at a time.</p>
         <p>A file that is on the disk twice is one tile marked x2; a burst is one tile marked "burst of 12". The inspector shows the copies, or picks the sharpest frame. Export follows what is shown.</p>
         <p>The Sharp slider hides the soft ones.</p>
+        <p>Sort puts the grid in order: oldest or newest first, biggest or smallest file, by name, longest clip first. The tile shows whatever it is being sorted on. A search always comes back best match first, so the control greys out until you clear it.</p>
+        <p>Days in the sidebar breaks the shoot into the days it was shot on. Click one to see just that day. A file with no capture time counts on the day it was written, so nothing falls out of the list.</p>
         <p>Click selects. Shift-click takes a range, ⌘-click toggles one, ⌘A takes everything on screen.</p>
         <p>"Select all matching" takes every result, not just the 200 on screen.</p>
         <p>Enter or a double-click opens a shot. ← → step through, Esc closes.</p>
@@ -422,6 +483,16 @@
         <p>Name a group by typing in its row.</p>
         <p>"Find a person from a photo" pulls every frame of them from one reference. Name that result to save the person.</p>
         <p>Saved people export as their own folders.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-places">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Places</button>
+      <div class="panel-body help-lines">
+        <p>The Places tab draws every photo and clip that knows where it was taken, as heat on a world map. Drag to move, scroll to zoom, Fit frames the shoot and World pulls all the way back.</p>
+        <p>Click a pile, or a row in the list under the map, to see exactly those in Search. Shift-drag a box on the map to take an area instead.</p>
+        <p>Phones and drones write the location into every file. Most cameras never do unless they were paired with a phone that day, so a shoot photographed on a body alone will have little on the map and that is the camera, not sorted.</p>
+        <p>Place names come from a list of cities that ships with the app. Nothing is ever looked up: sorted makes no network request, here or anywhere else.</p>
+        <p>A shoot indexed before this existed has no locations stored. "Read locations" goes through those files once and reads the metadata out of them. It only reads.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-focus">

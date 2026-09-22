@@ -7,6 +7,23 @@ import numpy as np
 from . import db
 from .config import GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN, BURST_SIM, BURST_GAP_S
 
+SORTS = ("oldest", "newest", "biggest", "smallest", "name", "longest")
+
+def when_of(p: dict) -> str:
+    """The moment a row is filed under: its EXIF capture time when the file carries one, else the file's own
+    mtime. A screenshot, a WhatsApp copy or an export has no capture time, and hiding those at the end of the
+    shoot is not what anyone means by "by date"."""
+    t = p.get("taken_at")
+    if t:
+        return str(t)
+    m = p.get("mtime")
+    if m is None:
+        return ""
+    try:
+        return _dt.datetime.fromtimestamp(float(m)).isoformat(timespec="seconds")
+    except (ValueError, OSError, OverflowError):
+        return ""
+
 @dataclass
 class Filters:
     sharp_min_pct: float | None = None
@@ -14,6 +31,8 @@ class Filters:
     person_id: int | None = None
     taken_from: str | None = None
     taken_to: str | None = None
+    day: str | None = None          # one calendar day, YYYY-MM-DD, matched against when_of (see Index.days)
+    bbox: tuple[float, float, float, float] | None = None   # south, west, north, east: a box dragged on the map
     category: str | None = None
     kind: str | None = None         # "photos" | "videos" | None for both
     cluster: str | None = None      # a discovered category (photos.cluster)
@@ -154,8 +173,10 @@ class Index:
         # Index is often built on one thread (app startup) then queried from
         # FastAPI's worker threadpool.
         conn = db.connect(self.root)
-        rows = conn.execute("SELECT id, rel, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rel, size, mtime, lat, lon, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus FROM photos WHERE status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
+        for p in self.photos.values():
+            p["when"] = when_of(p)
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
         for r, rank in zip(rows, order):
@@ -190,6 +211,19 @@ class Index:
         t = p["taken_at"] or ""
         if f.taken_from and t < f.taken_from: return False
         if f.taken_to and t > f.taken_to: return False
+        # The day rows in the sidebar are built from when_of, so the filter behind them has to be too, or a
+        # screenshot counted on 18 Sep would vanish the moment you clicked 18 Sep.
+        if f.day and (p["when"] or "")[:10] != f.day: return False
+        # The map's box. A file with no location is never in a box: it is not "somewhere else", it is nowhere.
+        if f.bbox is not None:
+            lat, lon = p.get("lat"), p.get("lon")
+            if lat is None or lon is None: return False
+            south, west, north, east = f.bbox
+            if not (south <= lat <= north): return False
+            if west <= east:
+                if not (west <= lon <= east): return False
+            elif not (lon >= west or lon <= east):   # a box dragged across the date line
+                return False
         return True
 
     def _confidence(self, p: dict, f: Filters) -> None:
@@ -202,11 +236,51 @@ class Index:
                 sure, conf = sure and m[0], min(conf, m[1])
         p["sure"], p["confidence"] = sure, round(conf, 4)
 
-    def query(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters()) -> list[dict]:
-        """Every photo that passes the filters, sorted by similarity (text or image query) or by capture time.
-        With a category or cluster filter the sure ones come first in that order, then the "less sure"
-        band (sure=False) sorted by confidence desc; sure_only drops the band. Every row in a duplicate set
-        or a burst carries group (see _fold); fold keeps the first of each set only."""
+    def _order(self, cands: list[dict], sort: str | None) -> None:
+        """The order of an unsearched grid. Capture time, oldest first, is the default: a shoot reads in the
+        order it happened. The others are the sort control, and all of them settle ties on rel so paging is
+        stable. A folded set shows its first row in this order, so "biggest" shows the biggest copy."""
+        if sort == "newest":
+            cands.sort(key=lambda p: (p["when"], p["rel"]), reverse=True)
+        elif sort == "biggest":
+            cands.sort(key=lambda p: (-(p["size"] or 0), p["rel"]))
+        elif sort == "smallest":
+            cands.sort(key=lambda p: ((p["size"] or 0), p["rel"]))
+        elif sort == "name":
+            cands.sort(key=lambda p: (p["rel"].lower(), p["rel"]))
+        elif sort == "longest":
+            cands.sort(key=lambda p: (-(p["duration"] or 0.0), p["rel"]))
+        else:
+            cands.sort(key=lambda p: (p["when"], p["rel"]))
+
+    def points(self) -> list[tuple[float, float]]:
+        """(lat, lon) for every ok row that carries one. The map draws these and nothing else."""
+        return [(float(p["lat"]), float(p["lon"])) for p in self.photos.values()
+                if p.get("lat") is not None and p.get("lon") is not None]
+
+    def days(self) -> list[dict]:
+        """One row per calendar day with anything in it, oldest first: {day, n, videos, bytes}. Built from
+        when_of, so files with no EXIF time still land on the day they were written."""
+        out: dict[str, dict] = {}
+        for p in self.photos.values():
+            day = (p["when"] or "")[:10]
+            if len(day) != 10:
+                continue
+            d = out.setdefault(day, {"day": day, "n": 0, "videos": 0, "bytes": 0})
+            d["n"] += 1
+            d["bytes"] += int(p["size"] or 0)
+            if p.get("kind") == "video":
+                d["videos"] += 1
+        return [out[k] for k in sorted(out)]
+
+    def query(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
+              sort: str | None = None) -> list[dict]:
+        """Every photo that passes the filters, in sort order, or by similarity when there is a text or image
+        query (a query scores every photo, so ranking it any other way throws the query away: the UI greys
+        the sort control out while one is running). With a category or cluster filter the sure ones come
+        first in that order, then the "less sure" band (sure=False) sorted by confidence desc; sure_only
+        drops the band. Every row in a duplicate set or a burst carries group (see _fold); fold keeps the
+        first of each set only."""
         person_ids = self._person_photo_ids(filters.person_id) if filters.person_id is not None else None
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         for p in cands: self._confidence(p, filters)
@@ -227,7 +301,7 @@ class Index:
             cands.sort(key=lambda p: -p["score"])
         else:
             for p in cands: p["score"] = 0.0
-            cands.sort(key=lambda p: ((p["taken_at"] or "~"), p["rel"]))
+            self._order(cands, sort)
         unsure = [p for p in cands if not p["sure"]]
         if unsure:
             unsure.sort(key=lambda p: -p["confidence"])     # stable: ties keep the order above
@@ -235,5 +309,5 @@ class Index:
         return self._fold(cands, filters.fold)
 
     def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
-               limit: int = 200, offset: int = 0) -> list[dict]:
-        return [dict(p) for p in self.query(text, image_id, filters)[offset:offset + limit]]
+               limit: int = 200, offset: int = 0, sort: str | None = None) -> list[dict]:
+        return [dict(p) for p in self.query(text, image_id, filters, sort)[offset:offset + limit]]

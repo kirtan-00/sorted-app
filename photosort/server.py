@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import mimetypes
+import os
 import re
 import shutil
 import sqlite3
@@ -19,10 +20,11 @@ from . import usage
 from . import awake
 from . import classify as classify_mod
 from . import focus as focus_mod
+from . import places as places_mod
 from . import settings
 from . import version as version_mod
-from .config import app_home, export_root
-from .search import Index, Filters
+from .config import DB_NAME, app_home, export_root, shoot_slug
+from .search import Index, Filters, SORTS
 from .export import export_ids, export_bytes, ids_jobs, jobs_bytes
 
 UI = Path(__file__).parent / "ui"
@@ -189,12 +191,50 @@ def _load_recent() -> list[str]:
         return []
 
 
+def _recent_facts(path_str: str) -> dict:
+    """What the shoots menu can say about a recent shoot without opening it: how many photos and clips
+    its index holds, and the project file it was last saved to or opened from. Read straight out of that
+    shoot's own index.db, never through db.connect or db.index_dir: those build the schema and the thumb
+    folders, and a listing must not create an index for a folder that has none. Anything unreadable (an
+    older db, a locked one, none at all) comes back as zeros, so one odd shoot cannot break the list."""
+    out = {"photos": 0, "videos": 0, "items": 0, "project": None, "indexed": False}
+    dbf = app_home() / shoot_slug(Path(path_str)) / DB_NAME
+    if not dbf.is_file():
+        return out
+    conn = None
+    try:
+        conn = sqlite3.connect(dbf, timeout=1)
+        r = conn.execute("""SELECT SUM(status='ok' AND COALESCE(kind,'photo') != 'video'),
+                                   SUM(status='ok' AND kind='video') FROM photos""").fetchone()
+        out["photos"] = int(r[0] or 0)
+        out["videos"] = int(r[1] or 0)
+        out["items"] = out["photos"] + out["videos"]
+        out["indexed"] = out["items"] > 0
+        row = conn.execute("SELECT value FROM meta WHERE key='project_path'").fetchone()
+        if row and row[0] and Path(row[0]).is_file():
+            out["project"] = str(row[0])
+    except (sqlite3.Error, OSError, ValueError):
+        pass
+    finally:
+        if conn is not None:
+            try: conn.close()
+            except sqlite3.Error: pass
+    return out
+
+
 def _save_recent(path_str: str) -> None:
+    """Written through a temp file and renamed into place: two windows opening at the same moment used to
+    be able to catch each other mid-write, read nothing, and leave the list with one shoot in it."""
     p = app_home() / RECENT_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
     recent = [r for r in _load_recent() if r != path_str]
     recent.insert(0, path_str)
-    p.write_text(json.dumps(recent[:RECENT_MAX]))
+    tmp = p.with_name(p.name + f".{os.getpid()}.part")
+    try:
+        tmp.write_text(json.dumps(recent[:RECENT_MAX]))
+        os.replace(tmp, p)
+    except OSError:
+        tmp.unlink(missing_ok=True)
 
 
 def create_app(root: Path | None = None, open_file: Path | None = None) -> FastAPI:
@@ -211,6 +251,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         "stale": False,
         "classify": {"running": False, "counts": {}, "discovered": {}, "error": None},
         "focus": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "places": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
         "export_req": None,        # {route, body, root} of the running export, for the export history row at the end
         # Where exports land instead of export_root() (another disk), or None for the default.
@@ -219,6 +260,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         # switch, so two rapid export POSTs (or a switch during the preflight) cannot both pass.
         "export_lock": threading.Lock(),
         "focus_lock": threading.Lock(),
+        "places_lock": threading.Lock(),
     }
     app.state.photosort = state
 
@@ -319,7 +361,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     if root is not None:
         _open_root(root)
-        _log_folder_open()
+        _save_recent(str(root))      # the folder the app was started with belongs in the shoots menu too,
+        _log_folder_open()           # or switching away from it loses the only way back
 
     def _switch_root(new_root: Path) -> dict:
         if state["running"]:
@@ -453,10 +496,22 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     @app.get("/api/folder/recent")
     def recent_folders():
+        """Every shoot the menu can offer, newest first, with what is cheap to know without opening it:
+        photos and videos from its own index, the project file saved for it (or None), missing True when
+        the folder is not on this Mac right now (an unplugged disk still lists, it just cannot open), and
+        disk, what to plug back in. open marks the shoot that is open now; it heads the list even when it
+        was never switched to (a folder the app was started with is not in recent.json)."""
+        paths = _load_recent()
+        here = str(state["root"]) if state["root"] is not None else None
+        if here is not None and here not in paths:
+            paths = [here] + paths
         out = []
-        for path_str in _load_recent():
+        for path_str in paths:
             p = Path(path_str)
-            out.append({"path": path_str, "name": p.name or path_str})
+            row = {"path": path_str, "name": p.name or path_str, "disk": _disk_name(p),
+                   "missing": not p.is_dir(), "open": path_str == here}
+            row.update(_recent_facts(path_str))
+            out.append(row)
         return {"recent": out}
 
     @app.get("/api/stats")
@@ -516,6 +571,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             fix = "continue"
         elif cut and cut["kind"] == "focus":
             fix = "focus"                     # Continue for a focus pass is POST /api/focus, not a scan
+        elif cut and cut["kind"] == "places":
+            fix = "places"                    # and for a locations pass it is POST /api/places/read
         elif new_on_disk:
             fix = "rescan"
         elif faces_pending:
@@ -564,37 +621,64 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         return dict(state["progress"], running=state["running"], awake=awake.held())
 
     def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
-                 hide_bad=0, hide_soft=0, fold=0) -> Filters:
+                 hide_bad=0, hide_soft=0, fold=0, day=None, bbox=None) -> Filters:
         if kind not in (None, "", "photos", "videos"):
             raise HTTPException(400, "kind must be photos or videos")
+        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise HTTPException(400, "day must be YYYY-MM-DD")
+        box = _bbox(bbox)
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
-                       taken_to=taken_to, category=category or None, kind=kind or None,
+                       taken_to=taken_to, day=day or None, bbox=box, category=category or None, kind=kind or None,
                        cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None,
                        hide_bad=bool(hide_bad), hide_soft=bool(hide_soft), fold=bool(fold))
+
+    def _bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
+        """south,west,north,east as the map hands it over. A box may cross the date line (west > east), which
+        is why it is never just a pair of ranges."""
+        if not bbox:
+            return None
+        try:
+            south, west, north, east = (float(x) for x in bbox.split(","))
+        except ValueError:
+            raise HTTPException(400, "bbox must be south,west,north,east")
+        if not (-90 <= south <= north <= 90) or not (-180 <= west <= 180 and -180 <= east <= 180):
+            raise HTTPException(400, "bbox is outside the world")
+        return (south, west, north, east)
+
+    def _sort(sort: str | None) -> str | None:
+        if sort in (None, ""):
+            return None
+        if sort not in SORTS:
+            raise HTTPException(400, f"sort must be one of {', '.join(SORTS)}")
+        return sort
 
     @app.get("/api/search")
     def search(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
-               aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, limit: int = 200, offset: int = 0):
+               aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
+               bbox: str | None = None, sort: str | None = None, limit: int = 200, offset: int = 0):
         """Each result carries kind, duration and aerial, sure and confidence, and focus (None until the focus
         pass ran, else ok / soft / bad); with a category or cluster filter the sure ones come first, then the
         "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it).
         kind=photos|videos keeps one kind; aerial=1 keeps drone shots only; hide_bad=1 drops rows labelled
         bad, hide_soft=1 drops soft and bad (unchecked rows are never hidden). A row in a duplicate set or a
-        burst carries group {kind: copies|burst, n, members, sharpest}; fold=1 keeps one row per set."""
+        burst carries group {kind: copies|burst, n, members, sharpest}; fold=1 keeps one row per set.
+        sort is one of search.SORTS (default oldest first by capture time) and is ignored while q or
+        image_id is set: a query scores every photo, so any other order would throw the query away."""
         if state["root"] is None:
             return {"results": [], "total": 0, "offset": 0, "limit": limit}
+        sort = _sort(sort)
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         t0 = time.time()
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox), sort=sort)
         except LookupError as e:
             raise HTTPException(404, str(e))
         # The usage log keeps the query's length and first characters plus which filters were on; an empty
         # search (the grid's own reload) and a "Show more" page are not logged.
         filt = {k: v for k, v in dict(sharp=sharp, faces=faces, person=bool(person), taken_from=taken_from, taken_to=taken_to,
-                                      category=category, kind=kind, cluster=cluster, sure_only=sure_only, aerial=aerial,
+                                      day=day, bbox=bbox, category=category, kind=kind, cluster=cluster, sure_only=sure_only, aerial=aerial,
                                       hide_bad=hide_bad, hide_soft=hide_soft, image_id=bool(image_id)).items() if v}
         if offset == 0 and (q or filt):
             usage.log("search", q=q or "", filters=filt, total=len(rows), ms=round((time.time() - t0) * 1000))
@@ -645,11 +729,12 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def search_ids(q: str | None = None, image_id: int | None = None, sharp: float | None = None, faces: str | None = None,
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                    category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
-                   aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0):
+                   aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
+                   bbox: str | None = None, sort: str | None = None):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox), sort=_sort(sort))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
@@ -916,6 +1001,15 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         conn = db.connect(state["root"])
         return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn)}
 
+    @app.get("/api/days")
+    def days():
+        """The shoot day by day, oldest first: {day, n, videos, bytes}. A file with no capture time counts on
+        the day it was written, so nothing falls out of the timeline. No filters: this is the whole shoot, the
+        way the category counts are."""
+        if state["root"] is None:
+            return {"days": []}
+        return {"days": ix().days()}
+
     @app.post("/api/categories/discovered/rename")
     def rename_discovered(req: RenameReq):
         """Rename a discovered category (an unnamed "group N", or a wrong name) in place. 409 while
@@ -1025,6 +1119,75 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         if state["root"] is None:
             return {"checked": 0, "unchecked": 0, "bad": 0, "soft": 0}
         return focus_mod.status(state["root"])
+
+    # ===== places: where the shoot was shot. Latitude and longitude are read from each file's own metadata
+    # while indexing; this pass is the catch up for a shoot indexed before that, and the map reads the piles.
+    # Nothing here reaches the network: a place gets a name only from the city list shipped with the app. =====
+
+    @app.get("/api/places")
+    def places():
+        """{clusters, located, unlocated, total, read_at, bounds}. clusters are 25 km piles, biggest first,
+        each with the box it covers so a click can filter to exactly it. bounds is the box around every
+        located file (null when nothing is located), which is where the map opens."""
+        if state["root"] is None:
+            return {"clusters": [], "located": 0, "unlocated": 0, "total": 0, "read_at": None, "bounds": None}
+        st = places_mod.status(state["root"])
+        pts = ix().points()
+        bounds = None
+        if pts:
+            lats = [p[0] for p in pts]; lons = [p[1] for p in pts]
+            bounds = {"south": min(lats), "west": min(lons), "north": max(lats), "east": max(lons)}
+        return dict(st, clusters=places_mod.cluster(pts), bounds=bounds)
+
+    @app.post("/api/places/read")
+    def start_places():
+        """Read the location out of every ok row that has none, from the file's own metadata. 409 while
+        indexing, categorising, checking focus or exporting. {"started": true, "total": n}."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot read locations while scanning")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "cannot read locations while categorising")
+        if state["focus"]["running"]:
+            raise HTTPException(409, "cannot read locations while the focus pass is running")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot read locations while an export is running")
+        with state["places_lock"]:
+            if state["places"]["running"]:
+                raise HTTPException(409, "already reading locations")
+            root_at_start = state["root"]
+            total = places_mod.status(root_at_start)["unlocated"]
+            state["places"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def prog(d):
+            state["places"].update(done=d.get("done", 0), total=d.get("total", total))
+
+        t0 = time.time()
+
+        def _run_places():
+            try:
+                with awake.hold():
+                    state["places"]["counts"] = places_mod.read_locations(root_at_start, progress=prog)
+            except Exception as e:
+                state["places"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["places"]["running"] = False
+                c = state["places"]["counts"] or {}
+                usage.log("places_read", found=c.get("found", 0), read=c.get("read", 0),
+                          missing=c.get("missing", 0), seconds=round(time.time() - t0, 1),
+                          error=state["places"]["error"])
+
+        threading.Thread(target=_run_places, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.get("/api/places/progress")
+    def places_progress():
+        """{running, done, total, counts, error, awake}; counts is {found, read, missing} once it ended."""
+        return dict(state["places"], awake=awake.held())
+
+    # ===== end places =====
 
     EXPORT_HEADROOM = 1 << 30   # keep 1 GiB free on the destination disk after a copy
 
@@ -1627,10 +1790,11 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     # Index bundles: the whole index (db with saved people, thumbs, grid) as one zip on the export
     # destination, and the reverse: install such a zip here and open the shoot without re-indexing.
 
-    def _start_bundle_export(dest: Path | None) -> dict:
+    def _start_bundle_export(dest: Path | None, remember: bool = True, what: str = "bundle") -> dict:
         """Pack the open shoot's index into <dest>/sorted_<shoot>.sorted in the background.
         dest None means the export destination. A dest that is the shoot root or inside it is refused
-        (bundle_path raises), as is one that is not a folder."""
+        (bundle_path raises), as is one that is not a folder. remember False writes the file and nothing
+        else: the shoot's remembered folder and its last-saved stamp stay where they were (Save a copy)."""
         from . import bundle
         with state["export_lock"]:
             root_at_start = state["root"]
@@ -1654,8 +1818,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             n_files = len(bundle.bundle_files(root_at_start))
             nbytes = bundle.bundle_bytes(root_at_start)
             _check_free(nbytes, base, hint="Free some space there first.")
-            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None, "what": "bundle"}
-        t0 = _export_started("bundle", "local", n_files)
+            state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None, "what": what}
+        t0 = _export_started(what, "local", n_files)
 
         def prog(d):
             state["export"].update(d)
@@ -1665,12 +1829,13 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 with awake.hold():
                     out = bundle.export_bundle(root_at_start, base, progress=prog)
                     state["export"]["path"] = str(out)
-                    _remember_project(root_at_start, out)
+                    if remember:
+                        _remember_project(root_at_start, out)
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
                 state["export"]["running"] = False
-                _export_finished("bundle", "local", t0, nbytes)
+                _export_finished(what, "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_files, "dest": str(base)}
@@ -1683,10 +1848,13 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     # the picker says (Save to). The place is kept in the shoot's own index (project_path), so the next
     # Save, and the next Mac that loads the file, know where it lives. =====
     def _remember_project(root: Path, path: Path, saved: bool = True) -> None:
-        """saved False: the file was opened, not written; the save time inside it (the other Mac's) stands."""
+        """saved False: the file was opened, not written; the save time inside it (the other Mac's) stands,
+        and project_opened marks it, so the card says "opened from this file" instead of claiming this Mac
+        saved it. The next real save clears the mark."""
         conn = db.connect(root)
         try:
             db.set_meta(conn, "project_path", str(path))
+            db.set_meta(conn, "project_opened", "0" if saved else "1")
             if saved:
                 db.set_meta(conn, "project_saved_at", time.strftime("%Y-%m-%d %H:%M:%S"))
         finally:
@@ -1695,12 +1863,14 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def _project_info(root: Path) -> dict:
         """name: the file name for this shoot. path: where it was last saved or loaded from (None until then),
         exists: that file is there right now. dir: where Save writes next (the remembered folder, else the
-        default beside the shoot). saved_at: the last save on this Mac."""
+        default beside the shoot). saved_at: the last save on this Mac. opened: the remembered file was
+        opened here, not written here, so saved_at (if any) came from the Mac that made it."""
         from . import bundle
         conn = db.connect(root)
         try:
             remembered = db.get_meta(conn, "project_path")
             saved_at = db.get_meta(conn, "project_saved_at")
+            opened = db.get_meta(conn, "project_opened") == "1"
         finally:
             conn.close()
         rp = Path(remembered) if remembered else None
@@ -1714,7 +1884,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             d = Path.home() / "Documents" / "sorted"
         return {"name": bundle.project_name(root), "path": str(rp) if rp else None,
                 "exists": bool(rp and rp.is_file()), "dir": str(d), "saved_at": saved_at,
-                "default_dir": str(bundle.default_project_dir(root))}
+                "opened": bool(rp and opened), "default_dir": str(bundle.default_project_dir(root))}
 
     @app.get("/api/project")
     def get_project():
@@ -1734,6 +1904,49 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         except OSError as e:
             raise HTTPException(400, f"cannot create {d}: {e.strerror or e}")
         return _start_bundle_export(d)
+
+    # ===== Save a copy: the same file written somewhere else, and nothing about the shoot moves. Save to
+    # picks a new home and remembers it; a copy is a hand-off (one for the editor, one for the archive) and
+    # leaves both the remembered folder and the last-saved stamp alone. The folder Save project writes to is
+    # refused, because a copy landing there would overwrite the real save under the old stamp. =====
+    def _copy_gate(dest: Path) -> None:
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        home = Path(_project_info(state["root"])["dir"]).resolve()
+        try:
+            picked = dest.expanduser().resolve()
+        except OSError:
+            return
+        if picked == home:
+            raise HTTPException(400, "that is the folder Save project already writes to; use Save project instead")
+
+    @app.post("/api/bundle/copy")
+    def copy_bundle_api(req: BundleExportReq):
+        if not req.dest:
+            raise HTTPException(400, "a copy needs a folder to go in")
+        _copy_gate(Path(req.dest))
+        return _start_bundle_export(Path(req.dest), remember=False, what="copy")
+
+    @app.post("/api/bundle/copy/choose")
+    def copy_bundle_choose():
+        """Save a copy: the folder picker, opening on the export destination, then one copy written there.
+        The shoot's remembered folder and last-saved stamp are untouched."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot save the project while scanning")
+        if state["export"]["running"]:
+            raise HTTPException(409, "an export is already running")
+        start = _resolve_base()
+        while not start.is_dir() and start.parent != start:
+            start = start.parent
+        quoted = str(start).replace("\\", "\\\\").replace('"', '\\"')
+        path_str = _run_picker(f'POSIX path of (choose folder with prompt "Save a copy of the project file where?" default location (POSIX file "{quoted}"))', "folder")
+        if path_str is None:
+            return Response(status_code=204)
+        _copy_gate(Path(path_str))
+        return _start_bundle_export(Path(path_str), remember=False, what="copy")
+    # ===== end Save a copy =====
 
     @app.post("/api/bundle/export/choose")
     def export_bundle_choose():

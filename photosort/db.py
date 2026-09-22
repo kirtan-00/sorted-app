@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS photos(
   embed BLOB, status TEXT DEFAULT 'ok', indexed_at TEXT DEFAULT (datetime('now')),
   category TEXT, category_score REAL, kind TEXT DEFAULT 'photo', duration REAL,
   category_guess TEXT, category_guess_score REAL, cluster TEXT, cluster_score REAL, aerial INTEGER DEFAULT 0,
-  focus TEXT, focus_score REAL);
+  focus TEXT, focus_score REAL, lat REAL, lon REAL);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   idx INTEGER, start REAL, end REAL, frame TEXT, embed BLOB, category TEXT, category_score REAL);
@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS photos_status_rel ON photos(status, rel);
 """
 
 PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
-              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration","aerial"]
+              "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration","aerial","lat","lon"]
 
 def index_dir(root: Path) -> Path:
     d = app_home() / shoot_slug(root)
@@ -103,6 +103,12 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN focus TEXT")
     if "focus_score" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN focus_score REAL")
+    # lat, lon: where the file says it was shot, signed decimal degrees. Read from the file's own metadata
+    # only (EXIF GPS for a photo, the container's ISO 6709 tag for a clip), never looked up anywhere.
+    if "lat" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN lat REAL")
+    if "lon" not in cols:
+        conn.execute("ALTER TABLE photos ADD COLUMN lon REAL")
     conn.executescript(INDEXES)
     conn.commit()
     # Without statistics the planner takes a (status, ...) index for EVERY status='ok' query, including the
