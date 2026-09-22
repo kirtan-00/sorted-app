@@ -359,11 +359,12 @@ def test_discover_names_by_contrast_with_the_shoot_mean(tmp_path, monkeypatch):
         assert abs(c["score"] - float(T[labels.index(c["name"])] @ cent)) < 1e-3   # plain cosine, not the contrast
     assert [c["name"] for c in cm.discover(tmp_path, k=3)] == names
 
-def test_discover_same_top_label_does_not_cascade_to_the_next_one(tmp_path, monkeypatch):
-    """Two clusters whose best vocabulary label is the same word: the later (smaller) one is an unnamed
-    group, never the next-best label. (Changed with the naming gates: the cascade to "its next-best unused
-    label" is what named three more interview clusters "doctor", "patient in a hospital" and "businessman
-    in a suit" on the first documentary.) Names stay distinct."""
+def test_discover_same_top_label_is_numbered_never_renamed(tmp_path, monkeypatch):
+    """Two clusters whose best vocabulary label is the same word are the same thing split by k-means: the
+    later one keeps the word with a number, it never cascades to the next-best label (that cascade named
+    three more interview clusters "doctor", "patient in a hospital" and "businessman in a suit" on the first
+    documentary) and it is not thrown away as "group N" either (5 of 7 unnamed groups there, 480 of 955
+    items, were nameless only because a bigger cluster had the word). Names stay distinct."""
     from photosort import classify as cm
     centres, groups = _clustered_shoot(tmp_path, sizes=(24, 16, 20), noise=0.02)
     rng = np.random.default_rng(5)
@@ -372,7 +373,7 @@ def test_discover_same_top_label_does_not_cascade_to_the_next_one(tmp_path, monk
     T = np.vstack([between, centres[2], _unit(rng, 2)]).astype(np.float32)
     monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (["crane", "dog", "excavator", "cat"], T))
     out = cm.discover(tmp_path, k=3)
-    assert [(c["name"], c["named"]) for c in out] == [("crane", True), ("dog", True), ("group 1", False)]
+    assert [(c["name"], c["named"]) for c in out] == [("crane", True), ("dog", True), ("crane 2", True)]
     assert sorted(out[0]["photo_ids"]) == sorted(groups[0]) and sorted(out[2]["photo_ids"]) == sorted(groups[1])
 
 def test_discover_folds_small_clusters_into_the_nearest_neighbour(tmp_path, monkeypatch):
@@ -558,29 +559,43 @@ def test_discover_loaded_labels_need_a_decisive_vote(tmp_path, monkeypatch):
         assert out[0]["named"] is named and out[0]["name"] == ("slum" if named else "group 1"), (share, out[0])
         assert cm.DISCOVER_VOTE_SHARE < 0.40 < cm.DISCOVER_LOADED_SHARE < 0.80
 
-def test_discover_unnamed_groups_are_numbered_by_size_and_deterministic(tmp_path, monkeypatch):
-    """Two clusters whose best label is the same word: the smaller is "group 1", not the next-best label
-    (that cascade produced "doctor" and "patient in a hospital" for two more interview clusters). Unnamed
-    groups are numbered by size and the run is deterministic."""
+def test_discover_repeated_names_are_numbered_by_size_and_deterministic(tmp_path, monkeypatch):
+    """Three clusters whose best label is the same word: biggest first, then "same 2" and "same 3", never
+    the next-best label (that cascade produced "doctor" and "patient in a hospital" for two more interview
+    clusters). The numbers follow size and the run is deterministic."""
     from photosort import classify as cm
     centres, groups = _clustered_shoot(tmp_path, sizes=(24, 16, 12))
-    # every cluster's own centre is listed under the one word "same": all three pick it, only the biggest keeps it
+    # every cluster's own centre is listed under the one word "same": all three pick it
     T = np.stack([centres[0], centres[1], centres[2], _unit(np.random.default_rng(9))[0]]).astype(np.float32)
     monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (["same", "same", "same", "x"], T))
     out = cm.discover(tmp_path, k=3)
-    assert [(c["name"], c["named"], c["size"]) for c in out] == [("same", True, 24), ("group 1", False, 16), ("group 2", False, 12)]
-    assert all(c["score"] == 0.0 for c in out[1:]) and out[0]["score"] > 0
+    assert [(c["name"], c["named"], c["size"]) for c in out] == [("same", True, 24), ("same 2", True, 16), ("same 3", True, 12)]
+    assert all(c["score"] > 0 for c in out)
     again = cm.discover(tmp_path, k=3)
     assert [(c["name"], c["photo_ids"]) for c in again] == [(c["name"], c["photo_ids"]) for c in out]
     assert cm.is_unnamed_group("group 7") and not cm.is_unnamed_group("group") and not cm.is_unnamed_group("meeting room")
 
-def test_discover_and_store_keeps_unnamed_groups_apart(tmp_path, monkeypatch):
+def test_discover_and_store_numbers_a_repeated_name(tmp_path, monkeypatch):
     from photosort import classify as cm
     centres, groups = _clustered_shoot(tmp_path, sizes=(20, 12))
     T = np.stack([centres[0], centres[1]]).astype(np.float32)
     monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (["excavator", "excavator"], T))
-    assert cm.discover_and_store(tmp_path, k=2) == {"excavator": 20, "group 1": 12}
-    assert db.cluster_counts(db.connect(tmp_path)) == {"excavator": 20, "group 1": 12}
+    assert cm.discover_and_store(tmp_path, k=2) == {"excavator": 20, "excavator 2": 12}
+    assert db.cluster_counts(db.connect(tmp_path)) == {"excavator": 20, "excavator 2": 12}
+
+
+def test_discover_keeps_group_n_for_a_cluster_that_cannot_name_itself(tmp_path, monkeypatch):
+    """The gates still stand: a cluster whose members do not vote for its candidate is "group N", not a
+    numbered copy of somebody else's word."""
+    from photosort import classify as cm
+    centres, groups = _clustered_shoot(tmp_path, sizes=(20, 12), noise=0.02)
+    rng = np.random.default_rng(11)
+    # the only labels are the first centre and two random vectors: the second cluster votes for nothing near it
+    T = np.vstack([centres[0], _unit(rng, 2)]).astype(np.float32)
+    monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (["excavator", "cat", "dog"], T))
+    out = cm.discover(tmp_path, k=2)
+    assert out[0]["name"] == "excavator" and out[0]["named"] is True
+    assert out[1]["named"] is False and cm.is_unnamed_group(out[1]["name"])
 
 def test_rename_cluster_moves_every_row_and_rejects_bad_names(tmp_path, monkeypatch):
     """The user's correction for what stays unnamed or wrong: every row of the old name takes the new
@@ -594,11 +609,11 @@ def test_rename_cluster_moves_every_row_and_rejects_bad_names(tmp_path, monkeypa
     monkeypatch.setattr(cm, "_vocab_matrix", lambda e: (["excavator", "excavator"], T))
     cm.discover_and_store(tmp_path, k=2)
     conn = db.connect(tmp_path)
-    before = {r["id"]: r["cluster_score"] for r in conn.execute("SELECT id, cluster_score FROM photos WHERE cluster='group 1'")}
-    assert cm.rename_cluster(tmp_path, "group 1", " site huts ") == 12
+    before = {r["id"]: r["cluster_score"] for r in conn.execute("SELECT id, cluster_score FROM photos WHERE cluster='excavator 2'")}
+    assert cm.rename_cluster(tmp_path, "excavator 2", " site huts ") == 12
     assert db.cluster_counts(conn) == {"excavator": 20, "site huts": 12}
     assert {r["id"]: r["cluster_score"] for r in conn.execute("SELECT id, cluster_score FROM photos WHERE cluster='site huts'")} == before
-    assert cm.rename_cluster(tmp_path, "group 1", "anything") == 0
+    assert cm.rename_cluster(tmp_path, "excavator 2", "anything") == 0
     for bad in ("", "   ", ".", "..", "excavator", "group 3"):
         with pytest.raises(ValueError):
             cm.rename_cluster(tmp_path, "site huts", bad)

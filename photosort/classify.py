@@ -333,8 +333,11 @@ def discover(root: Path, k: int | None = None) -> list[dict]:
       2. that share of members must reach DISCOVER_VOTE_SHARE (DISCOVER_LOADED_SHARE for VOCAB_LOADED:
          a centroid of 37 unrelated B-roll clips matched "screenshot" best while no single clip did);
       3. plain cos(centroid, label) must reach DISCOVER_NAME_MIN_COS;
-      4. a label already carried by a bigger cluster stays there: the smaller cluster is more of the
-         same and says so, instead of cascading to "patient in a hospital"."""
+      4. a label already carried by a bigger cluster is not given away to a second-best word: the smaller
+         cluster keeps it with a number ("seated interview 2"), because it IS more of the same. It earns the
+         number only by passing gates 1 to 3 on its own; a cluster that cannot name itself is still "group N".
+         Measured on the first corporate documentary: 5 of the 7 unnamed groups (480 of 955 items) were
+         nameless only because a bigger cluster had taken their word, one of them with 89% of its own votes."""
     from sklearn.cluster import KMeans
     root = Path(root); conn = db.connect(root)
     ids, M = db.load_embeds(conn)
@@ -372,8 +375,13 @@ def discover(root: Path, k: int | None = None) -> list[dict]:
         else:
             winner, share = _vote(contrast_top[idx], C[idx, contrast_top[idx]], len(vocab))
         need = DISCOVER_LOADED_SHARE if name in VOCAB_LOADED else DISCOVER_VOTE_SHARE
-        ok = bool(winner == p and share[p] >= need and float(plain[p]) >= DISCOVER_NAME_MIN_COS and name not in used)
+        ok = bool(winner == p and share[p] >= need and float(plain[p]) >= DISCOVER_NAME_MIN_COS)
         if ok:
+            if name in used:                      # the same thing, split by k-means: number it, never rename it
+                nth = 2
+                while f"{name} {nth}" in used:
+                    nth += 1
+                name = f"{name} {nth}"
             used.add(name); score = float(plain[p])
         else:
             unnamed += 1; name, score = f"group {unnamed}", 0.0
