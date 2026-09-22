@@ -2342,3 +2342,27 @@ def test_launch_hands_over_the_double_clicked_file_once(tmp_path):
     assert c.get("/api/launch").json() == {"open": str(tmp_path / "sorted_x.sorted")}
     assert c.get("/api/launch").json() == {"open": None}
     assert TestClient(create_app(None)).get("/api/launch").json() == {"open": None}
+
+
+# ===== show in the Finder: ids in, open -R out; only files of the open shoot, only ones that are there =====
+def test_reveal_ids_opens_the_finder_for_the_selected_files(tmp_path, monkeypatch):
+    import subprocess as sp
+    c = _shoot_client(tmp_path, n=3)
+    calls = []
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda cmd, *a, **k: calls.append(cmd) or sp.CompletedProcess(cmd, returncode=0, stdout="", stderr=""))
+    ids = [r["id"] for r in c.get("/api/search").json()["results"]]
+    r = c.post("/api/reveal/ids", json={"ids": ids[:2]})
+    assert r.status_code == 200 and r.json()["revealed"] == 2 and r.json()["missing"] == 0
+    assert calls[-1][:2] == ["open", "-R"] and len(calls[-1]) == 4
+    assert all(str(tmp_path.resolve()) in p for p in calls[-1][2:])
+    # an id that is not in this shoot, and a row whose file has gone: counted as missing, never raised
+    (tmp_path / "p0.jpg").unlink()
+    r = c.post("/api/reveal/ids", json={"ids": ids + [999999]})
+    assert r.status_code == 200 and r.json()["revealed"] == 2 and r.json()["missing"] == 2
+    # nothing left to show, and an empty list
+    for p in tmp_path.glob("*.jpg"):
+        p.unlink()
+    assert c.post("/api/reveal/ids", json={"ids": ids}).status_code == 400
+    assert c.post("/api/reveal/ids", json={"ids": []}).status_code == 400
+    assert TestClient(create_app(None)).post("/api/reveal/ids", json={"ids": [1]}).status_code == 400

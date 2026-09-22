@@ -152,6 +152,10 @@ class RevealReq(BaseModel):
     path: str
 
 
+class RevealIdsReq(BaseModel):
+    ids: list[int]
+
+
 class DriveLinkReq(BaseModel):
     link: str
 
@@ -1772,6 +1776,42 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "the Finder did not answer")
         return {"revealed": str(p)}
+
+    # ===== show in the Finder: the shoot's own files, picked in the grid. The UI sends ids, never paths;
+    # the path comes from the index, so nothing outside the open shoot can be revealed. =====
+    REVEAL_MAX = 20
+
+    @app.post("/api/reveal/ids")
+    def reveal_ids(req: RevealIdsReq):
+        """open -R on the selected photos and clips: the Finder opens their folder with them highlighted.
+        Up to 20 at a time (the Finder opens a window per folder). Files that are not there right now
+        (disk unplugged, moved) are reported, not raised."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        ids = list(dict.fromkeys(req.ids))[:REVEAL_MAX]
+        if not ids:
+            raise HTTPException(400, "nothing selected")
+        conn = db.connect(state["root"])
+        rows = conn.execute(f"SELECT id, rel FROM photos WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+        paths, missing = [], 0
+        for r in rows:
+            p = state["root"] / r["rel"]
+            if p.is_file():
+                paths.append(str(p))
+            else:
+                missing += 1
+        missing += len(ids) - len(rows)
+        if not paths:
+            raise HTTPException(400, "not on the disk right now" if missing else "nothing to show")
+        try:
+            subprocess.run(["open", "-R", *paths], capture_output=True, text=True, timeout=20, check=False)
+        except FileNotFoundError:
+            raise HTTPException(501, "the Finder is not available here")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "the Finder did not answer")
+        usage.log("reveal", n=len(paths))
+        return {"revealed": len(paths), "missing": missing, "max": REVEAL_MAX}
+    # ===== end show in the Finder =====
 
     def _import_gates() -> None:
         # Same gates as _switch_root, checked up front so nobody sits through a picker for a 409.

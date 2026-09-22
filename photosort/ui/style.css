@@ -1188,3 +1188,5 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .reorg-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
 #reorg-confirm { width: 260px; }
 #reorg-status-text { color: var(--g800); }
+
+.insp-reveal { margin: 2px 0 8px; }

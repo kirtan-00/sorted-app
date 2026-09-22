@@ -1773,6 +1773,9 @@
       return;
     }
     if (state.view !== "search") return;
+    // ===== show in the Finder: command shift R on the selection, or on the tile under the pointer =====
+    if (cmd && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); revealSelection(); return; }
+    // ===== end show in the Finder =====
     if (cmd && e.key.toLowerCase() === "a") { e.preventDefault(); selectAllShown(); return; }
     if (e.key === " ") {
       var id = hoveredId != null ? hoveredId : (document.activeElement && document.activeElement.classList.contains("card") ? Number(document.activeElement.dataset.id) : null);
@@ -1859,6 +1862,14 @@
     if (!r && n > 1) {
       var head = document.createElement("div"); head.className = "insp-title"; head.textContent = n + " items selected";
       info.body.appendChild(head);
+      var mRow = document.createElement("div"); mRow.className = "insp-reveal";
+      var mBtn = document.createElement("button");
+      mBtn.type = "button"; mBtn.className = "link small";
+      mBtn.textContent = "Show in Finder";
+      mBtn.title = "open the selected files in the Finder, highlighted (up to 20; command shift R)";
+      mBtn.addEventListener("click", revealSelection);
+      mRow.appendChild(mBtn);
+      info.body.appendChild(mRow);
       var byCat = {}, photos = 0, videos = 0, withFaces = 0;
       state.selected.forEach(function (id) {
         var x = resultById.get(id);
@@ -1886,6 +1897,16 @@
     info.body.appendChild(img);
     var name = document.createElement("div"); name.className = "insp-name"; name.textContent = r.rel; name.title = r.rel;
     info.body.appendChild(name);
+    // ===== show in the Finder: this file, highlighted in its own folder =====
+    var revealRow = document.createElement("div"); revealRow.className = "insp-reveal";
+    var revealBtn = document.createElement("button");
+    revealBtn.type = "button"; revealBtn.className = "link small";
+    revealBtn.textContent = "Show in Finder";
+    revealBtn.title = "open this file's folder in the Finder with it highlighted (command shift R)";
+    revealBtn.addEventListener("click", function () { revealIds([r.id], r.kind === "video" ? "clip" : "photo"); });
+    revealRow.appendChild(revealBtn);
+    info.body.appendChild(revealRow);
+    // ===== end show in the Finder =====
     if (r.taken_at) info.body.appendChild(inspRow("Taken", r.taken_at.replace("T", " ")));
     if (r.camera) info.body.appendChild(inspRow("Camera", r.camera));
     if (r.width && r.height) info.body.appendChild(inspRow("Size", r.width + " × " + r.height));
@@ -1939,6 +1960,8 @@
     var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
     runSearch(p).then(function () { setStatus(v ? "every copy and frame is its own tile" : "copies and bursts folded, one tile each"); });
   }
+  if ($("#reveal-sel")) $("#reveal-sel").addEventListener("click", revealSelection);
+
   var showCopiesBox = $("#show-copies");
   if (showCopiesBox) showCopiesBox.addEventListener("change", function () { setShowCopies(showCopiesBox.checked); });
 
@@ -2996,6 +3019,25 @@
   var projectName = $("#project-name"), projectDir = $("#project-dir"), projectState = $("#project-state");
   var projectReveal = $("#bundle-reveal");
   state.project = null;
+  // ===== show in the Finder: the picked photos and clips, the way Premiere reveals a clip. Used by the
+  // inspector button, the selection bar and command shift R. =====
+  function revealIds(ids, what) {
+    if (!ids || !ids.length) { setStatus("select a photo or clip first"); return; }
+    return api("/api/reveal/ids", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids.slice(0, 20) }) })
+      .then(function (res) {
+        var msg = "showing " + res.revealed + " " + (res.revealed === 1 ? (what || "file") : "files") + " in the Finder";
+        if (res.missing) msg += ", " + res.missing + " not on the disk right now";
+        if (ids.length > res.max) msg += " (the first " + res.max + ")";
+        setStatus(msg);
+      })
+      .catch(function (err) { setStatus("could not show it in the Finder: " + err.message, true); });
+  }
+  function revealSelection() {
+    var ids = state.selected.size ? Array.from(state.selected) : (hoveredId != null ? [hoveredId] : []);
+    revealIds(ids, "file");
+  }
+  // ===== end show in the Finder =====
+
   function revealPath(path) {
     return api("/api/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: path }) })
       .catch(function (err) { setStatus("could not show it in the Finder: " + err.message, true); });
