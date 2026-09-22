@@ -109,3 +109,32 @@ def test_pairs_raw_in_sibling_folder_when_the_counter_rolled_over(tmp_path):
             assert files[f"{day}/JPG/DSC0000{i}.JPG"].sibling == f"{day}/RAW/DSC0000{i}.ARW"
     assert files["Day2/JPG/DSC00009.JPG"].sibling == "Day1/RAW/DSC00009.ARW"
     assert files["Day2/RAW/DSC00007.ARW"].is_raw and files["Day2/RAW/DSC00007.ARW"].sibling is None
+
+
+# ===== the whole Mac as the shoot =====
+def test_prune_mac_keeps_the_walk_out_of_system_and_library(tmp_path, monkeypatch):
+    from pathlib import Path
+    from photosort.walk import _prune_mac
+    monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path / "apphome"))
+    # the disk itself: only Users
+    assert _prune_mac(Path("/"), ["Users", "System", "Library", "Volumes", "private", "Applications"]) == ["Users"]
+    # a home folder: everything but Library
+    assert _prune_mac(Path("/Users/k"), ["Desktop", "Library", "Pictures", "node_modules"]) == ["Desktop", "Pictures"]
+    # a folder named Library deeper down is an ordinary folder
+    assert _prune_mac(Path("/Users/k/Desktop"), ["Library", "shoot"]) == ["Library", "shoot"]
+    # a Photos library package: originals only
+    assert _prune_mac(Path("/Users/k/Pictures/Photos Library.photoslibrary"), ["originals", "resources", "database"]) == ["originals"]
+    # the app's own home (thumbnails of every shoot) wherever it sits
+    assert _prune_mac(tmp_path, ["apphome", "shoot"]) == ["shoot"]
+
+
+def test_find_images_skips_node_modules_and_the_app_home(tmp_path, monkeypatch):
+    from conftest import make_image
+    from photosort.walk import find_images
+    monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path / "apphome"))
+    for sub in ("shoot", "node_modules/pkg", "apphome/thumbs"):
+        (tmp_path / sub).mkdir(parents=True)
+    make_image(tmp_path / "shoot", "a.jpg", seed=1)
+    make_image(tmp_path / "node_modules" / "pkg", "b.jpg", seed=2)
+    make_image(tmp_path / "apphome" / "thumbs", "c.jpg", seed=3)
+    assert [f.rel for f in find_images(tmp_path)] == ["shoot/a.jpg"]

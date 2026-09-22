@@ -2,10 +2,19 @@
 # sorted for Mac, one line install:
 #   curl -fsSL https://kirtan-00.github.io/sorted/install.sh | bash
 # Downloads the beta into ~/sorted, runs the installer there (which leaves a sorted icon on the
-# Desktop), opens the app. Re-run any time.
+# Desktop), opens the app. Re-run any time: it updates the app and puts the Desktop icon back.
+# Reinstall from nothing (the old app is removed first, then the newest build goes in; your scans stay):
+#   curl -fsSL https://kirtan-00.github.io/sorted/install.sh | FRESH=1 bash
 # Files fetched by curl carry no quarantine flag, so macOS does not block the installer or the app.
 set -e
 DEST="$HOME/sorted"
+if [ "${FRESH:-}" = "1" ] || [ "${1:-}" = "--fresh" ]; then
+  printf '\n==> removing the old app first\n'
+  for pid in $(ps -axo pid=,command= | grep -F -- "$DEST/.venv/bin/python -m photosort.cli serve" | grep -v grep | awk '{print $1}'); do kill "$pid" 2>/dev/null || true; done
+  if [ -f "$HOME/Desktop/sorted.app/Contents/Resources/sorted-installed-from" ]; then rm -rf "$HOME/Desktop/sorted.app"; fi
+  rm -rf "$DEST"
+  printf '    removed %s and the Desktop icon (your scans in ~/Library/Application Support/photosort are kept)\n' "$DEST"
+fi
 # The branch zip is cached by GitHub for a while; ask for the exact latest commit instead so a fresh
 # publish is picked up at once. Falls back to the branch zip if the API is unreachable.
 SHA="$(curl -fsSL -H 'Accept: application/vnd.github+json' https://api.github.com/repos/kirtan-00/sorted-app/commits/main 2>/dev/null | sed -n 's/^  "sha": "\([0-9a-f]*\)",$/\1/p' | head -1)"

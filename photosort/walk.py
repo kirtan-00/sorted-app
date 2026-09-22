@@ -3,7 +3,28 @@ import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, SONY_CARD_DIRS, SONY_CARD_ROOT
+from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, SONY_CARD_DIRS, SONY_CARD_ROOT, app_home
+
+# ===== the whole Mac as the shoot: when the root is the disk itself or a home folder, the walk stays out of
+# what is not a photo library. "/" descends into Users only (System, Library, private, Volumes with every
+# plugged disk, are not the user's photos); a home folder's Library (caches, Mail, our own thumbnails) is
+# skipped; the app's own home is skipped wherever it sits; node_modules anywhere; inside a Photos library
+# package only originals/ (derivatives/ is the same pictures again, smaller). =====
+MAC_ROOT_KEEP = {"Users"}
+PHOTOS_LIBRARY_SUFFIX = ".photoslibrary"
+
+
+def _prune_mac(dirpath: Path, dirnames: list[str]) -> list[str]:
+    parts = dirpath.parts
+    if parts == ("/",):
+        return [d for d in dirnames if d in MAC_ROOT_KEEP]
+    if len(parts) == 3 and parts[:2] == ("/", "Users"):
+        dirnames = [d for d in dirnames if d != "Library"]
+    if dirpath.name.lower().endswith(PHOTOS_LIBRARY_SUFFIX):
+        return [d for d in dirnames if d == "originals"]
+    home = app_home()
+    return [d for d in dirnames if d != "node_modules" and dirpath / d != home]
+# ===== end whole Mac =====
 
 @dataclass
 class ImageFile:
@@ -25,6 +46,7 @@ def find_images(root: Path) -> list[ImageFile]:
         on_card = Path(dirpath).name.upper() == SONY_CARD_ROOT
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS
                        and not (on_card and d in SONY_CARD_DIRS)]
+        dirnames[:] = _prune_mac(Path(dirpath), dirnames)
         for fn in filenames:
             if fn.startswith("."):
                 continue
