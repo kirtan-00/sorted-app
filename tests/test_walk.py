@@ -118,8 +118,9 @@ def test_prune_mac_keeps_the_walk_out_of_system_and_library(tmp_path, monkeypatc
     monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path / "apphome"))
     # the disk itself: only Users
     assert _prune_mac(Path("/"), ["Users", "System", "Library", "Volumes", "private", "Applications"]) == ["Users"]
-    # a home folder: everything but Library
-    assert _prune_mac(Path("/Users/k"), ["Desktop", "Library", "Pictures", "node_modules"]) == ["Desktop", "Pictures"]
+    # a home folder: everything but Library. node_modules is dropped too, by DEV_DIRS in find_images
+    # rather than here, because a package tree is never a shoot wherever it sits, not only on a Mac walk.
+    assert _prune_mac(Path("/Users/k"), ["Desktop", "Library", "Pictures"]) == ["Desktop", "Pictures"]
     # a folder named Library deeper down is an ordinary folder
     assert _prune_mac(Path("/Users/k/Desktop"), ["Library", "shoot"]) == ["Library", "shoot"]
     # a Photos library package: originals only
@@ -138,3 +139,42 @@ def test_find_images_skips_node_modules_and_the_app_home(tmp_path, monkeypatch):
     make_image(tmp_path / "node_modules" / "pkg", "b.jpg", seed=2)
     make_image(tmp_path / "apphome" / "thumbs", "c.jpg", seed=3)
     assert [f.rel for f in find_images(tmp_path)] == ["shoot/a.jpg"]
+
+
+# ===== files that would only ever become unreadable rows: never picked up in the first place =====
+
+def test_a_typescript_declaration_is_not_a_camcorder_clip(tmp_path):
+    """.mts is two formats at once: an AVCHD clip, and the TypeScript ES module declaration that a package
+    tree holds thousands of. On one real home folder those were 423 of 739 unreadable files."""
+    from photosort.walk import find_images, looks_like_transport_stream
+    ts = tmp_path / "gen-mapping.d.mts"
+    ts.write_text("export declare function foo(): void;\n" * 20)
+    clip = tmp_path / "00000.MTS"
+    clip.write_bytes(bytes([0x47]) + b"\x00" * 187 + bytes([0x47]) + b"\x00" * 200)
+    assert looks_like_transport_stream(clip) and not looks_like_transport_stream(ts)
+    assert [f.rel for f in find_images(tmp_path)] == ["00000.MTS"]
+
+def test_an_avchd_clip_with_the_four_byte_header_is_still_a_clip(tmp_path):
+    from photosort.walk import looks_like_transport_stream
+    p = tmp_path / "a.mts"
+    p.write_bytes(b"\x00\x00\x00\x00" + bytes([0x47]) + b"\x00" * 187 + bytes([0x47]) + b"\x00" * 200)
+    assert looks_like_transport_stream(p)
+
+def test_an_empty_file_is_skipped(tmp_path):
+    from photosort.walk import find_images
+    from conftest import make_image
+    make_image(tmp_path, "real.jpg")
+    (tmp_path / "empty.jpg").write_bytes(b"")
+    assert [f.rel for f in find_images(tmp_path)] == ["real.jpg"]
+
+def test_package_and_build_trees_are_never_walked(tmp_path):
+    """node_modules was already skipped on a whole-Mac scan only. These folders never hold a shoot and are
+    full of files with photo and video extensions, so they are skipped wherever they are."""
+    from photosort.walk import find_images
+    from conftest import make_image
+    make_image(tmp_path, "keep.jpg")
+    for junk in ["node_modules", "site-packages", "__pycache__", "Caches", "DerivedData"]:
+        d = tmp_path / "project" / junk
+        d.mkdir(parents=True)
+        make_image(d, "icon.jpg")
+    assert [f.rel for f in find_images(tmp_path)] == ["keep.jpg"]

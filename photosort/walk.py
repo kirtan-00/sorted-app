@@ -3,7 +3,8 @@ import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from .config import IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, SONY_CARD_DIRS, SONY_CARD_ROOT, app_home
+from .config import (IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, DEV_DIRS, SONY_CARD_DIRS,
+                      SONY_CARD_ROOT, app_home)
 
 # ===== the whole Mac as the shoot: when the root is the disk itself or a home folder, the walk stays out of
 # what is not a photo library. "/" descends into Users only (System, Library, private, Volumes with every
@@ -23,8 +24,27 @@ def _prune_mac(dirpath: Path, dirnames: list[str]) -> list[str]:
     if dirpath.name.lower().endswith(PHOTOS_LIBRARY_SUFFIX):
         return [d for d in dirnames if d == "originals"]
     home = app_home()
-    return [d for d in dirnames if d != "node_modules" and dirpath / d != home]
+    return [d for d in dirnames if dirpath / d != home]
 # ===== end whole Mac =====
+
+TS_PACKET = 188          # MPEG transport stream packet; an AVCHD .m2ts writes 4 extra bytes in front
+TS_SYNC = 0x47
+
+def looks_like_transport_stream(path: Path) -> bool:
+    """True when a .mts really is an AVCHD clip. The extension is shared: TypeScript writes ES module
+    declarations as .d.mts, and a package tree holds thousands of them, every one of which ffprobe refuses
+    and the index records as an unreadable file. An MPEG transport stream is self announcing instead of
+    guessed at: 0x47 at byte 0 (or byte 4 in the AVCHD variant) and again one packet later. Text cannot
+    pass that by accident. Reads 200 bytes, no model, no ffprobe."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(TS_PACKET + 8)
+    except OSError:
+        return False
+    for off in (0, 4):
+        if len(head) > off + TS_PACKET and head[off] == TS_SYNC and head[off + TS_PACKET] == TS_SYNC:
+            return True
+    return False
 
 @dataclass
 class ImageFile:
@@ -44,7 +64,7 @@ def find_images(root: Path) -> list[ImageFile]:
         # only directly under M4ROOT. Pruned in place so os.walk never descends. A DJI clip's .SRT sidecar
         # needs no rule: its extension is not on the list.
         on_card = Path(dirpath).name.upper() == SONY_CARD_ROOT
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS and d not in DEV_DIRS
                        and not (on_card and d in SONY_CARD_DIRS)]
         dirnames[:] = _prune_mac(Path(dirpath), dirnames)
         for fn in filenames:
@@ -58,6 +78,10 @@ def find_images(root: Path) -> list[ImageFile]:
                 st = p.stat()
             except OSError:
                 continue   # vanished or unreadable mid-walk; skip it
+            if st.st_size == 0:
+                continue   # an empty file has nothing to read and would only ever be an error row
+            if ext == ".mts" and not looks_like_transport_stream(p):
+                continue   # a TypeScript .d.mts, not a camcorder clip; see the note on the function
             rel = str(p.relative_to(root))
             found[rel] = ImageFile(p, rel, st.st_size, st.st_mtime, ext in RAW_EXTS, is_video=ext in VIDEO_EXTS)
     # Videos never pair with anything: a clip.MP4 next to a clip.ARW is two files, not a JPEG and its RAW.

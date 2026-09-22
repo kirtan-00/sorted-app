@@ -24,6 +24,10 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".avi"}
 # Folder names the walk never enters, wherever they sit: photosort-out is our own export folder when it
 # sits inside a shoot (dot-dirs are skipped too, in walk.py).
 SKIP_DIRS = {"photosort-out"}
+# Folders that never hold a shoot and are full of files with photo and video extensions: a package tree, a
+# Python environment, a build cache. Skipped anywhere, not only on a whole-Mac scan. On one real home folder
+# node_modules alone accounted for 423 of 739 unreadable files, every one of them a TypeScript .d.mts.
+DEV_DIRS = {"node_modules", "site-packages", "__pycache__", "Caches", "DerivedData"}
 # Folder names pruned only directly under a directory named M4ROOT (any case), the Sony card layout
 # (PRIVATE/M4ROOT): one poster JPEG per clip under THMBNL (160 px: 12 of the 16 "other" photos on the
 # first video shoot), proxy clips under SUB (C0001S03.MP4, duplicates of CLIP/; when a card carries proxies
