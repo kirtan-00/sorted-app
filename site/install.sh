@@ -11,9 +11,12 @@ DEST="$HOME/sorted"
 if [ "${FRESH:-}" = "1" ] || [ "${1:-}" = "--fresh" ]; then
   printf '\n==> removing the old app first\n'
   for pid in $(ps -axo pid=,command= | grep -F -- "$DEST/.venv/bin/python -m photosort.cli serve" | grep -v grep | awk '{print $1}'); do kill "$pid" 2>/dev/null || true; done
-  if [ -f "$HOME/Desktop/sorted.app/Contents/Resources/sorted-installed-from" ]; then rm -rf "$HOME/Desktop/sorted.app"; fi
+  for ICON in "$HOME/Applications/sorted.app" "$HOME/Desktop/sorted.app"; do
+    if [ -f "$ICON/Contents/Resources/sorted-installed-from" ]; then rm -rf "$ICON"; fi
+  done
+  rm -f "$HOME/Desktop/sorted" 2>/dev/null || true
   rm -rf "$DEST"
-  printf '    removed %s and the Desktop icon (your scans in ~/Library/Application Support/photosort are kept)\n' "$DEST"
+  printf '    removed %s and the app icon (your scans in ~/Library/Application Support/photosort are kept)\n' "$DEST"
 fi
 # The branch zip is cached by GitHub for a while; ask for the exact latest commit instead so a fresh
 # publish is picked up at once. Falls back to the branch zip if the API is unreachable.

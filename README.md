@@ -31,15 +31,16 @@ Run it again any time: a second run takes seconds and repairs whatever is missin
 
 ## Start
 
-Double-click the **sorted** icon on your Desktop. (Or `sorted.app` inside the folder; the Desktop
-icon is a shortcut to it.) It starts a local server and opens Chrome at `http://127.0.0.1:7777`
-(or the next free port). Close the browser tab when you are done; the server stops the next time
-you start the app. Moved the folder? Run **Install sorted.command** again and the Desktop icon
-points at the new place.
+Double-click the **sorted** icon on your Desktop, or press command space and type `sorted`: the
+app is in `~/Applications`, the Desktop icon is an alias to it, and deleting the alias loses nothing.
+(`sorted.app` inside this folder is the same launcher.) It starts a local server and opens Chrome at
+`http://127.0.0.1:7777` (or the next free port). Close the browser tab when you are done; the server
+stops the next time you start the app. Moved the folder? Run **Install sorted.command** again and
+the app in Applications points at the new place.
 
 If the app cannot see your Desktop or an external disk when you pick a folder, macOS is blocking
-it: **System Settings**, **Privacy & Security**, **Full Disk Access**, add the `sorted.app` you
-double-click (drag the Desktop icon in), then start it again. Nothing here leaves the Mac; this
+it: **System Settings**, **Privacy & Security**, **Full Disk Access**, add `sorted.app` from
+`~/Applications` (drag it in), then start it again. Nothing here leaves the Mac; this
 is only macOS asking whether the app may read the disk.
 
 ## First run

@@ -1,7 +1,7 @@
 #!/bin/bash
 # sorted for Mac, uninstall:
 #   curl -fsSL https://kirtan-00.github.io/sorted/uninstall.sh | bash
-# Stops the app, removes ~/sorted and the sorted icon on the Desktop. Your scans (what the app learned
+# Stops the app, removes ~/sorted, ~/Applications/sorted.app and the sorted alias on the Desktop. Your scans (what the app learned
 # about each shoot, in ~/Library/Application Support/photosort) are kept, so a later install finds them.
 # To remove those too:
 #   curl -fsSL https://kirtan-00.github.io/sorted/uninstall.sh | DATA=1 bash
@@ -9,13 +9,15 @@ set -u
 DEST="$HOME/sorted"
 printf '\n==> uninstalling sorted\n'
 for pid in $(ps -axo pid=,command= | grep -F -- "$DEST/.venv/bin/python -m photosort.cli serve" | grep -v grep | awk '{print $1}'); do kill "$pid" 2>/dev/null || true; done
-ICON="$HOME/Desktop/sorted.app"
-if [ -f "$ICON/Contents/Resources/sorted-installed-from" ]; then
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$ICON" >/dev/null 2>&1 || true
-  rm -rf "$ICON" && printf '    removed the Desktop icon\n'
-elif [ -e "$ICON" ]; then
-  printf '    %s was not made by the installer, leaving it alone\n' "$ICON"
-fi
+for ICON in "$HOME/Applications/sorted.app" "$HOME/Desktop/sorted.app"; do
+  if [ -f "$ICON/Contents/Resources/sorted-installed-from" ]; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$ICON" >/dev/null 2>&1 || true
+    rm -rf "$ICON" && printf '    removed %s\n' "$ICON"
+  elif [ -e "$ICON" ]; then
+    printf '    %s was not made by the installer, leaving it alone\n' "$ICON"
+  fi
+done
+rm -f "$HOME/Desktop/sorted" 2>/dev/null && true   # the Desktop alias
 if [ -d "$DEST" ]; then rm -rf "$DEST" && printf '    removed %s\n' "$DEST"; else printf '    %s was not there\n' "$DEST"; fi
 rm -f "$HOME/Library/Logs/photosort.log"
 if [ "${DATA:-}" = "1" ] || [ "${1:-}" = "--data" ]; then

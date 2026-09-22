@@ -78,7 +78,7 @@
    "name": "Does anything leave the Mac?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "No. sorted works fully offline: no account needed to sort, no upload, no telemetry. The vision model and the face detector run on the Mac and the index lives there. The only bytes that go anywhere are the ones you export to a client's Drive yourself."
+    "text": "No. sorted runs fully offline: no account, no upload, no telemetry. The only bytes that leave are the ones you export to a client's Drive yourself."
    }
   },
   {
@@ -86,7 +86,7 @@
    "name": "Which Macs does it run on?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "An Apple silicon Mac, M1 to M4, on macOS 14 or newer. Every number on this page was measured on the 2020 MacBook Air, M1, 8 GB, the base model. Intel Macs are not supported in the beta."
+    "text": "An Apple silicon Mac, M1 to M4, on macOS 14 or newer; Intel isn't supported. Every number here was measured on a base 2020 MacBook Air M1, 8 GB."
    }
   },
   {
@@ -94,7 +94,7 @@
    "name": "Is it for photos or for video?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "Both, in one grid. JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips. Photographers cull the soft ones with the sharp slider; editors search forty hours of rushes in plain words and get a scene breakdown per clip. Wedding photo sorting and documentary footage search go through the same search box. Faces are found on photos only for now; clips get the breakdown instead."
+    "text": "Both, in one grid: JPEG, ARW and DNG sit beside h264 and HEVC 4K clips. Cull photos with the sharp slider; faces work on photos only, for now."
    }
   },
   {
@@ -102,7 +102,7 @@
    "name": "How do I find every photo of a person?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "Drop in one photo of them. Group faces sorts every detected face in the stills into people; when two groups look alike, the app asks once, Same or Different, and remembers. Name a person and every frame of them is one click away, saved with the shoot."
+    "text": "Drop in one photo of them. Group faces sorts everyone into people, and naming one makes every frame of them one click away."
    }
   },
   {
@@ -110,7 +110,7 @@
    "name": "How long does indexing take?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "3,677 photos, 147 GB of 61 megapixel Sony RAW, in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, in 44 minutes 36 seconds. A 23 second DJI 4K clip is scanned for scenes in 1.0 second with the hardware decoder. All on the base M1 with 8 GB."
+    "text": "3,677 photos, 147 GB of Sony RAW, index in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, take 44 minutes 36 seconds on the base M1."
    }
   },
   {
@@ -118,7 +118,7 @@
    "name": "Is it an editor? Is it AI?",
    "acceptedAnswer": {
     "@type": "Answer",
-    "text": "Neither. It does not cut, colour or retouch; the edit happens in Premiere, Resolve or Lightroom as before. No language model is used anywhere. Two small on-device vision models do the work: MobileCLIP, which understands images and words in the same space, and a face detector and recogniser (YuNet and SFace). They run on the Mac's own chip, no internet needed."
+    "text": "Neither: the edit still happens in Premiere, Resolve or Lightroom, and no language model is used anywhere. Two small on-device vision models, MobileCLIP and a face detector (YuNet, SFace), do the work."
    }
   }
  ]
@@ -169,11 +169,10 @@
     <div class="hero-brand" data-reveal="fade"><img class="brand-mark brand-mark-hero" src="brand/mark.svg" alt="" width="40" height="40"><span class="badge badge-hero">public beta, testing right now</span></div>
     <h1 data-reveal="lines">Plug in the disk.<br>Search the whole shoot.</h1>
     <p class="only" data-reveal="lines">The only one that does it all.</p>
-    <p class="lede" data-reveal="lines">A Mac app that indexes photos and 4K clips where they sit. Find any frame in plain words, every shot of a person from one photo, and send the client their frames tonight. Nothing leaves the Mac.</p>
-    <p class="hero-for" data-reveal="fade">For editors, agencies, wedding and documentary crews, photographers, designers.</p>
+    <p class="lede" data-reveal="lines">Indexes the photos and 4K clips on a shoot disk. Search it in plain words, find every shot of a person from one photo. Nothing leaves the Mac.</p>
     <div class="cta-row" data-reveal="fade">
       <a class="cta magnetic" href="download/">Install sorted</a>
-      <span class="cta-aside">Free in the beta. Apple silicon Mac, one line in the Terminal.</span>
+      <span class="cta-aside">Free in the beta. Apple silicon Mac.</span>
     </div>
   </div>
 
@@ -356,24 +355,23 @@
 
 <section class="post" id="post"><div class="block mint wrap">
   <h2 data-reveal="lines">Sorts out post.</h2>
-  <p class="lede" data-reveal="lines">For editors, designers, agencies, wedding photographers, filmmakers and documentary crews: plug in the disk, search the whole shoot, deliver tonight.</p>
-  <p class="theset" data-reveal="lines">Photos and video. On-device. Person search from one photo. Plain-word search. Scene breakdown per clip. Drone filter. Export to folders. Reorganise with Undo. No other Mac tool has the whole set.</p>
+  <p class="lede" data-reveal="lines">Plug in the disk, search the whole shoot, deliver tonight.</p>
   <div class="three four" data-reveal="rows">
     <div>
       <h3>Editors and agencies</h3>
-      <p>Forty hours of rushes on a drive. Type what you remember, pull the selects, read the scene breakdown per clip, reorganise the drive with Undo.</p>
+      <p>Type what you remember, pull selects, read the scene breakdown, reorganise with Undo.</p>
     </div>
     <div>
       <h3>Wedding photographers</h3>
-      <p>Every frame of the bride's parents from one photo. Type varmala, haldi, couple on the stage. Cull the soft ones with the sharp slider. A folder per ritual, ready for the album.</p>
+      <p>Type varmala, haldi, couple on the stage. Cull soft ones with the sharp slider.</p>
     </div>
     <div>
       <h3>Filmmakers</h3>
-      <p>A scene breakdown per clip. Tick drone shots. Type golden hour beach. Pull selects by look.</p>
+      <p>A scene breakdown per clip. Tick drone shots, type golden hour beach.</p>
     </div>
     <div>
       <h3>Documentary crews</h3>
-      <p>Forty hours of interviews and B-roll. Interviews flagged on their own. Type market, fishing boats, elderly man. Find the one sound bite location again.</p>
+      <p>Type market, fishing boats, elderly man to find the sound bite again.</p>
     </div>
   </div>
 </div></section>
@@ -385,10 +383,10 @@
         <h2>Between the disk and the delivery, five things happen.</h2>
         <ol class="steps" id="steps">
           <li class="step is-on"><h3>Plug in</h3><p>The disk mounts read-only. Nothing is written to it, ever.</p></li>
-          <li class="step"><h3>Index</h3><p>Every photo and clip gets a fingerprint on this Mac. 3,677 photos took about 11 minutes on a base M1 with 8 GB.</p></li>
-          <li class="step"><h3>Search</h3><p>Plain words. The matches light up, the less sure ones stay visible under a line.</p></li>
-          <li class="step"><h3>People</h3><p>Every detected face lands in a group. One photo of a person finds the rest of them.</p></li>
-          <li class="step"><h3>Export</h3><p>One folder per category, links or copies, free space checked first. Or one project file that opens the shoot already sorted on another Mac.</p></li>
+          <li class="step"><h3>Index</h3><p>3,677 photos indexed in about 11 minutes on a base M1.</p></li>
+          <li class="step"><h3>Search</h3><p>Plain words. Matches light up; less sure ones stay visible.</p></li>
+          <li class="step"><h3>People</h3><p>Every face lands in a group. One photo finds the rest.</p></li>
+          <li class="step"><h3>Export</h3><p>One folder per category, links or copies, free space checked first.</p></li>
         </ol>
         <p class="step-live" id="step-live" hidden></p>
         <div class="rail" aria-hidden="true"><i id="rail-fill"></i></div>
@@ -471,7 +469,7 @@
 
 <section class="deliver" id="deliver"><div class="block sky wrap">
   <h2 data-reveal="lines">From the shoot disk to the client's Drive, tonight.</h2>
-  <p class="lede" data-reveal="lines">Pick a person or a category, paste the client's Google Drive folder link, and <span class="wordmark"></span> uploads straight from the SSD into their folder. Full size or web size. Nothing is staged on your Mac.</p>
+  <p class="lede" data-reveal="lines">Pick a person or category, paste the client's Drive folder link, and <span class="wordmark"></span> uploads straight from the SSD into their folder.</p>
   <div class="flow" id="flow" data-reveal="unmask">
     <div class="flow-ssd">
       <svg viewBox="0 0 120 60" aria-hidden="true"><rect x="1.5" y="1.5" width="117" height="57" rx="8"/><rect x="12" y="14" width="60" height="32" rx="3"/><circle cx="98" cy="30" r="8"/><path d="M78 16v28"/></svg>
@@ -496,9 +494,9 @@
     </div>
   </div>
   <div class="three dest" data-reveal="rows">
-    <div><h3>A folder on the Mac or any disk</h3><p>Pick a folder on this Mac or on any plugged-in disk. The sorted folders land there, links or copies, free space checked first.</p></div>
-    <div><h3>Google Drive, direct</h3><p>Paste a Drive folder link. Files go from the source disk to Drive with no copy on the laptop. Resumable if the Wi-Fi drops; a manifest means a re-run only sends what is missing. Works with a folder the client shared from their own storage.</p></div>
-    <div><h3>Dropbox, OneDrive and the rest</h3><p>Other drives come through plugins. Coming.</p></div>
+    <div><h3>A folder on the Mac or any disk</h3><p>Pick a folder on this Mac or disk.</p></div>
+    <div><h3>Google Drive, direct</h3><p>Paste a link; files upload directly, no copy.</p></div>
+    <div><h3>Dropbox, OneDrive and the rest</h3><p>Other drives come via plugins. Coming.</p></div>
   </div>
 </div></section>
 
@@ -540,12 +538,10 @@
     <div class="how" data-reveal="rows">
       <h3>How the processing works</h3>
       <ol class="how-list">
-        <li>RAW is read from the full-size preview the camera already embeds. No demosaic, so an ARW costs the same as a JPEG.</li>
-        <li>One small on-device vision model, MobileCLIP, embeds every photo and six sampled frames per clip.</li>
-        <li>Scene cuts come from a keyframe pass at reduced size.</li>
-        <li>Faces are found on the preview and matched by a compact face embedding.</li>
-        <li>Everything runs on the M1's GPU and CPU inside 8 GB. Nothing leaves the Mac, no internet needed.</li>
-        <li>The index lives in Application Support. The shoot disk is never written to, unless you press Reorganise, which has Undo.</li>
+        <li>RAW is read from the camera's embedded preview, no demosaic.</li>
+        <li>MobileCLIP embeds every photo and six frames per clip, on-device.</li>
+        <li>Runs on the M1's GPU and CPU inside 8 GB.</li>
+        <li>Index lives in Application Support; the disk is never touched.</li>
       </ol>
     </div>
   </div>
@@ -555,8 +551,8 @@
   <div class="split">
     <div class="split-copy">
       <h2 data-reveal="lines">Photos and videos, together.</h2>
-      <p data-reveal="lines">JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips in one grid. A clip gets a whole-clip label and a scene breakdown: every setup in a B-roll gets its own labelled stretch, and you export the whole clip or just the matching trimmed segment. Interviews longer than ten minutes with people talking are flagged interview on their own.</p>
-      <p data-reveal="lines">Face detection runs on stills. Clips do not get faces yet; they get the breakdown instead. That is the honest state of the beta.</p>
+      <p data-reveal="lines">JPEG, ARW and DNG sit beside h264 and HEVC 4K clips, each clip broken into labelled scenes.</p>
+      <p data-reveal="lines">Faces are found on photos only for now; clips get the breakdown instead.</p>
     </div>
     <div class="clip" id="clip" data-reveal="unmask">
       <div class="clip-frame">
@@ -580,7 +576,7 @@
   <div class="split split-rev">
     <div class="split-copy">
       <h2 data-reveal="lines">Every face, one person.</h2>
-      <p data-reveal="lines">Group faces sorts every detected face in the stills into people. When two groups look alike, the app asks once, Same or Different, and remembers the answer on every regrouping. Drop in one photo of someone and the grid fills with every frame of them. Name them and they are saved with the shoot.</p>
+      <p data-reveal="lines">Group faces sorts every detected face into people; look-alike groups get a one-time Same or Different, remembered from then on. Drop in one photo and the grid fills with every frame of them.</p>
     </div>
     <div class="merge-demo" id="merge-demo" data-reveal="unmask">
       <div class="panel-head"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered</span></div>
@@ -604,28 +600,28 @@
 <section class="room" id="room"><div class="block mint wrap">
   <h2 data-reveal="lines">Offline. No data leak. Ever.</h2>
   <div class="room-grid" data-reveal="rows">
-    <p>Works fully offline. No account needed to sort. No upload, no telemetry. The vision model and the face detector run on the Mac, the index lives next to the shoot, and nothing leaves the Mac, ever. The only bytes that go anywhere are the ones you send to a client's Drive yourself.</p>
-    <p>The shoot disk is opened read-only and stays byte for byte as it was. Search, people, categories and export never write to it.</p>
-    <p>The one exception is Reorganise. It renames files into a sorted folder on the same disk, writes an undo manifest first, never deletes or overwrites anything, and Undo puts every file back where it was.</p>
+    <p>Fully offline: no account, no upload, no telemetry, ever.</p>
+    <p>The disk mounts read-only; search, people and export never write to it.</p>
+    <p>The one exception, Reorganise, writes an undo manifest first and never deletes anything.</p>
   </div>
 </div></section>
 
 <section class="uses wrap" id="uses">
   <h2 data-reveal="lines">Eleven ways in.</h2>
-  <p class="lede" data-reveal="lines">Editors, designers, agencies, wedding photographers, filmmakers, documentary editors, photographers, and anyone with a pile of cards. One line each: what you type, or what you tick. Hover a word to see what comes back.</p>
+  <p class="lede" data-reveal="lines">What you'd type or tick, one line each; hover a word to see what comes back.</p>
   <div class="uses-grid">
     <ol class="uc-list" id="uc-list">
-      <li class="uc"><h3>Editors and post houses</h3><p>Search forty hours of rushes in words: <button type="button" class="chip" data-q="interview">interview</button>, <button type="button" class="chip" data-q="market street">market street</button>. Pull the selects, get the scene breakdown per clip, reorganise the drive with Undo.</p></li>
-      <li class="uc"><h3>Designers</h3><p>Open the project file the studio sends and the whole shoot is already sorted and searchable on your Mac. Find the frame for the layout by describing it: <button type="button" class="chip" data-q="sunset sea">sunset sea</button>, <button type="button" class="chip" data-q="bride portrait">bride portrait</button>. Export just the picks into the deck folder.</p></li>
-      <li class="uc"><h3>Wedding photographers</h3><p>Every frame of the bride's parents from one photo. Type <button type="button" class="chip" data-q="varmala">varmala</button>, <button type="button" class="chip" data-q="haldi">haldi</button> or <button type="button" class="chip" data-q="couple on the stage">couple on the stage</button>. Cull the soft ones with the sharp slider. Every photo of the couple's parents, in their Drive before the reception ends.</p></li>
-      <li class="uc"><h3>Cinematographers and DOPs</h3><p>A scene breakdown per clip. Tick <button type="button" class="chip" data-q="aerial">drone shots</button>. Type <button type="button" class="chip" data-q="golden hour beach">golden hour beach</button>. Pull selects by look.</p></li>
-      <li class="uc"><h3>Documentary crews</h3><p>Forty hours of interviews and B-roll, interviews flagged automatically. Type <button type="button" class="chip" data-q="market">market</button>, <button type="button" class="chip" data-q="fishing boats">fishing boats</button> or <button type="button" class="chip" data-q="elderly man">elderly man</button>. Find the one sound bite location again.</p></li>
-      <li class="uc"><h3>Corporate and brand shoots</h3><p>Every shot of the client or the CEO from one photo. Type <button type="button" class="chip" data-q="office interior">office interior</button>, <button type="button" class="chip" data-q="handshake">handshake</button> or <button type="button" class="chip" data-q="product on a table">product on a table</button>. The client's own frames, in their folder, same day.</p></li>
-      <li class="uc"><h3>Event and conference photographers</h3><p>Type <button type="button" class="chip" data-q="speaker on stage">speaker on stage</button> or <button type="button" class="chip" data-q="audience">audience</button>. One folder per speaker from one reference photo each.</p></li>
-      <li class="uc"><h3>Travel and lifestyle creators</h3><p>Type <button type="button" class="chip" data-q="sunset">sunset</button>, <button type="button" class="chip" data-q="food">food</button>, <button type="button" class="chip" data-q="temple">temple</button> or <button type="button" class="chip" data-q="street">street</button>. Pick the reel material from a month of cards in minutes.</p></li>
-      <li class="uc"><h3>Real estate and architecture</h3><p>Type <button type="button" class="chip" data-q="kitchen">kitchen</button>, <button type="button" class="chip" data-q="balcony">balcony</button>, <button type="button" class="chip" data-q="pool">pool</button> or <button type="button" class="chip" data-q="facade">facade</button>. One folder per room type per property.</p></li>
-      <li class="uc"><h3>Drone operators</h3><p>Aerials filtered from the metadata. Type <button type="button" class="chip" data-q="coastline">coastline</button> or <button type="button" class="chip" data-q="construction site">construction site</button>. Separate the drone reel from the ground unit.</p></li>
-      <li class="uc"><h3>Archives and studios with old drives</h3><p>Plug in a 2019 disk and search it like it was shot yesterday: <button type="button" class="chip" data-q="harbour morning">harbour morning</button>. Nothing uploaded, nothing moved.</p></li>
+      <li class="uc"><h3>Editors and post houses</h3><p><button type="button" class="chip" data-q="interview">interview</button> <button type="button" class="chip" data-q="market street">market street</button></p></li>
+      <li class="uc"><h3>Designers</h3><p><button type="button" class="chip" data-q="sunset sea">sunset sea</button> <button type="button" class="chip" data-q="bride portrait">bride portrait</button></p></li>
+      <li class="uc"><h3>Wedding photographers</h3><p><button type="button" class="chip" data-q="varmala">varmala</button> <button type="button" class="chip" data-q="haldi">haldi</button> <button type="button" class="chip" data-q="couple on the stage">couple on the stage</button></p></li>
+      <li class="uc"><h3>Cinematographers and DOPs</h3><p><button type="button" class="chip" data-q="aerial">drone shots</button> <button type="button" class="chip" data-q="golden hour beach">golden hour beach</button></p></li>
+      <li class="uc"><h3>Documentary crews</h3><p><button type="button" class="chip" data-q="market">market</button> <button type="button" class="chip" data-q="fishing boats">fishing boats</button> <button type="button" class="chip" data-q="elderly man">elderly man</button></p></li>
+      <li class="uc"><h3>Corporate and brand shoots</h3><p><button type="button" class="chip" data-q="office interior">office interior</button> <button type="button" class="chip" data-q="handshake">handshake</button> <button type="button" class="chip" data-q="product on a table">product on a table</button></p></li>
+      <li class="uc"><h3>Event and conference photographers</h3><p><button type="button" class="chip" data-q="speaker on stage">speaker on stage</button> <button type="button" class="chip" data-q="audience">audience</button></p></li>
+      <li class="uc"><h3>Travel and lifestyle creators</h3><p><button type="button" class="chip" data-q="sunset">sunset</button> <button type="button" class="chip" data-q="food">food</button> <button type="button" class="chip" data-q="temple">temple</button> <button type="button" class="chip" data-q="street">street</button></p></li>
+      <li class="uc"><h3>Real estate and architecture</h3><p><button type="button" class="chip" data-q="kitchen">kitchen</button> <button type="button" class="chip" data-q="balcony">balcony</button> <button type="button" class="chip" data-q="pool">pool</button> <button type="button" class="chip" data-q="facade">facade</button></p></li>
+      <li class="uc"><h3>Drone operators</h3><p><button type="button" class="chip" data-q="coastline">coastline</button> <button type="button" class="chip" data-q="construction site">construction site</button></p></li>
+      <li class="uc"><h3>Archives and studios with old drives</h3><p><button type="button" class="chip" data-q="harbour morning">harbour morning</button></p></li>
     </ol>
     <div class="uc-preview" id="uc-preview" aria-live="polite">
       <div class="uc-bar"><span class="q-wrap"><span class="uc-q" id="uc-q">varmala</span></span><span class="uc-n" id="uc-n"></span></div>
@@ -639,27 +635,27 @@
   <div class="three" data-reveal="rows">
     <div>
       <h3>Does anything leave the Mac?</h3>
-      <p>No. sorted works fully offline: no account needed to sort, no upload, no telemetry. The vision model and the face detector run on the Mac and the index lives there. The only bytes that go anywhere are the ones you export to a client's Drive yourself.</p>
+      <p>No. sorted runs fully offline: no account, no upload, no telemetry. The only bytes that leave are the ones you export to a client's Drive yourself.</p>
     </div>
     <div>
       <h3>Which Macs does it run on?</h3>
-      <p>An Apple silicon Mac, M1 to M4, on macOS 14 or newer. Every number on this page was measured on the 2020 MacBook Air, M1, 8 GB, the base model. Intel Macs are not supported in the beta.</p>
+      <p>An Apple silicon Mac, M1 to M4, on macOS 14 or newer; Intel isn't supported. Every number here was measured on a base 2020 MacBook Air M1, 8 GB.</p>
     </div>
     <div>
       <h3>Is it for photos or for video?</h3>
-      <p>Both, in one grid. JPEG, Sony ARW and DNG sit next to h264 and HEVC 4K clips. Photographers cull the soft ones with the sharp slider; editors search forty hours of rushes in plain words and get a scene breakdown per clip. Wedding photo sorting and documentary footage search go through the same search box. Faces are found on photos only for now; clips get the breakdown instead.</p>
+      <p>Both, in one grid: JPEG, ARW and DNG sit beside h264 and HEVC 4K clips. Cull photos with the sharp slider; faces work on photos only, for now.</p>
     </div>
     <div>
       <h3>How do I find every photo of a person?</h3>
-      <p>Drop in one photo of them. Group faces sorts every detected face in the stills into people; when two groups look alike, the app asks once, Same or Different, and remembers. Name a person and every frame of them is one click away, saved with the shoot.</p>
+      <p>Drop in one photo of them. Group faces sorts everyone into people, and naming one makes every frame of them one click away.</p>
     </div>
     <div>
       <h3>How long does indexing take?</h3>
-      <p>3,677 photos, 147 GB of 61 megapixel Sony RAW, in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, in 44 minutes 36 seconds. A 23 second DJI 4K clip is scanned for scenes in 1.0 second with the hardware decoder. All on the base M1 with 8 GB.</p>
+      <p>3,677 photos, 147 GB of Sony RAW, index in 10 minutes 42 seconds. 955 items across 800 GB, 630 photos and 325 4K clips, take 44 minutes 36 seconds on the base M1.</p>
     </div>
     <div>
       <h3>Is it an editor? Is it AI?</h3>
-      <p>Neither. It does not cut, colour or retouch; the edit happens in Premiere, Resolve or Lightroom as before. No language model is used anywhere. Two small on-device vision models do the work: MobileCLIP, which understands images and words in the same space, and a face detector and recogniser (YuNet and SFace). They run on the Mac's own chip, no internet needed.</p>
+      <p>Neither: the edit still happens in Premiere, Resolve or Lightroom, and no language model is used anywhere. Two small on-device vision models, MobileCLIP and a face detector (YuNet, SFace), do the work.</p>
     </div>
   </div>
 </section>

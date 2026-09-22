@@ -13,8 +13,9 @@
 #   6. ffmpeg + ffprobe for videos: Homebrew's if there is a Homebrew, otherwise a static arm64
 #      build dropped into .venv/bin
 #   7. makes sorted.app in this folder openable
-#   8. puts a sorted icon on the Desktop: ~/Desktop/sorted.app, a tiny launcher that starts the
-#      app here (re-runs replace it; a sorted.app the installer did not make is left alone)
+#   8. puts the app in ~/Applications/sorted.app (a tiny launcher that starts the app here; Spotlight,
+#      Launchpad and project-file double-clicks find it there) and an alias to it on the Desktop
+#      (re-runs replace both; a sorted.app the installer did not make is left alone)
 #   9. counts the install: one anonymous ping (random id in .install-id, macOS version, chip)
 #  10. opens sorted.app
 #
@@ -239,17 +240,17 @@ note "ready"
 # re-run (or an install in a new folder) replaces it and a sorted.app somebody put on the Desktop by
 # hand is left alone.
 desktop_icon() {
-  local desk="$HOME/Desktop/sorted.app" marker="Contents/Resources/sorted-installed-from"
+  local desk="$HOME/Applications/sorted.app" marker="Contents/Resources/sorted-installed-from"
   local src="$REPO/sorted.app" launcher="$REPO/sorted.app/Contents/MacOS/sorted"
   DESKTOP_ICON=""
-  if [ ! -d "$HOME/Desktop" ]; then
-    note "no Desktop folder at $HOME/Desktop, skipping the Desktop icon"; return 0
-  fi
+  mkdir -p "$HOME/Applications" 2>/dev/null || { note "could not create ~/Applications, skipping the app icon"; return 0; }
   if [ -e "$desk" ] && [ ! -f "$desk/$marker" ]; then
-    note "there is already a sorted.app on the Desktop that this installer did not make; leaving it alone"
+    note "there is already a sorted.app in ~/Applications that this installer did not make; leaving it alone"
     return 0
   fi
   rm -rf "$desk"
+  # An older install put the launcher itself on the Desktop; it is replaced by an alias below.
+  if [ -f "$HOME/Desktop/sorted.app/$marker" ]; then rm -rf "$HOME/Desktop/sorted.app"; fi
   local script; script="$(mktemp -t sorted-desktop-icon).applescript"
   # $launcher is expanded now, so the icon carries the absolute path of this folder.
   cat > "$script" <<APPLESCRIPT
@@ -301,9 +302,19 @@ APPLESCRIPT
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$desk" >/dev/null 2>&1
   touch "$desk"
   DESKTOP_ICON="$desk"
-  note "sorted.app is on the Desktop; it starts the app in $REPO, and opens sorted_<shoot>.sorted files by double-click"
+  note "sorted.app is in ~/Applications; it starts the app in $REPO, and opens sorted_<shoot>.sorted files by double-click"
+  # The Desktop gets an alias (a Finder alias, so it shows the icon and survives the app being rebuilt).
+  # Deleting the alias loses nothing: Spotlight (command space, "sorted") still finds the app.
+  if [ -d "$HOME/Desktop" ]; then
+    rm -f "$HOME/Desktop/sorted" "$HOME/Desktop/sorted alias" 2>/dev/null
+    if osascript -e "tell application \"Finder\" to make new alias file at (POSIX file \"$HOME/Desktop\" as alias) to (POSIX file \"$desk\" as alias) with properties {name:\"sorted\"}" >/dev/null 2>&1; then
+      note "a sorted alias is on the Desktop"
+    else
+      note "could not put an alias on the Desktop (Finder said no); open sorted from Spotlight or ~/Applications"
+    fi
+  fi
 }
-step "Desktop icon"
+step "App icon"
 desktop_icon
 
 # 9. Count the install ---------------------------------------------------------------------------
@@ -337,7 +348,7 @@ count_install
 # 10. Open it -----------------------------------------------------------------------------------
 printf '\nfinished: %s\n' "$(date)"
 if [ -n "$DESKTOP_ICON" ]; then
-  printf '\nsorted is installed. There is a sorted icon on your Desktop; double-click it any time.\n\n'
+  printf '\nsorted is installed. Open it any time from the sorted icon on your Desktop, or press command space and type sorted.\n\n'
 else
   printf '\nsorted is installed. Double-click sorted.app in %s to start.\n\n' "$REPO"
 fi
