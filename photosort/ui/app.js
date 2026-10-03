@@ -9,7 +9,9 @@
     lastParams: {},
     selected: new Set(),
     people: [],
+    peopleLoaded: false,        // the face groups are the most expensive thing a shoot can be asked for: nothing pulls them up front
     progressTimer: null,
+    scanning: false,            // a scan is running: /api/stats.indexing at boot, /api/progress.running after
     folder: { root: null, name: null, indexed: false },
     recent: [],
     categories: { fixed: {}, discovered: {}, drone: 0 },
@@ -42,6 +44,8 @@
   };
 
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  // Paths are elided from the left: the tail carries the folder and the file name, which is the half worth reading.
+  function elideLeft(s, max) { s = String(s || ""); return s.length > max ? "…" + s.slice(-(max - 1)) : s; }
   var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
 
   // The status line holds the text span plus the "name this person" form, so only the span is written.
@@ -143,7 +147,7 @@
     if (!t || !t.name && !t.id) return;
     var f = { id: t.id || "", name: t.name || "" };
     if (t.type === "checkbox" || t.type === "radio") f.value = t.type === "radio" ? t.value : t.checked;
-    else if (t.tagName === "SELECT") f.value = t.name === "person" || t.id === "person-select" ? (t.value ? "set" : "cleared") : t.value;
+    else if (t.tagName === "SELECT") f.value = t.name === "person" || t.id === "person-select" || t.name === "camera" ? (t.value ? "set" : "cleared") : t.value;
     else if (t.type === "range" || t.type === "number") f.value = Number(t.value);
     else f.chars = (t.value || "").length;             // a text field: only how much was typed
     track("filter", f);
@@ -195,6 +199,7 @@
     if (switching) state.scroll[state.view] = mainEl.scrollTop;
     // ===== end scroll memory =====
     state.view = name;
+    syncSaveForm();                                    // the "name this person" box belongs to two views, not to every tab
     // ===== nav selector: only the five view buttons; the "Check focus" link also lives in <nav> =====
     $$("header nav button[data-view]").forEach(function (b) {
       b.classList.toggle("on", b.dataset.view === name);
@@ -214,7 +219,7 @@
     // ===== navigation: a saved-person find owed from a history restore runs once Search shows =====
     if (name === "search" && pendingFind) { var pf = pendingFind; pendingFind = null; findSaved(pf); }
     // ===== end navigation =====
-    if (name === "people" && state.people.length === 0) loadPeople();
+    if (name === "people") ensurePeople();             // the grouping is fetched the first time the tab is actually opened
     if (name === "people") { loadReferences(); loadSuggestions(); }   // loadSuggestions: the "same person?" block below
     if (name === "categories") loadCategories();
     if (name === "places") loadPlaces();               // ===== places: the map and the city list load on the first visit =====
@@ -242,7 +247,42 @@
   var viewSearch = $("#view-search");
   var VIEWS = ["search", "people", "categories", "places", "index"];
   var TAB_NAMES = { people: "People", categories: "Categories", places: "Places" };
-  var CHIP_KINDS = ["person", "saved", "category", "cluster", "day", "place", "drone", "kind", "hide_bad", "hide_soft"];
+  var CHIP_KINDS = ["person", "saved", "category", "cluster", "day", "place", "drone", "slowmo", "shot", "dur", "look", "camera", "kind", "hide_bad", "hide_soft"];
+  // ===== pick-one filters: a sidebar list of check rows that act as one choice (framing). Each kind names the query
+  // parameter it sets, the values it accepts, and the words its chip and its tooltip use; every place that walks the
+  // chips (the form, the hash, search history) goes through this table instead of growing one branch per filter. =====
+  var PICKS = {
+    shot: { param: "shot_size", values: ["close", "medium", "wide"],
+            label: function (k) { return k + " shots"; },
+            title: function (k) { return "only " + k + " shots, as the picture reads"; } },
+    dur: { param: "duration", values: ["lt10", "10to30", "30to120", "gt120"],
+           label: function (k) { return DUR_WORDS[k] || k; },
+           title: function (k) { return "only clips " + (DUR_WORDS[k] || k).toLowerCase(); } },
+    look: { param: "look", values: ["log", "standard"],
+            label: function (k) { return k === "log" ? "log, needs grading" : "Rec.709 and others"; },
+            title: function (k) { return k === "log" ? "only clips shot in S-Log, which need grading" : "only clips the camera says are Rec.709 or another ready to watch profile"; } },
+    // values: null takes any camera string the shoot has; the facet list is what the select offers
+    camera: { param: "camera", values: null,
+              label: function (k) { return cameraName(k); },
+              title: function (k) { return "only what the " + cameraName(k) + " shot (" + k + ")"; } }
+  };
+  var DUR_WORDS = { lt10: "Under 10 s", "10to30": "10 to 30 s", "30to120": "30 s to 2 min", gt120: "Over 2 min" };
+  // Sony writes model codes, not the names on the body. The ones that turn up on the shoots this was built on, and
+  // their neighbours; anything else shows as written.
+  var SONY_NAMES = { "ILCE-7SM3": "A7S III", "ILCE-7RM5": "A7R V", "ILCE-7RM4": "A7R IV", "ILCE-7M4": "A7 IV",
+                     "ILCE-7M3": "A7 III", "ILCE-1": "A1", "ILCE-9M3": "A9 III", "ILCE-7CM2": "A7C II", "ILCE-6700": "A6700",
+                     "ILME-FX3": "FX3", "ILME-FX30": "FX30", "ILME-FX6V": "FX6", "ILME-FX6": "FX6" };
+  function cameraName(c) {
+    var m = /^SONY\s+(\S+)$/i.exec(c || "");
+    return m && SONY_NAMES[m[1].toUpperCase()] ? "Sony " + SONY_NAMES[m[1].toUpperCase()] : (c || "");
+  }
+  function pickValueOk(kind, v) { return !!v && (!PICKS[kind].values || PICKS[kind].values.indexOf(String(v)) >= 0); }
+  function pickOfParam(param) {
+    for (var kind in PICKS) if (PICKS[kind].param === param) return kind;
+    return null;
+  }
+  // ===== end pick-one filters =====
+  CHIP_KINDS.push("flag", "stars", "label");          // ===== marks =====
   try { history.scrollRestoration = "manual"; } catch (e) { /* not supported */ }
 
   function chipsKey(chips) { return JSON.stringify((chips || []).map(function (c) { return [c.kind, c.key]; })); }
@@ -266,9 +306,12 @@
       else if (c.kind === "day") out.day = c.key;
       else if (c.kind === "place") out.bbox = c.key;
       else if (c.kind === "drone") out.aerial = 1;
+      else if (c.kind === "slowmo") out.slowmo = 1;
+      else if (PICKS[c.kind]) out[PICKS[c.kind].param] = c.key;
       else if (c.kind === "kind") out.kind = c.key;
       else if (c.kind === "hide_bad") out.hide_bad = 1;
       else if (c.kind === "hide_soft") out.hide_soft = 1;
+      else if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") out[c.kind] = c.key;   // ===== marks =====
     });
     return out;
   }
@@ -282,9 +325,17 @@
     if (fd.get("day")) out.push({ kind: "day", key: fd.get("day"), from: null });
     if (fd.get("bbox")) out.push({ kind: "place", key: fd.get("bbox"), from: null });
     if (fd.get("aerial")) out.push({ kind: "drone", key: "drone", from: null });
+    if (fd.get("slowmo")) out.push({ kind: "slowmo", key: "slowmo", from: null });
+    Object.keys(PICKS).forEach(function (kind) {
+      var v = fd.get(PICKS[kind].param);
+      if (v) out.push({ kind: kind, key: v, from: null });
+    });
     if (fd.get("kind")) out.push({ kind: "kind", key: fd.get("kind"), from: null });
     if (fd.get("hide_bad")) out.push({ kind: "hide_bad", key: "hide_bad", from: null });
     if (fd.get("hide_soft")) out.push({ kind: "hide_soft", key: "hide_soft", from: null });
+    // ===== marks =====
+    ["flag", "stars", "label"].forEach(function (k) { if (fd.get(k)) out.push({ kind: k, key: fd.get(k), from: null }); });
+    // ===== end marks =====
     return out;
   }
   // After a form control changed by hand: chips still on the form keep their place and origin, new ones go last, gone ones drop.
@@ -315,10 +366,16 @@
     $("#day-filter").value = c("day") ? c("day").key : "";
     $("#bbox-filter").value = c("place") ? c("place").key : "";
     aerialOnly.checked = !!c("drone");
+    slowmoOnly.checked = !!c("slowmo");
+    Object.keys(PICKS).forEach(function (kind) { setPick(kind, c(kind) ? c(kind).key : ""); });
     var k = c("kind") ? c("kind").key : "";
     $$('#kind-select input[name="kind"]').forEach(function (r) { r.checked = r.value === k; });
     $("#hide-bad").checked = !!c("hide_bad");
     $("#hide-soft").checked = !!c("hide_soft");
+    // ===== marks: the three hidden fields, then the Ratings block redrawn from them =====
+    ["flag", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = c(k) ? String(c(k).key) : ""; });
+    syncMarksFilter();
+    // ===== end marks =====
   }
   // Add one chip to the set: one per kind, so a second person replaces the first; a saved find stands alone.
   function addChip(chip, base) {
@@ -333,8 +390,11 @@
     if (c.kind === "kind") return c.key;
     if (c.kind === "day") return dayLabel(c.key);
     if (c.kind === "place") return boxLabel(c.key);
+    if (c.kind === "slowmo") return "slow motion";
+    if (PICKS[c.kind]) return PICKS[c.kind].label(c.key);
     if (c.kind === "hide_bad") return "no out of focus";
     if (c.kind === "hide_soft") return "no soft";
+    if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return marksChipLabel(c);   // ===== marks =====
     return c.key;
   }
   function chipTitle(c) {
@@ -342,10 +402,13 @@
     if (c.kind === "category") return "only the " + c.key + " category";
     if (c.kind === "cluster") return "only the discovered category " + c.key;
     if (c.kind === "drone") return "only drone shots";
+    if (c.kind === "slowmo") return "only clips shot at 100 fps or more";
+    if (PICKS[c.kind]) return PICKS[c.kind].title(c.key);
     if (c.kind === "day") return "only what was shot on " + dayLabel(c.key);
     if (c.kind === "place") return "only what was shot around " + boxLabel(c.key);
     if (c.kind === "kind") return "only " + c.key;
     if (c.kind === "hide_bad") return "the focus check's out-of-focus rows are hidden";
+    if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return "only " + marksChipLabel(c);   // ===== marks =====
     return "the focus check's soft rows are hidden too";
   }
   // The origin tab of the last chip that came from one: the Back button's label and the sidebar dot.
@@ -392,11 +455,12 @@
 
   // history
   var navRestoring = false;
-  var HASH_KEYS = { person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
+  var HASH_KEYS = { person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", slowmo: "slowmo", shot: "shot_size", dur: "duration", look: "look", camera: "camera", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
+  HASH_KEYS.flag = "flag"; HASH_KEYS.stars = "stars"; HASH_KEYS.label = "label";   // ===== marks =====
   function hashFor(view, chips) {
     if (view !== "search" || !chips || !chips.length) return "#" + view;
     var p = new URLSearchParams();
-    chips.forEach(function (c) { p.set(HASH_KEYS[c.kind], c.kind === "drone" || c.kind === "hide_bad" || c.kind === "hide_soft" ? "1" : String(c.key)); });
+    chips.forEach(function (c) { p.set(HASH_KEYS[c.kind], c.kind === "drone" || c.kind === "slowmo" || c.kind === "hide_bad" || c.kind === "hide_soft" ? "1" : String(c.key)); });
     return "#search?" + p.toString();
   }
   // A pasted or typed URL: the chips in the order the hash lists them; a person, category, cluster or drone chip remembers its tab.
@@ -411,9 +475,16 @@
         else if (k === "category" && v) entry.chips.push({ kind: "category", key: v, from: "categories" });
         else if (k === "cluster" && v) entry.chips.push({ kind: "cluster", key: v, from: "categories" });
         else if (k === "aerial" && v) entry.chips.push({ kind: "drone", key: "drone", from: "categories" });
+        else if (k === "slowmo" && v) entry.chips.push({ kind: "slowmo", key: "slowmo", from: null });
+        else if (pickOfParam(k) && pickValueOk(pickOfParam(k), v)) entry.chips.push({ kind: pickOfParam(k), key: v, from: null });
         else if (k === "kind" && (v === "photos" || v === "videos")) entry.chips.push({ kind: "kind", key: v, from: null });
         else if (k === "hide_bad" && v) entry.chips.push({ kind: "hide_bad", key: "hide_bad", from: null });
         else if (k === "hide_soft" && v) entry.chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
+        // ===== marks =====
+        else if (k === "flag" && /^(pick|reject|none)$/.test(v)) entry.chips.push({ kind: "flag", key: v, from: null });
+        else if (k === "stars" && /^[1-5]$/.test(v)) entry.chips.push({ kind: "stars", key: v, from: null });
+        else if (k === "label" && /^(red|yellow|green|blue|purple|none)$/.test(v)) entry.chips.push({ kind: "label", key: v, from: null });
+        // ===== end marks =====
       });
       if (chipOf("saved", entry.chips)) entry.chips = [chipOf("saved", entry.chips)];
     }
@@ -472,6 +543,7 @@
     var changed = chipsKey(chips) !== chipsKey(state.chips);
     navRestoring = true;
     applyChips(chips);
+    if (chipOf("person", chips)) ensurePeople();        // see the boot path: the chip's label is a name, which lives in state.people
     showView(VIEWS.indexOf(entry.view) >= 0 ? entry.view : "search");
     if (changed) {
       var saved = chipOf("saved", chips);
@@ -499,6 +571,7 @@
   var lastErrorCount = null;
   function loadStats() {
     return api("/api/stats").then(function (s) {
+      setScanning(s.indexing);                         // before noteErrorCount below: the block words itself differently mid-scan
       // ===== title block: "630 photos · 325 videos · 606 faces", the index time in the tooltip =====
       var bits = [s.photos + " photos"];
       if (s.videos) bits.push(s.videos + " videos");
@@ -527,22 +600,84 @@
       loadFocusStatus();
       loadReorganiseStatus();
       // ===== end after stats =====
-      if (s.errors !== lastErrorCount) {
-        lastErrorCount = s.errors;
-        loadErrors();
-      }
+      noteErrorCount(s);
       return s;
     });
   }
+  // The list runs to 1,932 rows on a bad disk, so it is re-fetched only when the count it belongs to has moved.
+  function noteErrorCount(s) {
+    if (s && s.errors !== lastErrorCount) {
+      lastErrorCount = s.errors;
+      loadErrors();
+    }
+  }
 
+  // The block used to shout: a red headline plus every failed path, sitting under a bar that was moving
+  // normally and telling you to tick Retry failed files and scan again, which you cannot usefully do until the
+  // pass ends. Mid-scan the total is not the interesting number; whether a file is failing RIGHT NOW is, because
+  // that is live evidence the disk is playing up and the earliest warning available. On the GT 1 TB scan the
+  // count moved 1,932 -> 1,933 mid-pass and that one new failure was the most informative thing on the screen,
+  // so a blanket "hide errors while scanning" would have swallowed exactly the wrong number. Carried over: one
+  // quiet line with the paths behind a disclosure. New this pass: its own line, loud. The call to action waits
+  // for the end of the pass, which is the moment it can be acted on.
+  var errorBaseline = null;                            // paths already failing when this session started a scan; null until one starts
+  var lastErrorData = null;                            // the whole last payload, not just its rows: the counts describe a set the rows may not
+  // A pass starting or ending changes what the block should say, and the count behind it may not move at all
+  // when that happens, so the state change re-renders what is already in hand rather than waiting.
+  function setScanning(on) {
+    on = !!on;
+    if (on === state.scanning) return;
+    state.scanning = on;
+    if (lastErrorData) renderErrors(lastErrorData);
+  }
   function loadErrors() {
-    return api("/api/errors").then(function (data) {
-      var list = (data && data.errors) || [];
-      var box = $("#index-errors");
-      box.hidden = list.length === 0;
-      $("#index-errors-title").textContent = list.length + " file(s) could not be read. They are skipped; tick Retry failed files and Scan again once fixed.";
-      $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.rel; }).join("\n") + (list.length > 200 ? "\n… " + (list.length - 200) + " more" : "");
-    }).catch(function () { /* non-fatal */ });
+    return api("/api/errors").then(renderErrors).catch(function () { /* non-fatal */ });
+  }
+  // The server splits the two groups when it can: it knows the run's start and each row's indexed_at. An older
+  // one does not, and then a scan started in this session stands in - it kept the paths it began with, so
+  // anything outside that set is new. A page reloaded mid-scan has no such set and stays quiet rather than
+  // guessing, because a wrong loud line costs more than a missing one. Paths and not a count, since a retry
+  // pass can clear fifty rows and add one.
+  function isNewError(e) {
+    if (e && typeof e["new"] === "boolean") return e["new"];
+    if (e && typeof e.is_new === "boolean") return e.is_new;
+    return !!(errorBaseline && e && e.rel && !errorBaseline.has(e.rel));
+  }
+  function renderErrors(data) {
+    data = data || {};
+    var list = data.errors || [];
+    lastErrorData = data;
+    var box = $("#index-errors");
+    box.hidden = list.length === 0;
+    if (!list.length) return;
+    // The counts describe the whole set when the server sends them, which the rows may not: they are capped.
+    var total = typeof data.total === "number" ? data.total : list.length;
+    var fresh = list.filter(isNewError);
+    var nNew = typeof data.n_new === "number" ? data.n_new : fresh.length;
+    var nOld = typeof data.n_old === "number" ? data.n_old : Math.max(total - nNew, 0);
+    var newEl = $("#index-errors-new");
+    var say = "";
+    if (nNew && state.scanning) {
+      say = nNew === 1 && fresh.length ? "1 file failed just now: " + elideLeft(fresh[0].rel, 70)
+                                       : fmtN(nNew) + " files have failed during this pass. If that keeps climbing the disk is dropping out.";
+    } else if (nNew && nOld) {
+      // The pass is over, so "just now" is not true any more, but which half is fresh damage and which was
+      // carried in still is. With nothing carried over the call to action below already says the whole story.
+      say = "Failed during this pass: " + fmtN(nNew) + " of " + fmtN(total) + ", the rest carried over.";
+    }
+    newEl.hidden = !say;
+    newEl.classList.toggle("quiet", !state.scanning);  // one red line at a time: after the pass the call to action is the loud one
+    if (say) newEl.textContent = say;
+    var title = $("#index-errors-title");
+    if (state.scanning) {
+      title.textContent = fmtN(total) + " skipped so far";
+      title.title = "the files that could not be read; Retry failed files can have them once this pass ends";
+    } else {
+      title.textContent = fmtN(total) + " file(s) could not be read. They are skipped; tick Retry failed files and Scan again once fixed.";
+      title.title = "";
+    }
+    box.classList.toggle("ended", !state.scanning);    // the call to action is the red one, the running count is not
+    $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.rel; }).join("\n") + (total > 200 ? "\n… " + fmtN(total - 200) + " more" : "");
   }
 
   // ---------- folder ----------
@@ -732,7 +867,7 @@
   // Reached after any folder switch: reset per-folder UI state, then either land
   // on the Index tab (fresh folder, nothing indexed yet) or refresh the current view.
   function settleFolder(info) {
-    state.people = [];
+    state.people = []; state.peopleLoaded = false;
     state.results = [];
     state.selected = new Set();
     state.categories = { fixed: {}, discovered: {}, drone: 0 };
@@ -743,8 +878,10 @@
     peopleEl.innerHTML = "";
     personSelect.innerHTML = '<option value="">anyone</option>';
     progressEl.textContent = "";
+    renderProgressCurrent(null);
     $("#index-errors").hidden = true;
-    lastErrorCount = null;
+    $("#index-errors-new").hidden = true;
+    lastErrorCount = null; lastErrorData = null; errorBaseline = null; state.scanning = false;
     // ===== per-folder reset: focus boxes and line, faces pending, the reorganise section =====
     renderFocusLine(null);
     renderFacesPending(null);
@@ -759,6 +896,7 @@
     // ===== end navigation =====
     closeHistory(); loadSearches();                   // ===== search history: the new shoot's list =====
     daysAll = false; loadDays();                     // ===== days: the new shoot's days =====
+    loadMarkCounts();                                  // ===== marks: the new shoot's numbers =====
     state.places = null; placeCount();                // ===== places: the count next to the tab; the map itself loads on the first visit =====
     state.showCopies = false;                          // ===== duplicates and bursts: folded again on a new shoot =====
     if ($("#show-copies")) $("#show-copies").checked = false;
@@ -777,7 +915,6 @@
       return;
     }
     loadStats().then(function (s) { loadErrors(); if (s.indexing) pollProgress(); });
-    loadPeople();
     loadCategories();                                  // fills the count beside the Categories nav row
     runSearch();
     showView(state.view === "index" ? "search" : state.view);
@@ -923,10 +1060,20 @@
     if (sort) params.sort = sort;
     // ===== end sort =====
     if (fd.get("aerial")) params.aerial = 1;
+    if (fd.get("slowmo")) params.slowmo = 1;
+    Object.keys(PICKS).forEach(function (kind) {
+      var v = fd.get(PICKS[kind].param);
+      if (v) params[PICKS[kind].param] = v;
+    });
     // ===== focus filters: hide_bad drops the bad rows, hide_soft drops soft and bad; unchecked rows are never hidden =====
     if (fd.get("hide_bad")) params.hide_bad = 1;
     if (fd.get("hide_soft")) params.hide_soft = 1;
     // ===== end focus filters =====
+    // ===== marks: the Ratings block's three hidden fields =====
+    if (fd.get("flag")) params.flag = fd.get("flag");
+    if (fd.get("stars")) params.stars = fd.get("stars");
+    if (fd.get("label")) params.label = fd.get("label");
+    // ===== end marks =====
     return params;
   }
 
@@ -1369,13 +1516,16 @@
   // reply used to land last and leave the counts describing a filter that is no longer on. Every search takes
   // a ticket; only the newest one is allowed to paint. "Show more" (append) keeps its own ticket.
   var searchSeq = 0;
+  var pushOwed = false;
   function runSearch(extra, append) {
     // ===== combined filters: a plain search (no explicit params) reads the chips off the form, so a control changed by hand
     // is a chip like any other; a saved-person find is not a form filter, so any plain search drops it. A change is a history entry. =====
-    var pushAfter = false;
+    // The history entry is owed until a search that carries it paints: two quick clicks (a framing row, then
+    // Videos) start two searches, the first reply is dropped as stale, and the second, whose chips were already
+    // synced, would otherwise never push, leaving the URL one filter behind the bar.
     if (!extra && !append) {
       if (chipOf("saved")) state.chips = state.chips.filter(function (c) { return c.kind !== "saved"; });
-      pushAfter = syncChipsFromForm();
+      if (syncChipsFromForm()) pushOwed = true;
     }
     // ===== end combined filters =====
     var params = currentFilters();
@@ -1393,7 +1543,7 @@
       state.folded = data.folded || 0;                 // ===== duplicates and bursts: rows inside the tiles =====
       state.offset = state.results.length;
       renderGrid();
-      if (pushAfter) navPush();                        // ===== combined filters: the hash and history follow the chips =====
+      if (pushOwed) { pushOwed = false; navPush(); }   // ===== combined filters: the hash and history follow the chips =====
     }).catch(function (err) {
       if (ticket !== searchSeq) return;
       if (err.status === 404) {
@@ -1418,6 +1568,122 @@
   // ===== end focus filters =====
   var aerialOnly = $("#aerial-only");
   aerialOnly.addEventListener("change", function () { runSearch(); });   // ===== combined filters: the box is the drone chip =====
+  // ===== slow motion: clips at 100 fps or more. The row shows only on a shoot with clips; a shoot scanned before the
+  // frame rate was kept offers the header read (ffprobe, no decode) until every clip it can reach has a rate. =====
+  var slowmoOnly = $("#slowmo-only");
+  slowmoOnly.addEventListener("change", function () { runSearch(); });
+  // ===== pick-one filters: ticking a row clears the other rows of its list, ticking the lit row clears it =====
+  function pickInputs(kind) { return $$('input[data-pick="' + kind + '"]'); }
+  var cameraSelect = $("#camera-select");
+  function setPick(kind, value) {
+    if (kind === "camera") { setCameraValue(value); return; }
+    pickInputs(kind).forEach(function (r) { r.checked = !!value && r.value === value; });
+  }
+  // A camera that came from a URL or a saved search may not be in the list yet (the facets load after the boot
+  // search): it gets an option of its own so the select can show it rather than silently reading "Any camera".
+  function setCameraValue(value) {
+    if (value && !Array.prototype.some.call(cameraSelect.options, function (o) { return o.value === value; })) {
+      var o = document.createElement("option"); o.value = value; o.textContent = cameraName(value);
+      cameraSelect.appendChild(o);
+    }
+    cameraSelect.value = value || "";
+  }
+  Object.keys(PICKS).forEach(function (kind) {
+    pickInputs(kind).forEach(function (r) {
+      r.addEventListener("change", function () {
+        if (r.checked) pickInputs(kind).forEach(function (o) { if (o !== r) o.checked = false; });
+        runSearch();
+      });
+    });
+  });
+  // the camera select needs no listener of its own: it is in form.elements (form="q"), and every select there re-runs the search
+  // The select lists every body the shoot has, most used first, with its count. It shows once there are two:
+  // a filter with one choice in it filters nothing.
+  function renderCameras(counts) {
+    var cur = cameraSelect.value;
+    var names = Object.keys(counts || {});
+    while (cameraSelect.options.length > 1) cameraSelect.remove(1);
+    names.forEach(function (c) {
+      var o = document.createElement("option");
+      o.value = c; o.textContent = cameraName(c) + "  " + num(counts[c]); o.title = c;
+      cameraSelect.appendChild(o);
+    });
+    setCameraValue(cur);
+    $("#camera-group").hidden = names.length < 2 && !cur;
+  }
+  // The counts beside each row and whether the list shows at all: hidden until something has an answer for it,
+  // but never while one of its rows is ticked (a chip the sidebar cannot show would be a filter nobody can untick).
+  function renderPick(kind, groupSel, counts) {
+    var any = false;
+    pickInputs(kind).forEach(function (r) {
+      var n = (counts && counts[r.value]) || 0;
+      if (n) any = true;
+      var c = r.parentNode.querySelector("[data-count]");
+      if (c) c.textContent = num(n);
+    });
+    var ticked = pickInputs(kind).some(function (r) { return r.checked; });
+    $(groupSel).hidden = !any && !ticked;
+  }
+  // ===== end pick-one filters =====
+  function loadFacets() {
+    if (!(state.folder && state.folder.root)) { renderFacets(null); return Promise.resolve(); }
+    return api("/api/facets").then(renderFacets).catch(function () { renderFacets(null); });
+  }
+  function renderFacets(d) {
+    var sm = (d && d.slowmo) || {}, fr = d && d.fps_read;
+    var clips = (sm.slow || 0) + (sm.normal || 0) + (sm.unknown || 0);
+    $("#slowmo-row").hidden = !clips && !slowmoOnly.checked;
+    $("#slowmo-count").textContent = clips ? num(sm.slow || 0) : "";
+    renderPick("shot", "#shot-group", d && d.shot_size);
+    renderPick("dur", "#dur-group", d && d.duration);
+    renderPick("look", "#look-group", d && d.look);
+    renderCameras(d && d.cameras);
+    var cf = d && d.clip_faces;
+    $("#clipfaces-line").hidden = !(cf && cf.pending > 0);
+    if (cf && cf.pending > 0) $("#clipfaces-status").textContent = num(cf.pending) + (cf.pending === 1 ? " clip" : " clips") + " not checked for faces";
+    var offer = !!(fr && fr.unknown > 0 && !fr.read_at);
+    $("#fps-line").hidden = !offer;
+    if (offer) $("#fps-status").textContent = num(fr.unknown) + (fr.unknown === 1 ? " clip" : " clips") + " without clip details";
+  }
+  $("#fps-read").addEventListener("click", function () {
+    var btn = $("#fps-read");
+    btn.disabled = true;
+    api("/api/fps/read", { method: "POST" }).then(function (d) {
+      setStatus("reading clip details from " + num(d.total) + " clips");
+      var poll = setInterval(function () {
+        api("/api/fps/progress").then(function (p) {
+          if (p.running) { setStatus("reading clip details, " + num(p.done) + " of " + num(p.total)); return; }
+          clearInterval(poll); btn.disabled = false;
+          var c = p.counts || {};
+          setStatus(p.error ? "reading clip details failed: " + p.error
+                            : "read the details of " + num((c.read || 0) - (c.missing || 0)) + " of " + num(c.read || 0) + " clips" + (c.missing ? ", " + num(c.missing) + " not on the disk" : ""));
+          loadFacets();
+          runSearch();
+        }).catch(function () { clearInterval(poll); btn.disabled = false; });
+      }, 700);
+    }).catch(function (err) { btn.disabled = false; setStatus("could not read clip details: " + err.message); });
+  });
+  // ===== faces in clips: the frames are on this Mac, so this needs no disk. The shot sizes are refreshed when it ends. =====
+  $("#clipfaces-find").addEventListener("click", function () {
+    var btn = $("#clipfaces-find");
+    btn.disabled = true;
+    api("/api/clipfaces/find", { method: "POST" }).then(function (d) {
+      setStatus("finding faces in " + num(d.total) + " clips");
+      var poll = setInterval(function () {
+        api("/api/clipfaces/progress").then(function (p) {
+          if (p.running) { setStatus("finding faces in clips, " + num(p.done) + " of " + num(p.total)); return; }
+          clearInterval(poll); btn.disabled = false;
+          var c = p.counts || {};
+          setStatus(p.error ? "finding faces in clips failed: " + p.error
+                            : "checked " + num((c.read || 0) - (c.missing || 0)) + " clips, people in " + num(c.found || 0) + (c.missing ? ", " + num(c.missing) + " with no frames saved" : ""));
+          loadFacets();
+          runSearch();
+        }).catch(function () { clearInterval(poll); btn.disabled = false; });
+      }, 700);
+    }).catch(function (err) { btn.disabled = false; setStatus("could not find faces in clips: " + err.message); });
+  });
+  // ===== end faces in clips =====
+  // ===== end slow motion =====
 
   // ===== search history and saved searches: arrow down in the field lists the last 20 queries on this shoot, each with the
   // filters it ran with; a star keeps one as a chip in the sidebar under Filters; a row or a chip puts the text and every
@@ -1445,6 +1711,8 @@
     if (f.category) parts.push(f.category);
     if (f.cluster) parts.push(/^group \d+$/.test(f.cluster) ? "Unnamed " + f.cluster : f.cluster);
     if (f.aerial) parts.push("drone");
+    if (f.slowmo) parts.push("slow motion");
+    Object.keys(PICKS).forEach(function (kind) { if (f[PICKS[kind].param]) parts.push(PICKS[kind].label(String(f[PICKS[kind].param]))); });
     if (f.kind) parts.push(f.kind);
     if (f.faces) parts.push(FACES_WORDS[f.faces] || f.faces);
     if (f.sharp) parts.push("sharp " + Math.round(Number(f.sharp)));
@@ -1458,6 +1726,11 @@
     if (f.category) chips.push({ kind: "category", key: String(f.category), from: null });
     if (f.cluster) chips.push({ kind: "cluster", key: String(f.cluster), from: null });
     if (f.aerial) chips.push({ kind: "drone", key: "drone", from: null });
+    if (f.slowmo) chips.push({ kind: "slowmo", key: "slowmo", from: null });
+    Object.keys(PICKS).forEach(function (kind) {
+      var v = f[PICKS[kind].param];
+      if (pickValueOk(kind, v)) chips.push({ kind: kind, key: String(v), from: null });
+    });
     if (f.kind === "photos" || f.kind === "videos") chips.push({ kind: "kind", key: f.kind, from: null });
     if (f.hide_bad) chips.push({ kind: "hide_bad", key: "hide_bad", from: null });
     if (f.hide_soft) chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
@@ -1696,6 +1969,7 @@
         card.appendChild(stamp);
       }
       // ===== end sort =====
+      decorateMarks(card, r);                          // ===== marks: flag, stars and label on the tile =====
 
       card.addEventListener("click", function (e) { clickCard(e, r, card); });
       card.addEventListener("dblclick", function () {
@@ -2302,6 +2576,7 @@
     lbMeta.appendChild(fn);
     lbMeta.appendChild(document.createTextNode("  ·  " + bits.slice(1).join("  ·  ")));
     // ===== end lightbox strip =====
+    renderLbMarks();                                   // ===== marks =====
     lightbox.hidden = false;
     if (isVideo) {
       api("/api/segments/" + r.id).then(function (data) {
@@ -2333,6 +2608,7 @@
     var qField = form.querySelector('[name="q"]');
     var cmd = e.metaKey || e.ctrlKey;
     if (!lightbox.hidden) {
+      if (!cmd && !e.altKey && currentLb && marksKey(e, [currentLb.id])) return;   // ===== marks: P X U 0-9 on the shot shown =====
       if (e.key === "Escape") { e.preventDefault(); closeLightbox(); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepLightbox(1); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); stepLightbox(-1); }
@@ -2365,6 +2641,7 @@
     if (cmd && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); revealSelection(); return; }
     // ===== end show in the Finder =====
     if (cmd && e.key.toLowerCase() === "a") { e.preventDefault(); selectAllShown(); return; }
+    if (!cmd && !e.altKey && marksKey(e, marksTargets())) return;   // ===== marks: the Lightroom keys =====
     if (e.key === " ") {
       var id = hoveredId != null ? hoveredId : (document.activeElement && document.activeElement.classList.contains("card") ? Number(document.activeElement.dataset.id) : null);
       var c = id != null ? cardEl(id) : null;
@@ -2388,6 +2665,285 @@
     runSearch({ image_id: id });
     setStatus("showing photos similar to that one");
   });
+
+  // ===== marks: flags, stars and colour labels (selling checklist B2), and the XMP sidecars that carry them out (B3).
+  // The Lightroom keys act on the selection, else the tile under the pointer, else the focused tile; in the full-size view on
+  // the shot shown. A change is drawn at once and saved in one POST /api/marks; a failed save puts the old marks back. =====
+  var MARK_LABELS = ["red", "yellow", "green", "blue", "purple"];
+  var LABEL_KEYS = { "6": "red", "7": "yellow", "8": "green", "9": "blue" };
+  var LABEL_WORDS = { red: "Red", yellow: "Yellow", green: "Green", blue: "Blue", purple: "Purple" };
+  var ICONS = {
+    pick: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 11V1.6h6.4L8 4l1.4 2.4H3" /></svg>',
+    reject: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" /></svg>',
+    star: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1l1.5 3.2 3.5.4-2.6 2.4.7 3.5L6 8.8 2.9 10.5l.7-3.5L1 4.6l3.5-.4z" /></svg>'
+  };
+  state.markCounts = null;
+
+  function marksOf(r) { return { flag: r.flag || null, rating: Number(r.rating) || 0, label: r.label || null }; }
+  function starsText(n) { var s = ""; for (var i = 0; i < n; i++) s += "★"; return s; }
+  function marksChipLabel(c) {
+    if (c.kind === "flag") return c.key === "pick" ? "picks" : c.key === "reject" ? "rejects" : "no flag";
+    if (c.kind === "stars") return starsText(Number(c.key)) + " or more";
+    return c.key === "none" ? "no label" : c.key + " label";
+  }
+  // The tile: a dimmed picture for a reject, a badge with the flag and the stars, a coloured edge for the label.
+  function decorateMarks(card, r) {
+    if (!card) return;
+    var old = card.querySelector(".badge.marks");
+    if (old) old.remove();
+    card.classList.toggle("rejected", r.flag === "reject");
+    if (r.label) card.dataset.label = r.label; else delete card.dataset.label;
+    var n = Number(r.rating) || 0;
+    if (!r.flag && !n) return;
+    var b = document.createElement("div");
+    b.className = "badge marks" + (card.querySelector(".badge.drone") ? " above" : "");
+    if (r.flag) {
+      var f = document.createElement("span");
+      f.className = "mk-flag mk-" + r.flag;
+      f.innerHTML = ICONS[r.flag];
+      b.appendChild(f);
+    }
+    if (n) {
+      var st = document.createElement("span");
+      st.className = "mk-stars";
+      st.textContent = starsText(n);
+      b.appendChild(st);
+    }
+    b.title = (r.flag === "pick" ? "picked" : r.flag === "reject" ? "rejected" : "") + (r.flag && n ? ", " : "") + (n ? n + (n === 1 ? " star" : " stars") : "");
+    card.appendChild(b);
+  }
+  function marksTargets() {
+    if (state.selected.size) return Array.from(state.selected);
+    if (hoveredId != null) return [hoveredId];
+    var a = document.activeElement;
+    if (a && a.classList && a.classList.contains("card") && gridEl.contains(a)) return [Number(a.dataset.id)];
+    return [];
+  }
+  function selectedRows() {
+    var out = [];
+    state.selected.forEach(function (id) { var r = resultById.get(id); if (r) out.push(r); });
+    return out;
+  }
+  // The change a key stands for, or null: P X U, 0 to 5, 6 to 9 (a label already on every target comes off).
+  function marksChange(key, rows) {
+    var k = key.toLowerCase();
+    if (k === "p") return { flag: "pick" };
+    if (k === "x") return { flag: "reject" };
+    if (k === "u") return { flag: null };
+    if (/^[0-5]$/.test(k)) return { rating: Number(k) };
+    if (LABEL_KEYS[k]) {
+      var lb = LABEL_KEYS[k];
+      var all = rows.length > 0 && rows.every(function (r) { return r.label === lb; });
+      return { label: all ? null : lb };
+    }
+    return null;
+  }
+  function marksKey(e, ids) {
+    if (e.shiftKey && !/^[pxu]$/i.test(e.key)) return false;
+    var rows = ids.map(function (id) { return resultById.get(id) || (currentLb && currentLb.id === id ? currentLb : null); }).filter(Boolean);
+    var change = marksChange(e.key, rows);
+    if (!change) return false;
+    e.preventDefault();
+    if (!ids.length) { setStatus("point at a tile, or select some, then press the key again"); return true; }
+    applyMarks(ids, change);
+    return true;
+  }
+  function marksWords(change, n) {
+    var what = n === 1 ? "1 item" : num(n) + " items";
+    if ("flag" in change) return change.flag === "pick" ? "picked " + what : change.flag === "reject" ? "rejected " + what : "flag off " + what;
+    if ("rating" in change) return change.rating ? starsText(change.rating) + " on " + what : "stars off " + what;
+    return change.label ? LABEL_WORDS[change.label].toLowerCase() + " label on " + what : "label off " + what;
+  }
+  function redrawMarks(ids) {
+    ids.forEach(function (id) { var r = resultById.get(id); if (r) decorateMarks(cardEl(id), r); });
+    renderInspector();
+    renderLbMarks();
+  }
+  function applyMarks(ids, change) {
+    var before = {};
+    ids.forEach(function (id) {
+      var r = resultById.get(id) || (currentLb && currentLb.id === id ? currentLb : null);
+      if (!r) return;
+      before[id] = marksOf(r);
+      Object.keys(change).forEach(function (k) { r[k] = change[k]; });
+    });
+    redrawMarks(ids);
+    setStatus(marksWords(change, ids.length));
+    return api("/api/marks", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ ids: ids }, change))
+    }).then(function (data) {
+      var m = (data && data.marks) || {};
+      Object.keys(m).forEach(function (id) {
+        var r = resultById.get(Number(id));
+        if (r) { r.flag = m[id].flag; r.rating = m[id].rating; r.label = m[id].label; }
+      });
+      redrawMarks(ids);
+      loadMarkCounts();
+    }).catch(function (err) {
+      Object.keys(before).forEach(function (id) {
+        var r = resultById.get(Number(id)) || (currentLb && currentLb.id === Number(id) ? currentLb : null);
+        if (r) Object.assign(r, before[id]);
+      });
+      redrawMarks(ids);
+      setStatus("could not save the marks: " + err.message);
+    });
+  }
+  // The inspector block: Flag, Rating and Label rows of real buttons. rows are the loaded items, ids every one acted on
+  // (a "select all matching" selection holds ids whose rows were never loaded). A control is lit when every row agrees.
+  function marksControls(rows, ids) {
+    ids = ids || rows.map(function (r) { return r.id; });
+    var wrap = document.createElement("div");
+    wrap.className = "insp-marks";
+    var every = function (fn) { return rows.length > 0 && rows.every(fn); };
+    var commonRating = every(function (r) { return (Number(r.rating) || 0) === (Number(rows[0].rating) || 0); }) ? Number(rows[0].rating) || 0 : -1;
+    function row(k) {
+      var rw = document.createElement("div"); rw.className = "insp-row";
+      var kk = document.createElement("span"); kk.className = "k"; kk.textContent = k;
+      var vv = document.createElement("span"); vv.className = "v mk-ctl";
+      rw.appendChild(kk); rw.appendChild(vv); wrap.appendChild(rw);
+      return vv;
+    }
+    function btn(parent, cls, html, title, pressed, onClick) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = cls; b.innerHTML = html; b.title = title;
+      b.setAttribute("aria-pressed", pressed ? "true" : "false");
+      b.addEventListener("click", onClick);
+      parent.appendChild(b);
+      return b;
+    }
+    var flagRow = row("Flag");
+    ["pick", "reject"].forEach(function (f) {
+      var on = every(function (r) { return r.flag === f; });
+      var b = btn(flagRow, "mk-btn mk-flagbtn mk-" + f, ICONS[f] + "<span>" + (f === "pick" ? "Pick" : "Reject") + "</span>",
+                  (f === "pick" ? "pick (P)" : "reject (X)") + "; click again to take the flag off (U)", on,
+                  function () { applyMarks(ids, { flag: on ? null : f }); });
+      b.setAttribute("aria-label", f === "pick" ? "pick" : "reject");
+    });
+    var starRow = row("Rating");
+    starRow.setAttribute("role", "group"); starRow.setAttribute("aria-label", "stars");
+    [1, 2, 3, 4, 5].forEach(function (n) {
+      var b = btn(starRow, "mk-star" + (commonRating >= n ? " on" : ""), ICONS.star, n + (n === 1 ? " star" : " stars") + " (" + n + "); click the lit one to take them off (0)",
+                  commonRating === n, function () { applyMarks(ids, { rating: commonRating === n ? 0 : n }); });
+      b.setAttribute("aria-label", n + (n === 1 ? " star" : " stars"));
+    });
+    var labRow = row("Label");
+    labRow.setAttribute("role", "group"); labRow.setAttribute("aria-label", "colour label");
+    MARK_LABELS.forEach(function (lb, i) {
+      var on = every(function (r) { return r.label === lb; });
+      var b = btn(labRow, "mk-swatch mk-" + lb, "", LABEL_WORDS[lb] + (i < 4 ? " (" + (i + 6) + ")" : "") + "; click again to take it off", on,
+                  function () { applyMarks(ids, { label: on ? null : lb }); });
+      b.setAttribute("aria-label", LABEL_WORDS[lb] + " label");
+    });
+    return wrap;
+  }
+  // The full-size view: the shot's marks at the right of the bar.
+  function renderLbMarks() {
+    var el = $("#lb-marks");
+    if (!el) return;
+    el.innerHTML = "";
+    var r = currentLb ? (resultById.get(currentLb.id) || currentLb) : null;
+    if (!r) return;
+    var n = Number(r.rating) || 0;
+    if (r.flag) {
+      var f = document.createElement("span"); f.className = "mk-flag mk-" + r.flag; f.innerHTML = ICONS[r.flag];
+      f.title = r.flag === "pick" ? "picked" : "rejected";
+      el.appendChild(f);
+    }
+    if (n) { var s = document.createElement("span"); s.className = "mk-stars"; s.textContent = starsText(n); el.appendChild(s); }
+    if (r.label) { var d = document.createElement("span"); d.className = "mk-dot mk-" + r.label; d.title = LABEL_WORDS[r.label] + " label"; el.appendChild(d); }
+    el.title = "P pick, X reject, U unflag, 0 to 5 stars, 6 to 9 labels";
+  }
+  // The sidebar Ratings block: a flag segment, "at least N stars", one label. Each writes a hidden form="q" field, so the
+  // filter is a chip like the others (Back, Clear filters, the URL) and runSearch picks it up through currentFilters.
+  var marksStarsEl = $("#marks-stars");
+  var marksLabelsEl = $("#marks-labels");
+  [1, 2, 3, 4, 5].forEach(function (n) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "mk-star"; b.dataset.stars = n; b.innerHTML = ICONS.star;
+    b.setAttribute("aria-label", "at least " + n + (n === 1 ? " star" : " stars"));
+    b.addEventListener("click", function () {
+      var f = $("#stars-filter");
+      f.value = f.value === String(n) ? "" : String(n);
+      syncMarksFilter(); runSearch();
+    });
+    marksStarsEl.appendChild(b);
+  });
+  MARK_LABELS.concat(["none"]).forEach(function (lb) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "mk-swatch mk-" + lb; b.dataset.label = lb;
+    b.setAttribute("aria-label", lb === "none" ? "no label" : LABEL_WORDS[lb] + " label");
+    b.addEventListener("click", function () {
+      var f = $("#label-filter");
+      f.value = f.value === lb ? "" : lb;
+      syncMarksFilter(); runSearch();
+    });
+    marksLabelsEl.appendChild(b);
+  });
+  $$('#marks-flag input[name="marks-flag"]').forEach(function (r) {
+    r.addEventListener("change", function () { $("#flag-filter").value = r.value; syncMarksFilter(); runSearch(); });
+  });
+  $("#marks-clear").addEventListener("click", function () {
+    ["flag", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = ""; });
+    syncMarksFilter(); runSearch();
+  });
+  function syncMarksFilter() {
+    var flag = $("#flag-filter").value, stars = Number($("#stars-filter").value) || 0, label = $("#label-filter").value;
+    $$('#marks-flag input[name="marks-flag"]').forEach(function (r) { r.checked = r.value === flag; });
+    $$("#marks-stars .mk-star").forEach(function (b) {
+      var n = Number(b.dataset.stars);
+      b.classList.toggle("on", stars >= n);
+      b.setAttribute("aria-pressed", stars === n ? "true" : "false");
+    });
+    $$("#marks-labels .mk-swatch").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.label === label ? "true" : "false"); });
+    $("#marks-clear").hidden = !(flag || stars || label);
+    renderMarkCounts();
+  }
+  function renderMarkCounts() {
+    var c = state.markCounts || { flag: {}, stars: {}, label: {}, marked: 0 };
+    $("#marks-count").textContent = c.marked ? num(c.marked) + " marked" : "";
+    var fl = c.flag || {};
+    var words = { "": "every item", pick: "picked: " + num(fl.pick || 0), reject: "rejected: " + num(fl.reject || 0), none: "neither picked nor rejected: " + num(fl.none || 0) };
+    $$('#marks-flag input[name="marks-flag"]').forEach(function (r) { r.parentNode.title = words[r.value]; });
+    $$("#marks-stars .mk-star").forEach(function (b) {
+      var n = Number(b.dataset.stars);
+      b.title = "at least " + n + (n === 1 ? " star" : " stars") + ": " + num((c.stars || {})[n] || 0) + "; click again for any";
+    });
+    $$("#marks-labels .mk-swatch").forEach(function (b) {
+      var lb = b.dataset.label;
+      b.title = (lb === "none" ? "no label" : LABEL_WORDS[lb]) + ": " + num((c.label || {})[lb] || 0) + "; click again for any";
+    });
+    $("#marks-xmp").disabled = !c.marked;
+  }
+  function loadMarkCounts() {
+    if (!(state.folder && state.folder.root)) { state.markCounts = null; renderMarkCounts(); return Promise.resolve(); }
+    return api("/api/marks/counts").then(function (c) { state.markCounts = c; renderMarkCounts(); })
+      .catch(function () { /* the numbers are a convenience */ });
+  }
+  function writeXmp(ids) {
+    var body = ids ? { ids: ids } : {};
+    setStatus("writing XMP sidecars…", true);
+    return api("/api/xmp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (d) {
+      var left = (d.foreign || 0) + (d.clash || 0);
+      var msg = "wrote " + num(d.written) + " XMP sidecar" + (d.written === 1 ? "" : "s") + " to " + elideLeft(d.path, 60);
+      if (left) msg += ", left " + num(left) + " alone (xmp-skipped.txt says why)";
+      if (!d.written && d.unmarked) msg = "nothing to write: none of those has a flag, stars or a label";
+      setStatus(msg);
+    }).catch(function (err) { setStatus("could not write XMP: " + err.message); });
+  }
+  $("#marks-xmp").addEventListener("click", function () { writeXmp(null); });
+  $("#xmp-sel").addEventListener("click", function () {
+    if (!state.selected.size) { setStatus("select some first"); return; }
+    writeXmp(Array.from(state.selected));
+  });
+  // The search field has focus when the page opens, so hover-a-tile-and-press-P would type a p into it. An EMPTY field
+  // lets go of the focus when the pointer reaches the grid; one with text in it keeps it. / and command F take it back.
+  gridEl.addEventListener("mouseenter", function () {
+    var qf = form.querySelector('[name="q"]');
+    if (document.activeElement === qf && !qf.value) qf.blur();
+  });
+  syncMarksFilter();
+  // ===== end marks =====
 
   // ===== panels: a header click collapses the section, remembered per panel in localStorage =====
   function panelKey(p) { return "sorted.panel." + (p.dataset.panel || ""); }
@@ -2458,6 +3014,7 @@
       mBtn.addEventListener("click", revealSelection);
       mRow.appendChild(mBtn);
       info.body.appendChild(mRow);
+      info.body.appendChild(marksControls(selectedRows(), Array.from(state.selected)));   // ===== marks: on the whole selection =====
       var byCat = {}, photos = 0, videos = 0, withFaces = 0;
       state.selected.forEach(function (id) {
         var x = resultById.get(id);
@@ -2495,8 +3052,9 @@
     revealRow.appendChild(revealBtn);
     info.body.appendChild(revealRow);
     // ===== end show in the Finder =====
+    info.body.appendChild(marksControls([r]));         // ===== marks: flag, stars and label, clickable =====
     if (r.taken_at) info.body.appendChild(inspRow("Taken", r.taken_at.replace("T", " ")));
-    if (r.camera) info.body.appendChild(inspRow("Camera", r.camera));
+    if (r.camera) info.body.appendChild(inspRow("Camera", cameraName(r.camera) !== r.camera ? cameraName(r.camera) + " (" + r.camera + ")" : r.camera));
     if (r.width && r.height) info.body.appendChild(inspRow("Size", r.width + " × " + r.height));
     if (r.kind === "video") info.body.appendChild(inspRow("Duration", mmss(r.duration)));
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
@@ -2512,7 +3070,17 @@
     if (r.cluster) cats.body.appendChild(inspRow("Discovered", /^group \d+$/.test(r.cluster) ? "Unnamed " + r.cluster : r.cluster));
     if (r.sure === false) cats.body.appendChild(inspRow("Confidence", Math.round((r.confidence || 0) * 100) + "%, less sure"));
     cats.body.appendChild(inspRow("Aerial", r.aerial ? "yes" : "no"));
-    faces.body.appendChild(inspRow("Faces", r.kind === "video" ? "not scanned in clips" : facesLabel(r.n_faces)));
+    if (r.shot_size && r.shot_size !== "unknown") cats.body.appendChild(inspRow("Framing", r.shot_size));
+    if (r.kind === "video" && r.fps) {
+      var fast = Math.max(r.fps || 0, r.capture_fps || 0) >= 100;
+      var shot = r.capture_fps && r.capture_fps > r.fps + 0.5 ? ", shot at " + (Math.round(r.capture_fps * 100) / 100) : "";
+      cats.body.appendChild(inspRow("Frame rate", (Math.round(r.fps * 100) / 100) + " fps" + shot + (fast ? ", slow motion" : "")));
+    }
+    if (r.kind === "video" && r.gamma) cats.body.appendChild(inspRow("Profile", r.gamma + (/^s-log/i.test(r.gamma) ? ", needs grading" : "")));
+    // a clip's count is the median over its sampled frames (index.clip_face_summary), so it says "in most frames"
+    faces.body.appendChild(inspRow("Faces", r.kind === "video"
+      ? (r.people == null ? "not checked in this clip yet" : r.people === 0 ? "none in its frames" : r.people + " in most frames")
+      : facesLabel(r.n_faces)));
   }
   // ===== duplicates and bursts: the inspector row for a tile that stands for a set. Copies: "2 on disk" and a link that
   // unfolds them into their own tiles (and folds them back). Bursts: "12 frames", "pick the sharpest" selects the frame
@@ -2602,11 +3170,37 @@
   function loadPeople() {
     return api("/api/people").then(function (list) {
       state.people = list;
+      state.peopleLoaded = true;
       renderPeople();
       fillPersonSelect();
       return list;
     });
   }
+
+  // Everything that needs the groups but is not asking for a refresh comes through here, so grouping happens
+  // once, when something actually shows it. The flag rather than a length test: a shoot with no groups at all
+  // is a real answer, not a reason to ask again on every tab switch.
+  var peopleFetching = false;
+  function ensurePeople() {
+    if (state.peopleLoaded || peopleFetching || !(state.folder && state.folder.root)) return Promise.resolve(state.people);
+    peopleFetching = true;
+    return loadPeople().then(function (list) { peopleFetching = false; return list; },
+                             function (err) { peopleFetching = false; throw err; });
+  }
+
+  // The person filter in the search bar is the only thing outside the People tab that needs the groups. It asks
+  // for them when the pointer or the keyboard reaches it, not when the shoot opens; the placeholder option keeps
+  // the menu from opening empty on the first try, since a native select does not redraw once its popup is up.
+  function primePersonSelect() {
+    if (state.peopleLoaded || peopleFetching || !(state.folder && state.folder.root)) return;
+    var wait = document.createElement("option");
+    wait.disabled = true;
+    wait.textContent = "loading people…";
+    personSelect.appendChild(wait);
+    ensurePeople().catch(function () { if (wait.parentNode) wait.parentNode.removeChild(wait); });
+  }
+  personSelect.addEventListener("pointerenter", primePersonSelect);
+  personSelect.addEventListener("focus", primePersonSelect);
 
   function renderPeople() {
     peopleEl.innerHTML = "";
@@ -2930,8 +3524,14 @@
   var savedPeopleEl = $("#saved-people");
   var peopleExportRow = $("#people-export-row");
 
+  // The box lives in the global status bar, so keying it on state.findPath alone let it ride along to Scan,
+  // Places and Categories, where there is nothing to name. It belongs to the People workflow, and that
+  // workflow spills onto Search: showFindResults() lands the matches in the grid there, which is where
+  // someone decides the face is the right one and gives it a name. Those two views, nowhere else.
+  // state.findPath is left alone, so coming back to either still offers to save the person being named.
+  var SAVE_FORM_VIEWS = ["people", "search"];
   function syncSaveForm() {
-    savePersonForm.hidden = !state.findPath;
+    savePersonForm.hidden = !state.findPath || SAVE_FORM_VIEWS.indexOf(state.view) < 0;
   }
 
   function savePerson() {
@@ -3153,6 +3753,7 @@
   // ===== end navigation =====
 
   function loadCategories() {
+    loadFacets();                                      // ===== slow motion: the count and the frame rate read ride along =====
     return api("/api/categories").then(function (counts) {
       state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {},
                            drone: (counts && counts.drone) || 0 };
@@ -3381,6 +3982,7 @@
 
   // ---------- index ----------
   var progressEl = $("#progress");
+  var progressCurrentEl = $("#progress-current");
 
   function stopProgressPoll() {
     if (state.progressTimer) {
@@ -3389,66 +3991,143 @@
     }
   }
 
-  // ===== scan wording: "Scanning 1,204 of 3,677  reading photos and clips  4.1/s, about 3 min left" =====
-  var STAGE_TEXT = { scan: "finding files", features: "reading photos and clips", faces: "finding faces", embed: "learning what is in each shot" };
+  // ===== scan wording: "Step 2 of 3 · reading photos and clips · 392 of 644 · 4.1/s, about 3 min left" =====
+  // Every stage used to lead with "Scanning", which made the stage label read as a subtitle rather than as the
+  // thing that changed. Each stage also counts a different population - features counts the files this pass has
+  // to read, embed counts everything in the index still missing a vector - so one stage handing over to the next
+  // looked like the counter jumping backwards while the total grew, which reads as a crash and a restart. The
+  // stage owns the sentence now.
+  // categorise and focus are jobs of their own that report through the same panel, so they get words too;
+  // anything else falls through to its own stage name rather than to silence.
+  var STAGE_TEXT = { scan: "finding files", features: "reading photos and clips", faces: "finding faces",
+                     embed: "learning what is in each shot", categorise: "sorting the shots into categories",
+                     focus: "checking what is in focus", save: "saving the project file", clipfaces: "finding faces in clips" };
+  // Embedding is three populations at three speeds per item: a photo is one frame, a clip's vector is the mean of
+  // six to thirty sampled frames, and a shot inside a clip mostly reuses a frame its clip already learned. Naming
+  // the one in flight is what stops the slower middle looking like a hang.
+  var SUBSTAGE_TEXT = { photos: "the photos", clips: "the clips, several frames each", segments: "the shots inside the clips" };
+  var SEP = " · ";
   function formatProgress(p) {
+    p = p || {};
     if (p.stage === "error") return "scan failed: " + (p.error || "unknown error");
     var done = p.done || 0, total = p.total || 0;
     var n = function (x) { return Number(x).toLocaleString("en-US"); };
     // ===== resume: the disk went away mid-scan; what was read is kept and Continue does the rest =====
-    if (p.stage === "paused") return "Scan paused at " + n(done) + " of " + n(total) + ": the disk went away. Plug it in and press Continue scan; nothing already scanned is read again.";
+    if (p.stage === "paused") {
+      // A pause keeps the step it stopped on, so say which one rather than leaving a bare count to be read
+      // against a total that belongs to a stage the user can no longer see named.
+      var at = (p.step > 0 && p.steps > 0 ? "in step " + n(p.step) + " of " + n(p.steps) + ", at " : "at ") + n(done) + " of " + n(total);
+      return "Scan paused " + at + ": the disk went away. Plug it in and press Continue scan; nothing already scanned is read again.";
+    }
     // ===== end resume =====
-    if (p.stage === "done") return "Scanned " + n(total) + " of " + n(total) + (p.running ? "" : "  finished");
-    var line = (total || p.stage !== "scan") ? "Scanning " + n(done) + " of " + n(total) : "Scanning";
-    line += "  " + (STAGE_TEXT[p.stage] || p.stage);
-    if (p.running && p.stage_started && done > 0 && total > done) {
+    if (p.stage === "done") return "Scanned " + n(total) + " of " + n(total) + (p.running ? "" : SEP + "finished");
+    var bits = [];
+    // step and steps come from the server or not at all: faces only run when they are on and scan has no total
+    // until it has listed the disk, so index.py is the only place that knows how many steps this pass will take.
+    // An older server sends neither, and then the stage text leads on its own rather than carrying a guess.
+    if (p.step > 0 && p.steps > 0) bits.push("Step " + n(p.step) + " of " + n(p.steps));
+    var what = STAGE_TEXT[p.stage] || p.stage || "working";
+    // substage is the field; sub was the name it shipped under for one commit, and reading both costs nothing.
+    var sub = typeof p.substage === "string" ? p.substage.trim() : (typeof p.sub === "string" ? p.sub.trim() : "");
+    if (sub) what += ", " + (SUBSTAGE_TEXT[sub] || sub);
+    bits.push(bits.length ? what : what.charAt(0).toUpperCase() + what.slice(1));
+    if (total) bits.push(n(done) + " of " + n(total));
+    var left = function (eta) { return "about " + (eta < 90 ? Math.round(eta) + " s" : Math.round(eta / 60) + " min") + " left"; };
+    if (p.running && typeof p.eta_s === "number" && typeof p.rate === "number" && total > done) {
+      // Embed sends its own estimate: the rest of the running sub-stage at that sub-stage's rate, and what
+      // comes after it priced in frames (index.embed_eta). The blended rate of the whole stage is what made
+      // the estimate lie at the switch from photos to clips.
+      bits.push(p.rate.toFixed(1) + "/s, " + left(p.eta_s));
+    } else if (p.running && p.stage_started && done > 0 && total > done) {
       var elapsed = Date.now() / 1000 - p.stage_started;
       var rate = done / Math.max(elapsed, 0.001);
-      var eta = (total - done) / rate;
-      line += "  " + rate.toFixed(1) + "/s, about " + (eta < 90 ? Math.round(eta) + " s" : Math.round(eta / 60) + " min") + " left";
+      bits.push(rate.toFixed(1) + "/s, " + left((total - done) / rate));
     } else if (p.running) {
-      line += "  (running)";
+      bits.push("running");
     }
-    return line;
+    return bits.join(SEP);
+  }
+
+  // The folder in flight, when the server sends one. On a client card with a dozen top-level folders, where the
+  // scan has got to says more than how far: "...\/SHIVALIK FURNITURE DEALEARS MEET (06-08-2026)\/FINAL JPG". The
+  // poll is the timer, so this repaints every 800 ms rather than once per file at 30+ files a second. Elided from
+  // the left, because the tail is the half that identifies the folder.
+  function progressCurrent(p) {
+    var cur = p && typeof p.current === "string" ? p.current.trim() : "";
+    if (!cur) return "";
+    var where = cur.replace(/\/+$/, "");
+    var cut = where.lastIndexOf("/");
+    // The field may be the file being read or the folder holding it; an extension on the last segment is what
+    // tells them apart, and either way the folder is what is worth showing.
+    if (cut > 0 && /\.[A-Za-z0-9]{1,5}$/.test(where.slice(cut + 1))) where = where.slice(0, cut);
+    return elideLeft(where, 70);
   }
 
   function pollProgress() {
     stopProgressPoll();
+    var ticks = 0;
     state.progressTimer = setInterval(function () {
       api("/api/progress").then(function (p) {
+        setScanning(p.running);
         progressEl.textContent = formatProgress(p);
         progressEl.style.setProperty("--p", p.total ? (p.done || 0) / p.total : 0);   // the 4 px bar under the readout
+        renderProgressCurrent(p.running ? p : null);
         renderAwake(p);                                // ===== resume: "keeping the Mac awake" while caffeinate holds =====
         renderScanBar(p);                              // ===== resume: the search head shows the same readout =====
+        // Nothing else reads /api/stats while a scan runs, so the error count never moved mid-pass and a file
+        // failing now stayed invisible until the end. One small read every few seconds; the list itself follows
+        // only when that count has actually changed.
+        if (p.running && ++ticks % 6 === 0) api("/api/stats").then(noteErrorCount).catch(function () { /* the next tick tries again */ });
         if (!p.running) {
           stopProgressPoll();
+          renderProgressCurrent(null);
           if (p.stage === "error") {
             setStatus("scan failed: " + (p.error || "unknown error"), true);
           } else if (p.stage === "paused") {
             setStatus("scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
+          } else if (p.project && p.project.error) {
+            // the scan is done but its project file could not be written (the disk filled mid-scan): say so and ask
+            setStatus("scan finished, but the project file could not be saved: " + p.project.error, true);
+            askProjectPlace({ mode: "after", blocked: { reason: "save", dir: p.project.dir,
+              message: "Saving it in " + shortDir(p.project.dir) + " failed: " + p.project.error + "." } });
+          } else if (p.project && p.project.path) {
+            setStatus("scan finished. Project file saved in " + shortDir(p.project.dir) + ".", true);
           } else {
-            setStatus("scan finished. Save the project (command S) so it travels with the disk.", true);
+            setStatus("scan finished.", true);
           }
+          loadProject();                               // the card shows the file the scan just saved
           // the index changed under us: refresh everything that shows it
           loadStats().then(function () { if (state.view === "index") loadScanHealth(); });   // ===== resume: the health line after a scan =====
-          loadPeople();
+          if (state.peopleLoaded) loadPeople();        // a scan changes the groups, but only for someone already looking at them
+          loadCategories();                            // the category count, and the slow motion row and its count
           runSearch();
         }
-      }).catch(function () { stopProgressPoll(); });
+      }).catch(function () { stopProgressPoll(); renderProgressCurrent(null); });
     }, 800);
   }
 
+  function renderProgressCurrent(p) {
+    var where = progressCurrent(p);
+    progressCurrentEl.textContent = where;
+    progressCurrentEl.hidden = !where;
+  }
+
   // ===== index job starter: shared by "Index this folder" and the two "detect faces now" controls =====
+  // The server checks where the project file will go before it reads a single photo. When the shoot folder cannot
+  // take it (read-only, too full) the reply is {started: false, blocked} and the scan waits on askProjectPlace.
   function startIndexJob(body, startMsg) {
+    setStatus("checking the disk before the scan…", true);
     return api("/api/index", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).then(function () {
-      setStatus(startMsg, true);
-      progressEl.textContent = "starting…";
-      pollProgress();
-      loadStats();
+    }).then(function (res) {
+      if (res && res.started === false && res.blocked) {
+        setStatus("scan not started: " + res.blocked.message, true);
+        askProjectPlace({ mode: "before", body: body, startMsg: startMsg, blocked: res.blocked });
+        return;
+      }
+      scanStarted(startMsg);
     }).catch(function (err) {
       if (err.status === 409 && /already scanning/.test(err.message || "")) {
         setStatus(err.message);
@@ -3460,6 +4139,92 @@
       }
     });
   }
+  function scanStarted(startMsg) {
+    setStatus(startMsg, true);
+    setScanning(true);
+    // Whatever was already failing is this pass's carried-over group; anything outside it is new, on a server
+    // that does not mark them itself.
+    errorBaseline = new Set(((lastErrorData && lastErrorData.errors) || []).map(function (e) { return e.rel; }));
+    progressEl.textContent = "starting…";
+    pollProgress();
+    loadStats();
+    loadProject();                                     // a picked place was remembered before the scan started
+  }
+
+  // ===== the project file needs a place. mode "before": the shoot folder cannot hold the file, so the scan has not
+  // started; Choose a folder runs the picker (POST /api/index/choose), which writes a small project file at the pick
+  // straight away, remembers it for this shoot, and only then starts the scan. mode "after": the scan finished but the
+  // save at the end failed (the disk filled); the scan is safe on this Mac and Choose a folder is Save to. Cancelling
+  // the picker leaves the question open; Don't scan / Not now is the only way out without a place, and in "before"
+  // it means no scan. =====
+  var askEl = $("#project-ask"), askBusy = false, askCtx = null;
+  function sizeText(bytes) { return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" : Math.round(bytes / 1e6) + " MB"; }   // 18 MB, not "0.0 GB"; 111 MB, not "0.1 GB"
+  function askProjectPlace(ctx) {
+    askCtx = ctx;
+    var b = ctx.blocked || {};
+    var name = (state.project && state.project.name) || "the project file";
+    $("#project-ask-title").textContent = ctx.mode === "after" ? "The project file could not be saved"
+      : ctx.mode === "save" ? "Where should the project file be saved?" : "Where should the project file go?";
+    $("#project-ask-why").textContent = b.message || "";
+    var nums = b.reason === "space" && b.need_bytes != null;
+    $("#project-ask-nums").hidden = !nums;
+    if (nums) {
+      $("#project-ask-need").textContent = sizeText(b.need_bytes);
+      $("#project-ask-free").textContent = sizeText(b.free_bytes);
+      $("#project-ask-disk").textContent = shortDir(b.dir).split(" › ")[0] || "the disk";
+    }
+    $("#project-ask-what").textContent = ctx.mode === "save"
+      ? "Nothing was written. Pick a folder with room, on this Mac or another disk, and " + name + " is saved there, and every save after it goes there too."
+      : ctx.mode === "after"
+      ? "Nothing is lost: the scan is kept on this Mac. Pick a folder with room, on this Mac or another disk, and " + name + " is saved there, and every save after it goes there too."
+      : "The scan has not started. " + name + " holds everything the scan learns, so the shoot opens on any Mac without scanning again. Pick a folder with room, on this Mac or another disk: a small file is written there first to make sure it works, then the scan starts.";
+    $("#project-ask-cancel").textContent = ctx.mode === "before" ? "Don’t scan" : "Not now";
+    askError("");
+    askSetBusy(false);
+    if (!askEl.open) askEl.showModal();
+    $("#project-ask-pick").focus();
+    track("project_ask", { mode: ctx.mode, reason: b.reason || null });
+  }
+  function askError(msg) { var e = $("#project-ask-err"); e.textContent = msg; e.hidden = !msg; }
+  function askSetBusy(on) {
+    askBusy = on;
+    $("#project-ask-pick").disabled = on; $("#project-ask-cancel").disabled = on;
+    $("#project-ask-pick").textContent = on ? "Waiting for the folder picker…" : "Choose a folder…";
+  }
+  function askClose() { if (askEl.open) askEl.close(); askCtx = null; }
+  function askCancel() {
+    if (askBusy || !askCtx) return;
+    var mode = askCtx.mode;
+    askClose();
+    if (mode === "after") setStatus("the project file was not saved; the scan is kept on this Mac. Save to… on the Scan tab when you have a place for it", true);
+    else if (mode === "save") setStatus("the project file was not saved", true);
+    else setStatus("scan not started: it needs a place for the project file first", true);
+  }
+  askEl.addEventListener("cancel", function (e) { e.preventDefault(); askCancel(); });   // Esc
+  $("#project-ask-cancel").addEventListener("click", askCancel);
+  $("#project-ask-pick").addEventListener("click", function () {
+    if (askBusy || !askCtx) return;
+    var ctx = askCtx;
+    askError(""); askSetBusy(true);
+    var saving = ctx.mode === "after" || ctx.mode === "save";   // both are Save to: the picker, then the full file there
+    var route = saving ? "/api/bundle/export/choose" : "/api/index/choose";
+    pickerPost(route, saving ? null : ctx.body).then(function (res) {
+      askSetBusy(false);
+      if (!res) return;                                // picker cancelled: the question is still open
+      askClose();
+      if (saving) {
+        setStatus("saving the project…", true);
+        pollExportProgress("saving the project");
+      } else {
+        scanStarted(ctx.startMsg + " The project file goes in " + shortDir(res.project.replace(/\/[^\/]*$/, "")) + ".");
+      }
+    }).catch(function (err) {
+      askSetBusy(false);
+      askError(err.message);                          // too small, read-only too, inside the shoot: pick again
+    });
+  });
+  // ===== end the project file needs a place =====
+
   $("#start-index").addEventListener("click", function () {
     startIndexJob({ faces: $("#faces").checked, retry_errors: $("#retry-errors").checked }, "scan started…");
   });
@@ -3483,7 +4248,7 @@
   var scanHealthText = $("#scan-health-text");
   var scanFix = $("#scan-fix");
   var fmtN = function (x) { return Number(x || 0).toLocaleString("en-US"); };
-  var STAGE_AT = { scan: "listing the files", features: "reading photos and clips", faces: "finding faces", embed: "learning what is in each shot", focus: "checking focus" };
+  var STAGE_AT = { scan: "listing the files", features: "reading photos and clips", faces: "finding faces", embed: "learning what is in each shot", focus: "checking focus", clipfaces: "finding faces in clips" };
   var lastProgress = null;                             // the last /api/progress reply while a scan runs
 
   // "2,080 of 4,315 scanned" / "4,315 read, 2,235 not searchable yet": the one-line state of an unfinished scan.
@@ -3499,6 +4264,8 @@
     var j = sc && sc.interrupted;
     if (!j) return "";
     if (j.kind === "focus") return "The last focus check stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
+    if (j.kind === "fps") return "The last clip details read stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
+    if (j.kind === "clipfaces") return "The last look for faces in clips stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
     if (j.kind === "places") return "The last locations read stopped at " + fmtN(j.done) + " of " + fmtN(j.total) + ". ";
     return "The last scan stopped while " + (STAGE_AT[j.stage] || j.stage || "scanning") + ": ";
   }
@@ -3536,7 +4303,7 @@
     } else {
       scanBarText.textContent = interruptedLine(sc) + scanSummary(sc) + ". Search covers only what is scanned so far.";
       scanBarAwake.hidden = true;
-      scanBarContinue.hidden = !!(sc.interrupted && (sc.interrupted.kind === "focus" || sc.interrupted.kind === "places") && !sc.pending && !sc.unembedded);
+      scanBarContinue.hidden = !!(sc.interrupted && (sc.interrupted.kind === "focus" || sc.interrupted.kind === "places" || sc.interrupted.kind === "fps" || sc.interrupted.kind === "clipfaces") && !sc.pending && !sc.unembedded);
     }
   }
   function renderAwake(p) {
@@ -3545,7 +4312,8 @@
 
   // The health line: items on disk vs scanned vs searchable vs checked for faces, and one button for the gap.
   var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Detect faces now",
-                    focus: "Finish the focus check", places: "Finish reading locations" };
+                    focus: "Finish the focus check", places: "Finish reading locations", fps: "Finish reading clip details",
+                    clipfaces: "Finish finding faces in clips" };
   var healthFix = null;
   function renderScanHealth(h) {
     if (!h) { scanHealthText.textContent = state.folder && state.folder.root ? "Checking the folder…" : ""; scanFix.hidden = true; healthFix = null; return; }
@@ -3582,6 +4350,8 @@
     if (healthFix === "faces") return scanFacesNow();
     if (healthFix === "focus") return checkFocusBtn.click();
     if (healthFix === "places") { goView("places"); return $("#places-read").click(); }
+    if (healthFix === "fps") { goView("search"); return $("#fps-read").click(); }
+    if (healthFix === "clipfaces") { goView("search"); return $("#clipfaces-find").click(); }
   });
   // ===== end resume =====
 
@@ -3604,7 +4374,8 @@
   }
 
   // ===== the project file: sorted_<shoot>.sorted. The card on the Scan tab shows the name, where Save
-  // writes (a sorted folder beside the shoot, or the folder picked last time) and when it was last saved.
+  // writes (the shoot folder itself, or the folder picked last time) and when it was last saved. Every finished
+  // scan saves it there on its own; the buttons are for saving again, moving it, or a copy.
   // Save project (command S) needs no picker; Save to runs the folder picker; Open project runs the file picker.
   // A double-click on a project file in the Finder reaches the page through GET /api/launch at boot. =====
   var projectName = $("#project-name"), projectDir = $("#project-dir"), projectState = $("#project-state");
@@ -3648,7 +4419,12 @@
     projectDir.textContent = shortDir(info.dir); projectDir.title = info.dir;
     projectReveal.hidden = !info.exists;
     projectState.className = "project-state"; projectState.title = "";
-    if (info.exists && info.opened) {
+    if (info.exists && info.skeleton) {
+      // the placeholder written before the scan: the place works, the full file lands when the scan finishes
+      projectState.textContent = state.scanning ? "The scan saves the full file here when it finishes"
+                                                : "Only a placeholder is here so far. Save project to write the full file.";
+      if (!state.scanning) projectState.classList.add("stale");
+    } else if (info.exists && info.opened) {
       // the file was opened here, not written here: the time inside it is the Mac that made it, so say so
       projectState.textContent = "Opened from this file" + (info.saved_at ? ", saved " + info.saved_at.slice(0, 16) + " where it was made" : "");
       projectState.classList.add("saved");
@@ -3673,7 +4449,13 @@
   function saveProject() {
     if (!(state.folder && state.folder.root)) { setStatus("open a shoot first"); return; }
     setStatus("saving the project…", true);
-    api("/api/project/save", { method: "POST" }).then(function () {
+    api("/api/project/save", { method: "POST" }).then(function (res) {
+      if (res && res.started === false && res.blocked) {
+        // the place Save writes to cannot take the file (read-only, full, unplugged): ask, never Documents quietly
+        setStatus("not saved: " + res.blocked.message, true);
+        askProjectPlace({ mode: "save", blocked: res.blocked });
+        return;
+      }
       pollExportProgress("saving the project");
     }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
   }
@@ -4143,14 +4925,15 @@
       return;
     }
     loadStats().then(function (s) { if (s.indexing) pollProgress(); });
-    loadPeople();
     loadCategories();                                  // fills the count beside the Categories nav row
     loadSearches();                                    // ===== search history: the sidebar chips =====
     loadDays();                                        // ===== days: the sidebar day list =====
+    loadMarkCounts();                                  // ===== marks: the Ratings numbers =====
     placeCount();                                      // ===== places: the count next to the tab =====
     loadPrefs(); loadExports();                        // ===== export presets and history =====
     // ===== navigation boot: a person filter goes out explicitly, the select has no options yet; a saved name is a find =====
     applyChips(chips);
+    if (chipOf("person", chips)) ensurePeople();        // a deep link filtering by person: the chip would read person_126 without the names
     var savedChip = chipOf("saved", chips);
     if (savedChip) { if (state.view === "search") findSaved(savedChip.key); else pendingFind = savedChip.key; }
     else runSearch(ctxParams(chips));

@@ -358,21 +358,63 @@ def sample_frames(path: Path, duration: float, key: tuple[str, str] | None = Non
 
 SIDECAR_MAX_BYTES = 65536
 
-def capture_gamma(path: Path) -> str | None:
-    """The CaptureGammaEquation value ("s-log3-cine", "s-log3", ...) from Sony's <stem>M01.XML sidecar, read
-    only, first SIDECAR_MAX_BYTES only; None when there is no sidecar or it does not parse."""
+def _sidecar_fps(value: str | None) -> float | None:
+    """Sony's "100p", "25p", "59.94i" as a number of frames per second; None when it does not parse."""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)", value or "")
+    return float(m.group(1)) if m else None
+
+def read_sidecar(path: Path) -> dict:
+    """What Sony's <stem>M01.XML sidecar says about a clip, from one read of its first SIDECAR_MAX_BYTES:
+    gamma (CaptureGammaEquation, lowercased: "s-log3-cine", "rec709", ...), camera ("SONY ILCE-7SM3", from
+    <Device manufacturer modelName>), capture_fps and format_fps (<VideoFrame captureFps formatFps>).
+
+    Sony's containers carry no make or model tag, which is why every Sony clip of the two client shoots has
+    camera NULL while the same bodies' stills say "SONY ILCE-7RM5": the sidecar is the only place the body is
+    written down. The manufacturer is upper-cased because that is how the same bodies write EXIF Make, so the
+    camera filter finds a body's photos and clips under one name.
+
+    Read only. Every field is optional: no sidecar, a field the file does not have, or junk all come back
+    None and never raise. The field names follow Sony's NonRealTimeMeta schema; the gamma regex is the one
+    the log thumbnails have used since DAY-4, the other three were written without a real sidecar to hand."""
     path = Path(path)
+    out = {"gamma": None, "camera": None, "capture_fps": None, "format_fps": None}
     sidecar = path.with_name(path.stem + "M01.XML")
     try:
         with open(sidecar, "rb") as fh:
             head = fh.read(SIDECAR_MAX_BYTES).decode("utf-8", errors="replace")
     except OSError:
-        return None
+        return out
     m = re.search(r'CaptureGammaEquation"\s+value="([^"]+)"', head)
-    return m.group(1).strip().lower() if m else None
+    if m:
+        out["gamma"] = m.group(1).strip().lower()
+    dev = re.search(r"<Device\b([^>]*)>", head)
+    if dev:
+        make = re.search(r'manufacturer="([^"]+)"', dev.group(1))
+        model = re.search(r'modelName="([^"]+)"', dev.group(1))
+        if model and model.group(1).strip():
+            mk = make.group(1).strip() if make else ""
+            mk = mk.upper() if mk.lower() == "sony" else mk
+            out["camera"] = f"{mk} {model.group(1).strip()}".strip()
+    vf = re.search(r"<VideoFrame\b([^>]*)>", head)
+    if vf:
+        cap = re.search(r'captureFps="([^"]+)"', vf.group(1))
+        fmt = re.search(r'formatFps="([^"]+)"', vf.group(1))
+        out["capture_fps"] = _sidecar_fps(cap.group(1)) if cap else None
+        out["format_fps"] = _sidecar_fps(fmt.group(1)) if fmt else None
+    return out
+
+def capture_gamma(path: Path) -> str | None:
+    """The CaptureGammaEquation value ("s-log3-cine", "s-log3", ...) from Sony's <stem>M01.XML sidecar, read
+    only, first SIDECAR_MAX_BYTES only; None when there is no sidecar or it does not parse."""
+    return read_sidecar(path)["gamma"]
 
 def is_slog3(gamma: str | None) -> bool:
     return bool(gamma) and gamma.lower().startswith("s-log3")
+
+def is_log(gamma: str | None) -> bool:
+    """A log capture curve, the footage an editor has to grade before it can be shown: Sony's S-Log2 and
+    S-Log3 family. HLG, S-Cinetone and the Cine curves are display referred and are not log."""
+    return bool(gamma) and gamma.lower().startswith("s-log")
 
 # Sony's published S-Log3 curve (10-bit code value cv, 18% grey at cv 420, black at cv 95) inverted to
 # scene-linear, one entry per 8-bit level.

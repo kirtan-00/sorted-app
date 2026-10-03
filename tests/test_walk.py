@@ -178,3 +178,15 @@ def test_package_and_build_trees_are_never_walked(tmp_path):
         d.mkdir(parents=True)
         make_image(d, "icon.jpg")
     assert [f.rel for f in find_images(tmp_path)] == ["keep.jpg"]
+
+
+def test_the_project_file_and_its_temp_files_are_never_listed(tmp_path):
+    """The project file now sits in the scanned folder. Neither it, an old-name bundle, the .part it is written
+    through, nor a preflight probe left by a crash can ever become a row of the shoot."""
+    from conftest import make_image
+    from photosort.walk import find_images
+    make_image(tmp_path, "a.jpg")
+    for name in (f"sorted_{tmp_path.name}.sorted", f"sorted_{tmp_path.name}.sorted.part",
+                 f"{tmp_path.name}.photosort-index.zip", ".sorted-probe-1-2", "sorted_x.sorted.jpg.part"):
+        (tmp_path / name).write_bytes(b"PK\x03\x04 not a photo")
+    assert [f.rel for f in find_images(tmp_path)] == ["a.jpg"]

@@ -27,7 +27,7 @@ The mark is a 2 by 2 contact sheet with one frame pulled. Three settled tiles in
 | directions.png, proof.png | the three directions explored (A gate eye, B the o as the eye, C the chosen tile), and the kit in use |
 | build.py, sheets.py, social.py | regenerate everything: `python3 docs/brand/build.py` (system python with fontTools; screenshots run through the venv) |
 
-The unsuffixed files are the ink on light canonical set; `site/brand/` carries copies of mark.svg, wordmark.svg and favicon.svg for the landing page.
+The unsuffixed files are the ink on light canonical set; `site/brand/` carries copies of mark.svg, wordmark.svg, favicon.svg, favicon-32.png and favicon-180.png for the landing page. `photosort/ui/` carries its own flat copies of the three favicon files, since the app's `/ui/{name}` route only serves files that sit directly in that folder.
 
 ## Palette
 

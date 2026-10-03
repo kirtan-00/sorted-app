@@ -6,6 +6,9 @@
 <meta name="color-scheme" content="dark">
 <meta name="application-name" content="sorted, formerly photosort">
 <title>sorted</title>
+<link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/ui/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/ui/favicon-180.png">
 <link rel="stylesheet" href="/ui/style.css">
 </head>
 <body>
@@ -54,6 +57,15 @@
     <button type="button" id="inspector-toggle" class="tb-icon" title="show or hide the inspector" aria-pressed="false" aria-label="inspector">
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
     </button>
+    <!-- the mark, far right: site/brand/mark.svg, the lifting tile. Three tiles take currentColor rather
+         than the brand's #15171b, which is near-black and would disappear into this toolbar; the lifting
+         tile keeps the brand pink, which is the half anyone recognises. -->
+    <svg class="tb-mark" viewBox="0 0 64 64" role="img" aria-label="sorted">
+      <rect x="4" y="4" width="24" height="24" rx="5" fill="currentColor"/>
+      <rect x="4" y="36" width="24" height="24" rx="5" fill="currentColor"/>
+      <rect x="36" y="36" width="24" height="24" rx="5" fill="currentColor"/>
+      <rect x="36.6" y="3.4" width="24" height="24" rx="5" fill="#f3c8d0" transform="rotate(12 48.6 15.4)"/>
+    </svg>
   </div>
   <nav>
     <button type="button" data-view="search" class="on" title="search the shoot">
@@ -73,11 +85,44 @@
     </button>
     <div class="nav-group">Filters</div>
     <label class="check nav-row" title="only aerial shots"><input type="checkbox" id="aerial-only" name="aerial" value="1" form="q"> Drone shots</label>
+    <label class="check nav-row" id="slowmo-row" hidden title="only clips shot at 100 fps or more"><input type="checkbox" id="slowmo-only" name="slowmo" value="1" form="q"> Slow motion <span id="slowmo-count" class="nav-sub"></span></label>
+    <div class="focus-line nav-row" id="fps-line" hidden>
+      <span id="fps-status" title="clips whose frame rate, camera or picture profile the index does not know yet">clip details not read</span>
+      <button type="button" id="fps-read" class="link small" title="read the frame rate, camera and picture profile from each clip's header and sidecar; needs the disk, decodes nothing">Read clip details</button>
+    </div>
     <fieldset id="kind-select" class="seg nav-row" title="photos, videos or both">
       <label><input type="radio" name="kind" value="" form="q" checked><span>All</span></label>
       <label><input type="radio" name="kind" value="photos" form="q"><span>Photos</span></label>
       <label><input type="radio" name="kind" value="videos" form="q"><span>Videos</span></label>
     </fieldset>
+    <div class="pick-group" id="shot-group" hidden>
+      <div class="nav-label" title="how much of the frame the subject fills, read off the picture; rows it could not call are left out">Framing</div>
+      <label class="check nav-row" title="only close ups: a face or a detail filling the frame"><input type="checkbox" name="shot_size" value="close" form="q" data-pick="shot"> Close <span class="nav-sub" data-count="close"></span></label>
+      <label class="check nav-row" title="only medium shots: a person from the waist or chest up"><input type="checkbox" name="shot_size" value="medium" form="q" data-pick="shot"> Medium <span class="nav-sub" data-count="medium"></span></label>
+      <label class="check nav-row" title="only wide shots: a whole room, a street, a landscape"><input type="checkbox" name="shot_size" value="wide" form="q" data-pick="shot"> Wide <span class="nav-sub" data-count="wide"></span></label>
+    </div>
+    <div class="pick-group" id="dur-group" hidden>
+      <div class="nav-label" title="how long the clip runs; photos are left out">Clip length</div>
+      <label class="check nav-row" title="only clips under 10 seconds"><input type="checkbox" name="duration" value="lt10" form="q" data-pick="dur"> Under 10 s <span class="nav-sub" data-count="lt10"></span></label>
+      <label class="check nav-row" title="only clips from 10 to 30 seconds"><input type="checkbox" name="duration" value="10to30" form="q" data-pick="dur"> 10 to 30 s <span class="nav-sub" data-count="10to30"></span></label>
+      <label class="check nav-row" title="only clips from 30 seconds to 2 minutes"><input type="checkbox" name="duration" value="30to120" form="q" data-pick="dur"> 30 s to 2 min <span class="nav-sub" data-count="30to120"></span></label>
+      <label class="check nav-row" title="only clips over 2 minutes"><input type="checkbox" name="duration" value="gt120" form="q" data-pick="dur"> Over 2 min <span class="nav-sub" data-count="gt120"></span></label>
+    </div>
+    <div class="pick-group" id="look-group" hidden>
+      <div class="nav-label" title="the picture profile the camera wrote beside the clip; only Sony writes it, so phone and drone clips are in neither row">Picture profile</div>
+      <label class="check nav-row" title="only clips shot in S-Log: flat on purpose, they need grading before anyone sees them"><input type="checkbox" name="look" value="log" form="q" data-pick="look"> Log, needs grading <span class="nav-sub" data-count="log"></span></label>
+      <label class="check nav-row" title="only clips the camera says were shot in Rec.709 or another ready to watch profile"><input type="checkbox" name="look" value="standard" form="q" data-pick="look"> Rec.709 and others <span class="nav-sub" data-count="standard"></span></label>
+    </div>
+    <div class="pick-group" id="camera-group" hidden>
+      <div class="nav-label">Camera</div>
+      <select id="camera-select" name="camera" form="q" class="nav-row" data-pick="camera" title="only what one camera body shot, photos and clips">
+        <option value="">Any camera</option>
+      </select>
+    </div>
+    <div class="focus-line nav-row" id="clipfaces-line" hidden>
+      <span id="clipfaces-status" title="clips whose frames have not been checked for faces yet">clips not checked for faces</span>
+      <button type="button" id="clipfaces-find" class="link small" title="look for faces in the frames already saved on this Mac; the disk can stay unplugged">Find faces</button>
+    </div>
     <label class="check nav-row" title="drop the photos and clips the focus check marked bad"><input type="checkbox" id="hide-bad" name="hide_bad" value="1" form="q"> Hide out of focus</label>
     <label class="check nav-row" title="also drop the soft ones, the bottom 15 percent"><input type="checkbox" id="hide-soft" name="hide_soft" value="1" form="q"> Hide soft</label>
     <label class="check nav-row" title="a file that is on the disk twice, and every frame of a burst, gets its own tile again"><input type="checkbox" id="show-copies"> Show every copy</label>
@@ -85,6 +130,25 @@
       <span id="focus-status" title="how much of the shoot has been through the focus check">focus not checked</span>
       <button type="button" id="check-focus" class="link small" title="score every photo and clip once; photos are free, clips take seconds">Check focus</button>
     </div>
+    <!-- ===== marks: filter by flag, minimum stars and colour label (keys P X U, 0 to 5, 6 to 9 set them) ===== -->
+    <div class="nav-group marks-head">Ratings <span id="marks-count" class="nav-sub"></span><button type="button" id="marks-clear" class="link small" hidden title="show every item again, whatever its flag, stars or label">Any</button></div>
+    <div id="marks-filter" class="marks-filter nav-row">
+      <fieldset id="marks-flag" class="seg" title="picked, rejected or neither (P, X, U set them)">
+        <label><input type="radio" name="marks-flag" value="" checked><span>All</span></label>
+        <label><input type="radio" name="marks-flag" value="pick"><span>Picks</span></label>
+        <label><input type="radio" name="marks-flag" value="reject"><span>Rejects</span></label>
+        <label><input type="radio" name="marks-flag" value="none"><span>Neither</span></label>
+      </fieldset>
+      <div class="marks-line">
+        <div id="marks-stars" class="marks-stars" role="group" aria-label="at least this many stars"></div>
+        <div id="marks-labels" class="marks-labels" role="group" aria-label="colour label"></div>
+      </div>
+      <button type="button" id="marks-xmp" class="link small" title="an .xmp sidecar for every flagged, rated or labelled item, in the export folder in the shoot's own folder layout; nothing is written to the shoot">Write XMP sidecars</button>
+      <input type="hidden" name="flag" id="flag-filter" value="" form="q">
+      <input type="hidden" name="stars" id="stars-filter" value="" form="q">
+      <input type="hidden" name="label" id="label-filter" value="" form="q">
+    </div>
+    <!-- ===== end marks ===== -->
     <div class="nav-group" id="days-group" hidden>Days <span id="days-count" class="nav-sub"></span></div>
     <div id="days-list" class="days-list nav-row" hidden></div>
     <div class="nav-group" id="saved-group" hidden>Saved searches</div>
@@ -180,6 +244,7 @@
       <button type="button" id="selectall" class="link" title="select every card shown (command-A)">Select all shown</button>
       <button type="button" id="clearsel" class="link" title="deselect everything">Clear</button>
       <button type="button" id="reveal-sel" class="link" title="open the selected files in the Finder, highlighted (command shift R)">Show in Finder</button>
+      <button type="button" id="xmp-sel" class="link" title="an .xmp sidecar for each selected item that has a flag, stars or a label, in the export folder; nothing is written to the shoot">Write XMP</button>
       <span class="spring"></span>
       <span class="sel-export export-group">
         <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
@@ -362,7 +427,7 @@
             <button type="button" id="bundle-reveal" class="btn" hidden title="show the project file in the Finder">Show in Finder</button>
           </div>
         </div>
-        <p class="hint">Like a Premiere project: what is in each shot, the thumbnails, the saved people, your searches and exports, all in one file. Nothing from the disk is copied into it. Give it to an editor with the disk and their Mac opens the shoot in seconds instead of scanning again. Save after a scan, after naming people, after anything you want to keep.</p>
+        <p class="hint">Like a Premiere project: what is in each shot, the thumbnails, the saved people, your searches and exports, all in one file. Nothing from the disk is copied into it. Give it to an editor with the disk and their Mac opens the shoot in seconds instead of scanning again. Every finished scan saves it on its own; save again after naming people, or after anything else you want to keep.</p>
       </div>
     </div>
     <div class="panel" data-panel="progress">
@@ -373,14 +438,18 @@
           <button type="button" id="scan-continue" class="btn primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
         </div>
         <pre id="progress"></pre>
+        <p id="progress-current" class="scan-current" hidden></p>
         <p id="scan-awake" class="hint scan-awake" hidden>Keeping the Mac awake until this finishes. Closing the lid still puts it to sleep.</p>
         <div id="scan-health" class="scan-health">
           <span id="scan-health-text" class="scan-health-text">Checking the folder…</span>
           <button type="button" id="scan-fix" class="btn small" hidden></button>
         </div>
         <div id="index-errors" hidden>
-          <p id="index-errors-title"></p>
-          <pre id="index-errors-list" class="mono"></pre>
+          <p id="index-errors-new" class="index-errors-new" hidden></p>
+          <details>
+            <summary id="index-errors-title"></summary>
+            <pre id="index-errors-list" class="mono"></pre>
+          </details>
         </div>
       </div>
     </div>
@@ -444,9 +513,10 @@
     <div class="panel" data-panel="help-scan">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, and the project file</button>
       <div class="panel-body help-lines">
-        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The disk is only ever read. The Mac stays awake until the scan ends.</p>
+        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The photos and clips are only ever read. The Mac stays awake until the scan ends.</p>
         <p>If the disk is unplugged or the Mac dies mid-scan, nothing is lost: the shoot opens with "2,080 of 4,315 scanned" and a Continue scan button that reads only what is missing. The Scan tab's last line says what is on the disk, what is scanned and what is searchable, with one button for the gap.</p>
-        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort. "Save project" (command S) packs it into one file, sorted_&lt;shoot&gt;.sorted, in a sorted folder beside the shoot so it travels with the disk; "Save to" puts it anywhere else, and that place is remembered.</p>
+        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort, and is packed into one file, sorted_&lt;shoot&gt;.sorted, right in the scanned folder, so it travels with the disk. That file is the one thing the app ever writes there. It is saved when every scan finishes, with no click; "Save project" (command S) saves it again after naming people, and "Save to" moves it anywhere else, and that place is remembered.</p>
+        <p>Before a scan starts the app checks the folder can really be written to and has room for the file. If the disk is read-only or too full, the scan waits and asks you to pick another place for the file first.</p>
         <p>Hand that file to an editor with the disk and "Open a project file" (or a double-click on it) opens the shoot on their Mac in seconds, already searchable, with the saved people. Older files named .photosort-index.zip open the same way.</p>
         <p>Nothing leaves the Mac. The one exception is the version check above, off unless you tick it, and it sends nothing either.</p>
       </div>
@@ -464,6 +534,15 @@
         <p>Click selects. Shift-click takes a range, ⌘-click toggles one, ⌘A takes everything on screen.</p>
         <p>"Select all matching" takes every result, not just the 200 on screen.</p>
         <p>Enter or a double-click opens a shot. ← → step through, Esc closes.</p>
+      </div>
+    </div>
+    <div class="panel" data-panel="help-marks">
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Flags, stars and XMP</button>
+      <div class="panel-body help-lines">
+        <p>The Lightroom keys work on the tile under the pointer, or on the selection: P picks, X rejects, U takes the flag off. 1 to 5 give stars, 0 takes them off. 6 red, 7 yellow, 8 green, 9 blue; the same key again takes the label off. Purple is in the inspector. They work in the full-size view too, so ← → and P is a cull.</p>
+        <p>Ratings in the sidebar shows only the picks, the rejects or the rest, at least so many stars, or one label.</p>
+        <p>An export writes a sidecar (IMG_0001.xmp) beside every copy that has a flag, stars or a label, so Lightroom, Bridge and Capture One open with the stars and labels on. A reject goes out as rating -1, which they read as rejected. Lightroom keeps picks in its catalog only, so a pick reaches it as nothing; Bridge and Premiere see it as a good take.</p>
+        <p>"Write XMP sidecars" writes them on their own into the export folder, in the shoot's own folders, to lay over a copy of the cards. Nothing is ever written to the shoot, and an .xmp sorted did not write is never replaced.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-categories">
@@ -553,10 +632,33 @@
     <div id="lb-segments" class="segments" hidden></div>
     <div class="lb-bar">
       <div id="lb-meta"></div>
+      <div id="lb-marks" class="lb-marks" aria-live="polite"></div>
       <button type="button" id="lb-like" class="btn" title="find shots that look like this one">More like this</button>
     </div>
   </div>
 </div>
+
+<!-- ===== the project file needs a place: shown before a scan whose shoot folder cannot hold the file (read-only,
+     too full), and after a scan whose save failed. A modal dialog: nothing else can be clicked until it is answered. ===== -->
+<dialog id="project-ask" class="ask" aria-labelledby="project-ask-title" aria-describedby="project-ask-why">
+  <div class="ask-inner">
+    <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
+    <div class="ask-main">
+      <h2 id="project-ask-title">Where should the project file go?</h2>
+      <p id="project-ask-why" class="ask-why"></p>
+      <dl id="project-ask-nums" class="ask-nums" hidden>
+        <div><dt>Needs about</dt><dd id="project-ask-need"></dd></div>
+        <div><dt>Free on <span id="project-ask-disk"></span></dt><dd id="project-ask-free"></dd></div>
+      </dl>
+      <p id="project-ask-what" class="ask-what"></p>
+      <p id="project-ask-err" class="ask-err" role="alert" hidden></p>
+      <div class="ask-actions">
+        <button type="button" id="project-ask-cancel" class="btn"></button>
+        <button type="button" id="project-ask-pick" class="btn primary">Choose a folder…</button>
+      </div>
+    </div>
+  </div>
+</dialog>
 
 <script src="/ui/app.js"></script>
 </body>

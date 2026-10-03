@@ -1,12 +1,13 @@
 import numpy as np
 from PIL import Image
+from photosort.config import EMBED_DIM
 from photosort.embed import get_embedder
 
 def test_text_and_image_agree():
     e = get_embedder()
     red = Image.new("RGB", (256, 256), (220, 20, 20)); blue = Image.new("RGB", (256, 256), (20, 20, 220))
     I = e.encode_images([red, blue]); T = e.encode_text(["a red square", "a blue square"])
-    assert I.shape == (2, 512) and abs(np.linalg.norm(I[0]) - 1) < 1e-3
+    assert I.shape == (2, EMBED_DIM) and abs(np.linalg.norm(I[0]) - 1) < 1e-3
     S = T @ I.T
     assert S[0, 0] > S[0, 1] and S[1, 1] > S[1, 0]
 
@@ -41,8 +42,8 @@ def test_model_calls_never_overlap():
             time.sleep(0.002)
             with Stub.lock:
                 Stub.inside -= 1
-        def encode_image(self, x): self._enter(); return torch.ones(x.shape[0], 512)
-        def encode_text(self, t): self._enter(); return torch.ones(t.shape[0], 512)
+        def encode_image(self, x): self._enter(); return torch.ones(x.shape[0], EMBED_DIM)
+        def encode_text(self, t): self._enter(); return torch.ones(t.shape[0], EMBED_DIM)
     e._model = Stub()
     try:
         def work():

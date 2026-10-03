@@ -1,4 +1,4 @@
 {
-  "version": "0.3.2",
-  "notes": "Show in Finder on any picked photo or clip (command shift R), the filter count says how many copies a tile hides, a Show every copy tick, and a whole-Mac scan that stays out of Library."
+  "version": "0.5.0",
+  "notes": "Video you can filter: framing (close, medium, wide), clip length, picture profile (S-Log that needs grading vs Rec.709), camera body, and people in a clip. Old shoots fill these in with Read clip details and Find faces, no rescan. Flags, stars and colour labels with Lightroom keys (P, X, 0-5, 6-9), a Ratings filter, and XMP sidecars beside every exported copy so your picks open in Bridge and Capture One. Clips scan faster, the time left is honest, and Sony RAW files now get their date, camera and size."
 }

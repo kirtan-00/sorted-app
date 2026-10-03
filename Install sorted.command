@@ -143,17 +143,25 @@ print("FETCHED" if os.environ.get("HF_HUB_OFFLINE") == "0" else "CACHED", e.devi
 '
 # The app runs with HF_HUB_OFFLINE=1. embed.py goes online once, on its own, when the weights are not
 # in the cache yet; the printed word says which happened.
-note "loading the models (the first time this fetches MobileCLIP-S1, about 325 MB, from huggingface.co)"
+# The encoder is whatever photosort.config resolves to, so these lines cannot drift from the app the
+# way they did when the default was MobileCLIP-S1 and the text still said so after it changed.
+ENC="$("$PY" -c 'from photosort.config import CLIP_MODEL; print(CLIP_MODEL)' 2>/dev/null || echo "the encoder")"
+case "$ENC" in
+  ViT-B-16-SigLIP) ENC_MB="about 810 MB" ;;
+  MobileCLIP-S1)   ENC_MB="about 325 MB" ;;
+  *)               ENC_MB="a few hundred MB" ;;
+esac
+note "loading the models (the first time this fetches $ENC, $ENC_MB, from huggingface.co)"
 OUT="$(HF_HUB_OFFLINE=1 "$PY" -c "$CHECK")" || fail "could not load the models (see the lines above)"
 case "$OUT" in
   FETCHED*)
-    note "fetched MobileCLIP-S1 into the Hugging Face cache; checking it loads offline"
-    HF_HUB_OFFLINE=1 "$PY" -c "$CHECK" | grep -q '^CACHED' || fail "MobileCLIP-S1 downloaded but does not load offline"
+    note "fetched $ENC into the Hugging Face cache; checking it loads offline"
+    HF_HUB_OFFLINE=1 "$PY" -c "$CHECK" | grep -q '^CACHED' || fail "$ENC downloaded but does not load offline"
     ;;
-  CACHED*) note "MobileCLIP-S1 already in the Hugging Face cache" ;;
+  CACHED*) note "$ENC already in the Hugging Face cache" ;;
   *) fail "unexpected model check output: $OUT" ;;
 esac
-note "models load (MobileCLIP-S1 on ${OUT#* }, YuNet + SFace), ok"
+note "models load ($ENC on ${OUT#* }, YuNet + SFace), ok"
 
 # 6. ffmpeg + ffprobe ----------------------------------------------------------------------------
 step "ffmpeg and ffprobe (for videos)"

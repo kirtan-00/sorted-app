@@ -78,7 +78,10 @@ is only macOS asking whether the app may read the disk.
 ## Privacy
 
 - Fully offline. The models are on the Mac; no photo, name or search ever goes to a server.
-- The shoot disk is read-only to sorted. The one exception is **Reorganise disk**, which moves
+- The shoot disk is read-only to sorted, with two exceptions. The project file,
+  `sorted_<shoot>.sorted`, is saved right in the scanned folder when a scan finishes, so it travels
+  with the disk; it is the only file sorted ever writes there, and if the disk is read-only or too
+  full the scan asks where to keep it instead before it starts. And **Reorganise disk**, which moves
   files only after you confirm the preview and which keeps an undo record.
 - No telemetry. The app keeps a usage log of what you clicked and how long things took, on this
   Mac only, so a bug report can say what happened. It goes nowhere unless you send it.

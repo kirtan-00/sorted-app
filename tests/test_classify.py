@@ -1,6 +1,7 @@
 import os
 import numpy as np
 from photosort import db
+from photosort.config import EMBED_DIM
 from photosort.embed import get_embedder
 from photosort.classify import classify, classify_and_store, write_manifest, CATEGORIES, FALLBACK
 
@@ -25,7 +26,7 @@ def test_classify_categories_from_text_embeddings(tmp_path):
     db.set_embed(conn, people_id, beach_vec)   # looks exactly like the beach photo except for faces
 
     rng = np.random.default_rng(0)
-    junk_vec = rng.normal(size=512).astype(np.float32)
+    junk_vec = rng.normal(size=EMBED_DIM).astype(np.float32)
     junk_vec /= np.linalg.norm(junk_vec)
     junk_id = db.upsert_photo(conn, _row("junk.jpg"))
     db.set_embed(conn, junk_id, junk_vec)
@@ -58,7 +59,7 @@ def test_classify_and_store_persists_the_best_guess_for_an_other_photo(tmp_path)
     photo is people with score 1.0: the detector decided, not the softmax."""
     conn = db.connect(tmp_path)
     rng = np.random.default_rng(0)
-    junk = rng.normal(size=512).astype(np.float32); junk /= np.linalg.norm(junk)
+    junk = rng.normal(size=EMBED_DIM).astype(np.float32); junk /= np.linalg.norm(junk)
     junk_id = db.upsert_photo(conn, _row("junk.jpg")); db.set_embed(conn, junk_id, junk)
     face_id = db.upsert_photo(conn, _row("face.jpg", n_faces=1)); db.set_embed(conn, face_id, junk)
     conn.commit()
@@ -169,10 +170,10 @@ def test_margin_gate_ignores_the_winners_own_family():
     from photosort.classify import _score, CATEGORY_FAMILY, FALLBACK, MIN_PROB_MARGIN
     assert CATEGORY_FAMILY == {"interview": "people"}
     names = ["beach", "building", "people", "interview", "__other__"]
-    T = np.eye(5, 512, dtype=np.float32)                 # one prompt per category, orthogonal
+    T = np.eye(5, EMBED_DIM, dtype=np.float32)                 # one prompt per category, orthogonal
     owner = np.arange(5)
     def row(*idx):
-        v = np.zeros(512, np.float32); v[list(idx)] = 1.0; return v / np.linalg.norm(v)
+        v = np.zeros(EMBED_DIM, np.float32); v[list(idx)] = 1.0; return v / np.linalg.norm(v)
     out = _score(np.stack([row(2, 3), row(0, 1), row(3)]), T, owner, names)
     cat, score, margin, guess, guess_score, probs = out[0]
     assert cat in ("people", "interview") and guess == cat
@@ -218,23 +219,32 @@ def test_aerial_gap_from_the_prompt_pair():
     ground prompts are spread wider than the aerial ones, so under a max-per-side rule that point sits 0.067
     on the aerial side). The floor on the best aerial cosine mirrors MIN_COSINE: a junk vector never passes."""
     from photosort.classify import (AERIAL_PROMPTS, GROUND_PROMPTS, AERIAL_MIN_GAP, MIN_COSINE, aerial_gap,
-                                    CATEGORIES, NEGATIVE_PROMPTS)
+                                    PROMPTS, NEGATIVE_PROMPTS)
     E = get_embedder()
     A = E.encode_text(AERIAL_PROMPTS); G = E.encode_text(GROUND_PROMPTS)
     a = A.mean(axis=0); a /= np.linalg.norm(a)
     g = G.mean(axis=0); g /= np.linalg.norm(g)
     mid = A[0] + G[0]; mid /= np.linalg.norm(mid)
     rng = np.random.default_rng(0)
-    junk = rng.normal(size=512).astype(np.float32); junk /= np.linalg.norm(junk)
+    junk = rng.normal(size=EMBED_DIM).astype(np.float32); junk /= np.linalg.norm(junk)
     gap, best = aerial_gap(np.stack([a, g, mid, junk]), E)
     assert gap.shape == (4,) and best.shape == (4,)
-    assert AERIAL_MIN_GAP == 0.05
+    # AERIAL_MIN_GAP is per encoder now (classify.CALIBRATION); the exact committed value is pinned by
+    # test_the_mobileclip_calibration_never_moves, and the shape of the rule is what is checked here.
     assert gap[0] >= AERIAL_MIN_GAP and best[0] >= MIN_COSINE
     assert gap[1] < AERIAL_MIN_GAP
     assert gap[2] < AERIAL_MIN_GAP
-    assert best[3] < MIN_COSINE
+    # A junk vector is never flagged, but which half of the rule stops it is an encoder's business, so
+    # the test asks the question flag_aerial asks rather than pinning one half. Under MobileCLIP the
+    # seeded vector clears the gap (0.0503 against 0.05) and is stopped by the cosine floor (0.0789
+    # against 0.12); under SigLIP it clears the cosine floor (0.0217 against 0.02) and is stopped by the
+    # gap (0.0048 against 0.015). Under SigLIP no cosine floor could stop it: a random unit vector's best
+    # cosine outruns a real photograph's there, which is why SigLIP's MIN_COSINE is a sanity floor only.
+    assert not (gap[3] >= AERIAL_MIN_GAP and best[3] >= MIN_COSINE)
     assert not any("drone" in t for t in AERIAL_PROMPTS)
-    assert not any(t in prompts for prompts in CATEGORIES.values() for t in AERIAL_PROMPTS)
+    # PROMPTS rather than CATEGORIES, so a per-encoder extra prompt cannot smuggle an aerial phrase
+    # into a category either: aerial is its own rule and a drone shot of a beach stays "beach".
+    assert not any(t in prompts for prompts in PROMPTS.values() for t in AERIAL_PROMPTS)
     assert not any(t in NEGATIVE_PROMPTS for t in AERIAL_PROMPTS)
     assert not hasattr(__import__("photosort.classify", fromlist=["x"]), "AERIAL_MIN_PROB")
     assert not hasattr(__import__("photosort.classify", fromlist=["x"]), "aerial_probs")
@@ -285,7 +295,7 @@ def test_vocab_is_large_lowercase_and_unique():
         assert must in VOCAB
 
 def _unit(rng, n=1):
-    v = rng.normal(size=(n, 512)).astype(np.float32)
+    v = rng.normal(size=(n, EMBED_DIM)).astype(np.float32)
     return v / np.linalg.norm(v, axis=1, keepdims=True)
 
 def _clustered_shoot(tmp_path, sizes=(20, 20, 20), noise=0.05, seed=0):
@@ -297,7 +307,7 @@ def _clustered_shoot(tmp_path, sizes=(20, 20, 20), noise=0.05, seed=0):
     for i, size in enumerate(sizes):
         ids = []
         for _ in range(size):
-            v = centres[i] + rng.normal(scale=noise, size=512).astype(np.float32); v /= np.linalg.norm(v)
+            v = centres[i] + rng.normal(scale=noise, size=EMBED_DIM).astype(np.float32); v /= np.linalg.norm(v)
             pid = db.upsert_photo(conn, _row(f"c{i}_{n:03d}.jpg")); db.set_embed(conn, pid, v); ids.append(pid); n += 1
         groups.append(ids)
     conn.commit()
@@ -419,7 +429,7 @@ def test_discover_with_the_real_embedder_names_from_the_vocabulary(tmp_path):
     for i in range(3):
         ids = []
         for j in range(12):
-            v = centres[i] + rng.normal(scale=0.02, size=512).astype(np.float32); v /= np.linalg.norm(v)
+            v = centres[i] + rng.normal(scale=0.02, size=EMBED_DIM).astype(np.float32); v /= np.linalg.norm(v)
             pid = db.upsert_photo(conn, _row(f"r{i}_{j}.jpg")); db.set_embed(conn, pid, v); ids.append(pid)
         groups.append(ids)
     conn.commit()
@@ -447,7 +457,7 @@ def _shoot_of(tmp_path, groups, noise=0.03, seed=0):
     for gi, (c, size) in enumerate(groups):
         ids = []
         for _ in range(size):
-            v = c + rng.normal(scale=noise, size=512).astype(np.float32); v /= np.linalg.norm(v)
+            v = c + rng.normal(scale=noise, size=EMBED_DIM).astype(np.float32); v /= np.linalg.norm(v)
             pid = db.upsert_photo(conn, _row(f"g{gi}_{n:03d}.jpg")); db.set_embed(conn, pid, v); ids.append(pid); n += 1
         out.append(ids)
     conn.commit()
@@ -633,9 +643,9 @@ def test_people_photo_keeps_its_scene_as_the_guess(tmp_path, monkeypatch):
     scored = {1: ("beach", 0.9, 0.5, "beach", 0.9, {"beach": 0.9}), 2: ("people", 0.8, 0.4, "people", 0.8, {"people": 0.8})}
     monkeypatch.setattr(c, "_score", lambda M, T, owner, names: [scored[i] for i in owner_ids])
     owner_ids = [1, 2]
-    monkeypatch.setattr(db, "load_embeds", lambda conn_: (__import__("numpy").array(owner_ids), __import__("numpy").zeros((2, 512), "float32")))
-    monkeypatch.setattr(db, "load_segment_embeds", lambda conn_: (__import__("numpy").array([], int), __import__("numpy").zeros((0, 512), "float32")))
-    monkeypatch.setattr(c, "_prompt_matrix", lambda emb: (["beach", "people"], __import__("numpy").zeros((2, 512), "float32"), [0, 1]))
+    monkeypatch.setattr(db, "load_embeds", lambda conn_: (__import__("numpy").array(owner_ids), __import__("numpy").zeros((2, EMBED_DIM), "float32")))
+    monkeypatch.setattr(db, "load_segment_embeds", lambda conn_: (__import__("numpy").array([], int), __import__("numpy").zeros((0, EMBED_DIM), "float32")))
+    monkeypatch.setattr(c, "_prompt_matrix", lambda emb: (["beach", "people"], __import__("numpy").zeros((2, EMBED_DIM), "float32"), [0, 1]))
     monkeypatch.setattr(c, "get_embedder", lambda: None, raising=False)
     import photosort.embed as embed_mod
     monkeypatch.setattr(embed_mod, "get_embedder", lambda: None)
@@ -647,3 +657,253 @@ def test_people_photo_keeps_its_scene_as_the_guess(tmp_path, monkeypatch):
     assert search.category_match(row, "beach") == (True, 0.9)
     assert search.category_match(row, "people") == (True, 1.0)
     assert search.category_match(row, "road") is None
+
+# The per-encoder calibration table. Every threshold in it was measured against one encoder's
+# similarity distribution; the danger the tests below guard is not a crash but a scan that finishes
+# quietly with most of a shoot under "other" because the numbers came from a different encoder.
+
+def test_every_encoder_has_a_calibration_entry():
+    """config.ENCODERS is what PHOTOSORT_CLIP_MODEL will accept, so every one of them must have been
+    measured. Adding an encoder to the config table without measuring it is the failure this catches."""
+    from photosort.classify import CALIBRATION
+    from photosort.config import ENCODERS
+    missing = sorted(set(ENCODERS) - set(CALIBRATION))
+    assert not missing, f"encoders with no measured calibration: {missing}"
+    keys = {"TEMPERATURE", "MIN_PROB", "MIN_PROB_MARGIN", "MIN_COSINE", "AERIAL_MIN_GAP",
+            "DISCOVER_NAME_MIN_COS"}
+    for name, cal in CALIBRATION.items():
+        assert set(cal) == keys, f"{name} is missing or has spare thresholds: {sorted(set(cal) ^ keys)}"
+
+def test_an_unmeasured_encoder_raises_instead_of_borrowing():
+    """No silent fallback to MobileCLIP's numbers: those would look like they worked."""
+    import pytest
+    from photosort.classify import calibration_for
+    with pytest.raises(ValueError) as e:
+        calibration_for("ViT-L-14")
+    assert "ViT-L-14" in str(e.value)
+
+def test_the_mobileclip_calibration_never_moves():
+    """The committed MobileCLIP numbers, spelled out, so a later edit cannot quietly shift them. Each
+    one came from a real shoot (see the comments beside them); changing any of them means re-running
+    the measurement, not editing this test."""
+    from photosort.classify import CALIBRATION
+    assert CALIBRATION["MobileCLIP-S1"] == dict(TEMPERATURE=100.0, MIN_PROB=0.35, MIN_PROB_MARGIN=0.15,
+                                                MIN_COSINE=0.12, AERIAL_MIN_GAP=0.05,
+                                                DISCOVER_NAME_MIN_COS=0.16)
+
+def test_the_module_level_names_come_from_the_table():
+    """Nothing that imports classify has to know the table exists: the six module names still work and
+    hold the running encoder's row."""
+    from photosort import classify as c
+    from photosort.config import CLIP_MODEL
+    cal = c.CALIBRATION[CLIP_MODEL]
+    assert (c.TEMPERATURE, c.MIN_PROB, c.MIN_PROB_MARGIN, c.MIN_COSINE, c.AERIAL_MIN_GAP,
+            c.DISCOVER_NAME_MIN_COS) == (cal["TEMPERATURE"], cal["MIN_PROB"], cal["MIN_PROB_MARGIN"],
+                                         cal["MIN_COSINE"], cal["AERIAL_MIN_GAP"],
+                                         cal["DISCOVER_NAME_MIN_COS"])
+
+# The per-encoder prompt table. CATEGORIES was written and measured under MobileCLIP; SigLIP needed
+# four more interview descriptions and MobileCLIP must not get them (EXTRA_PROMPTS says why, with the
+# counts). The danger these guard is the same quiet one: prompts that were measured on one encoder
+# silently deciding another encoder's folders.
+
+def test_every_encoder_has_a_prompt_entry():
+    """config.ENCODERS is what PHOTOSORT_CLIP_MODEL will accept, so every one of them must say what it
+    adds, even when what it adds is nothing. An extra prompt may only go under a category that already
+    exists: the keys of CATEGORIES are the folder list and the tile order."""
+    from photosort.classify import EXTRA_PROMPTS, CATEGORIES
+    from photosort.config import ENCODERS
+    missing = sorted(set(ENCODERS) - set(EXTRA_PROMPTS))
+    assert not missing, f"encoders with no measured prompt set: {missing}"
+    for name, extra in EXTRA_PROMPTS.items():
+        spare = sorted(set(extra) - set(CATEGORIES))
+        assert not spare, f"{name} adds prompts under categories that do not exist: {spare}"
+        assert all(ts and all(isinstance(t, str) and t for t in ts) for ts in extra.values())
+
+def test_an_unmeasured_encoder_gets_no_prompts_either():
+    """Same rule as calibration_for: an encoder nobody has measured raises rather than borrowing."""
+    import pytest
+    from photosort.classify import prompts_for
+    with pytest.raises(ValueError) as e:
+        prompts_for("ViT-L-14")
+    assert "ViT-L-14" in str(e.value)
+
+def test_mobileclip_still_scores_on_exactly_the_committed_prompts():
+    """MobileCLIP's thresholds carry evidence from a 3,677 photo event shoot and the Diu shoot, and
+    those disks are unplugged, so its scoring cannot be changed and then re-derived. The four SigLIP
+    interview prompts were run against it on NSG_26 Part 2 and moved 9 photographs, 4 of them wrongly
+    (two empty offices and two beach two-shots became interviews), so it gets nothing."""
+    from photosort.classify import EXTRA_PROMPTS, prompts_for, CATEGORIES
+    assert EXTRA_PROMPTS["MobileCLIP-S1"] == {}
+    assert prompts_for("MobileCLIP-S1") == CATEGORIES
+
+def test_siglip_gets_the_four_measured_interview_prompts():
+    """Spelled out and in order, so a later edit cannot quietly reword them. They were measured on the
+    955 photographs of NSG_26 Part 2: 126 of the 163 frames the two encoders disagreed about come back
+    to interview, agreement over the shoot goes from 740 to 866, no other photograph moves and "other"
+    stays at 12. Changing this list means re-running that measurement, not editing this test."""
+    from photosort.classify import EXTRA_PROMPTS, prompts_for, CATEGORIES
+    assert EXTRA_PROMPTS["ViT-B-16-SigLIP"] == {
+        "interview": ["a close up of a person answering questions on an interview set",
+                      "an interview subject seated in front of a plain wall with a lamp beside them",
+                      "a person mid sentence during a filmed interview, chair and framed pictures behind them",
+                      "a single person filmed for an interview, seated and facing the camera"]}
+    got = prompts_for("ViT-B-16-SigLIP")
+    assert list(got) == list(CATEGORIES)
+    assert got["interview"] == CATEGORIES["interview"] + EXTRA_PROMPTS["ViT-B-16-SigLIP"]["interview"]
+    assert len(got["interview"]) == 7
+    assert all(got[c] == CATEGORIES[c] for c in CATEGORIES if c != "interview")
+
+def test_the_prompt_matrix_scores_the_running_encoders_prompts():
+    """The table is not decoration: _prompt_matrix builds one row per prompt of PROMPTS, and every
+    prompt is owned by the category it was written for. Runs under whichever encoder is set, so it
+    fails if PROMPTS is ever wired back to CATEGORIES under SigLIP."""
+    from photosort import classify as c
+    from photosort.config import CLIP_MODEL
+    assert c.PROMPTS == c.prompts_for(CLIP_MODEL)
+    names, T, owner = c._prompt_matrix(get_embedder())
+    assert names == list(c.CATEGORIES) + ["__other__"]
+    assert len(T) == len(owner) == sum(len(p) for p in c.PROMPTS.values()) + len(c.NEGATIVE_PROMPTS)
+    for i, cat in enumerate(c.PROMPTS):
+        assert owner.count(i) == len(c.PROMPTS[cat])
+    assert owner.count(len(names) - 1) == len(c.NEGATIVE_PROMPTS)
+
+# ===== shot size: close / medium / wide, zero-shot over the embeddings the index already holds =====
+
+def test_shot_size_scores_a_vector_into_the_bucket_whose_prompts_it_matches():
+    """The same trick the category tests use: a bucket's own prompt text, encoded, stands in for an
+    image that looks like that bucket. A vector that is not near any framing must come back unknown
+    rather than being pushed into the nearest one."""
+    from photosort.classify import SHOT_SIZES, SHOT_SIZE_UNKNOWN, shot_sizes
+    E = get_embedder()
+    vecs = []
+    for prompts in SHOT_SIZES.values():
+        v = E.encode_text(prompts).mean(axis=0); v /= np.linalg.norm(v)
+        vecs.append(v)
+    rng = np.random.default_rng(0)
+    junk = rng.normal(size=EMBED_DIM).astype(np.float32); junk /= np.linalg.norm(junk)
+    vecs.append(junk)
+    out = shot_sizes(np.stack(vecs), E)
+    assert [name for name, _ in out[:3]] == list(SHOT_SIZES)
+    assert all(0.0 < score <= 1.0 for _, score in out)
+    assert out[3][0] == SHOT_SIZE_UNKNOWN
+
+def test_shot_size_of_an_empty_matrix_is_an_empty_list():
+    """Called on a shoot with nothing embedded yet. numpy would raise on the matrix product."""
+    from photosort.classify import shot_sizes
+    assert shot_sizes(np.zeros((0, EMBED_DIM), np.float32), get_embedder()) == []
+
+def test_shot_size_refuses_a_frame_of_nothing_through_the_negative_prompts():
+    """A flat frame wins "__other__" outright, exactly as it does for categories, and __other__ maps to
+    unknown. This is the gate that keeps a black slate out of the wide bucket."""
+    from photosort.classify import NEGATIVE_PROMPTS, SHOT_SIZE_UNKNOWN, shot_sizes
+    E = get_embedder()
+    black = E.encode_text([NEGATIVE_PROMPTS[0]])[0]
+    assert shot_sizes(np.stack([black]), E)[0][0] == SHOT_SIZE_UNKNOWN
+
+def test_classify_and_store_persists_shot_size_beside_the_category(tmp_path):
+    """One pass writes both. The shot size is stored with the share it won, and a row with no embedding
+    is left unscored (NULL) rather than guessed at: unscored and unknown are different facts."""
+    from photosort.classify import SHOT_SIZES, SHOT_SIZE_NAMES
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    wide = E.encode_text(SHOT_SIZES["wide"]).mean(axis=0); wide /= np.linalg.norm(wide)
+    pid = db.upsert_photo(conn, _row("wide.jpg")); db.set_embed(conn, pid, wide)
+    blank = db.upsert_photo(conn, _row("noembed.jpg"))      # indexed, never embedded
+    conn.commit()
+
+    classify_and_store(tmp_path)
+
+    conn2 = db.connect(tmp_path)
+    r = conn2.execute("SELECT shot_size, shot_size_score FROM photos WHERE id=?", (pid,)).fetchone()
+    assert r["shot_size"] == "wide" and 0.0 < r["shot_size_score"] <= 1.0
+    assert conn2.execute("SELECT shot_size FROM photos WHERE id=?", (blank,)).fetchone()["shot_size"] is None
+    counts = db.shot_size_counts(conn2)
+    assert counts["wide"] == 1 and counts["unscored"] == 1
+    assert set(counts) <= {*SHOT_SIZE_NAMES, "unscored"}
+
+def test_classify_shot_size_runs_on_an_already_indexed_shoot_without_a_rescan(tmp_path):
+    """The path the client needs: an index that already has its embeddings gets the new column filled
+    by a call that reads nothing but the database. No shoot root is opened, so it works with the disk
+    unplugged, which is exactly why this is zero-shot over stored vectors and not a pass over frames."""
+    from photosort.classify import SHOT_SIZES, classify_shot_size
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    close = E.encode_text(SHOT_SIZES["close"]).mean(axis=0); close /= np.linalg.norm(close)
+    pid = db.upsert_photo(conn, _row("tight.jpg")); db.set_embed(conn, pid, close)
+    conn.commit()
+    assert classify_shot_size(tmp_path) == {"close": 1}
+    conn2 = db.connect(tmp_path)
+    assert conn2.execute("SELECT shot_size FROM photos WHERE id=?", (pid,)).fetchone()[0] == "close"
+
+def test_classify_shot_size_lets_a_clips_face_overrule_medium(tmp_path):
+    """A clip the embedding calls medium whose face is a sliver of the frame is a wide shot with a person in
+    it (the measurement is above FACE_MEDIUM_MIN_H); a clip with no face, or a still, keeps the embedding's
+    word. The interview category is untouched: n_faces stays 0 on a clip, so the face rule never fires."""
+    from photosort.classify import SHOT_SIZES, classify_shot_size, FACE_MEDIUM_MIN_H
+    conn = db.connect(tmp_path)
+    E = get_embedder()
+    med = E.encode_text(SHOT_SIZES["medium"]).mean(axis=0); med /= np.linalg.norm(med)
+    clip = dict(kind="video", duration=40.0)
+    far = db.upsert_photo(conn, _row("far.mp4", people=1, face_h=FACE_MEDIUM_MIN_H / 2, **clip))
+    near = db.upsert_photo(conn, _row("near.mp4", people=1, face_h=0.3, **clip))
+    nobody = db.upsert_photo(conn, _row("nobody.mp4", people=0, face_h=None, **clip))
+    still = db.upsert_photo(conn, _row("still.jpg"))
+    for pid in (far, near, nobody, still):
+        db.set_embed(conn, pid, med)
+    conn.commit()
+    assert classify_shot_size(tmp_path) == {"wide": 1, "medium": 3}
+    got = {r["rel"]: r["shot_size"] for r in db.connect(tmp_path).execute("SELECT rel, shot_size FROM photos")}
+    assert got == {"far.mp4": "wide", "near.mp4": "medium", "nobody.mp4": "medium", "still.jpg": "medium"}
+
+def test_shot_size_is_cleared_when_the_file_changes(tmp_path):
+    """It was derived from an embedding of the old bytes, so it goes with the embedding. Otherwise a
+    recut clip keeps the framing label of the take it replaced."""
+    conn = db.connect(tmp_path)
+    pid = db.upsert_photo(conn, _row("a.jpg"))
+    conn.execute("UPDATE photos SET shot_size='wide', shot_size_score=0.7 WHERE id=?", (pid,)); conn.commit()
+    db.upsert_photo(conn, _row("a.jpg", size=999, mtime=2.0))
+    r = conn.execute("SELECT shot_size, shot_size_score FROM photos WHERE id=?", (pid,)).fetchone()
+    assert r["shot_size"] is None and r["shot_size_score"] is None
+
+def test_the_shot_size_prompts_are_several_per_bucket_and_shared_with_nothing():
+    """Several phrasings per bucket, because a single one is brittle, and no phrase is doing duty as a
+    category, a negative or an aerial prompt at the same time: shot size is its own axis, so a wide
+    shot of a beach is still "beach" the way a drone shot of a beach is."""
+    from photosort.classify import (SHOT_SIZES, SHOT_SIZE_NAMES, SHOT_SIZE_UNKNOWN, AERIAL_PROMPTS,
+                                    GROUND_PROMPTS, NEGATIVE_PROMPTS, PROMPTS)
+    assert list(SHOT_SIZES) == ["close", "medium", "wide"]
+    assert SHOT_SIZE_NAMES == ("close", "medium", "wide", SHOT_SIZE_UNKNOWN)
+    assert all(len(p) >= 3 for p in SHOT_SIZES.values())
+    flat = [t for ps in SHOT_SIZES.values() for t in ps]
+    assert len(set(flat)) == len(flat)
+    others = set(NEGATIVE_PROMPTS) | set(AERIAL_PROMPTS) | set(GROUND_PROMPTS) \
+        | {t for ps in PROMPTS.values() for t in ps}
+    assert not (set(flat) & others)
+
+def test_the_shot_size_matrix_owns_every_prompt_and_ends_in_the_negative_bucket():
+    """_shot_matrix is the same shape as _prompt_matrix: one row per prompt, each owned by its bucket,
+    with "__other__" last owning NEGATIVE_PROMPTS. Cached on the embedder like the aerial matrix."""
+    from photosort import classify as c
+    E = get_embedder()
+    if hasattr(E, "_shot_T"):
+        del E._shot_T
+    names, T, owner = c._shot_matrix(E)
+    assert names == list(c.SHOT_SIZES) + ["__other__"]
+    assert len(T) == len(owner) == sum(len(p) for p in c.SHOT_SIZES.values()) + len(c.NEGATIVE_PROMPTS)
+    for i, size in enumerate(c.SHOT_SIZES):
+        assert int((owner == i).sum()) == len(c.SHOT_SIZES[size])
+    assert int((owner == len(names) - 1).sum()) == len(c.NEGATIVE_PROMPTS)
+    assert c._shot_matrix(E)[1] is T        # second call reuses the cached matrix
+
+def test_there_is_no_camera_motion_facet(tmp_path):
+    """Locked off versus moving was measured and refused (the comment above SHOT_SIZES has the numbers:
+    the 166 drone clips of the client's shoot, the one class that is moving by definition, score BELOW
+    handheld coverage on a frame to frame difference, because the sampled frames sit seconds apart).
+    This test exists so a later edit has to delete the refusal deliberately rather than add a column
+    that looks plausible and lies."""
+    from photosort import classify as c
+    assert not hasattr(c, "camera_motion")
+    assert not hasattr(c, "CAMERA_MOTION_PROMPTS")
+    cols = {r[1] for r in db.connect(tmp_path).execute("PRAGMA table_info(photos)")}
+    assert "camera_motion" not in cols and "locked_off" not in cols

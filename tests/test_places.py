@@ -1,6 +1,6 @@
 """Where a shoot was shot: the catch-up pass that reads locations out of file metadata, the grid that piles
 points up for the map, and the box filter behind a click on it."""
-import json
+import json, math
 from pathlib import Path
 from fastapi.testclient import TestClient
 from photosort import db, places
@@ -29,6 +29,45 @@ def test_cluster_piles_up_points_that_are_near_each_other():
     assert piles[0]["n"] == 2 and piles[1]["n"] == 1
     assert abs(piles[0]["lat"] - AHMEDABAD[0]) < 0.02
     assert piles[0]["south"] <= piles[0]["lat"] <= piles[0]["north"]
+
+def test_one_city_is_one_row_even_across_a_grid_edge():
+    """Ahmedabad came back twice on the client shoot: 172 photos at 23.05883, 72.56614 and 64 at 23.02753,
+    72.49382, 8 km apart. The cell edge at lon 322 * 0.225225 = 72.5225 runs between them, and a grid can
+    never close that: merging is not what a grid does."""
+    north, south = (23.05883, 72.56614), (23.02753, 72.49382)
+    deg = 25.0 / 111.0
+    assert math.floor(north[1] / deg) != math.floor(south[1] / deg)       # genuinely two cells
+    piles = places.cluster([north] * 172 + [south] * 64)
+    assert len(piles) == 1
+    p = piles[0]
+    assert (p["n"], p["name"], p["country"]) == (236, "Ahmedabad", "India")
+    # the box is the union of both, so a click on the merged row still filters to everything in it
+    assert p["west"] <= south[1] and p["east"] >= north[1]
+    assert p["south"] <= south[0] and p["north"] >= north[0]
+
+def test_two_towns_that_share_a_name_are_not_welded_together():
+    """There are five Springfields in the shipped list. Merging by name alone would make them one row
+    wherever a shoot happened to visit two of them, which is the one way this fix could be worse than the
+    duplicate it removes."""
+    springfields = [c for c in places.cities() if c[0] == "Springfield"]
+    assert len(springfields) > 1
+    a, b = springfields[0], springfields[1]
+    assert places.km_between(a[2], a[3], b[2], b[3]) > places.MERGE_KM
+    piles = places.cluster([(a[2], a[3])] * 3 + [(b[2], b[3])] * 2)
+    assert len(piles) == 2 and all(p["name"] == "Springfield" for p in piles)
+
+def test_a_pile_with_no_city_near_it_keeps_to_itself():
+    """Nothing is looked up over the network, so a shoot in the middle of the Pacific has no name to merge
+    on. Two unnamed piles stay two piles: without a name there is nothing to say they are one place."""
+    assert places.nearest_city(-30.0, -130.0) is None
+    piles = places.cluster([(-30.0, -130.0)] * 5 + [(-30.25, -130.0)] * 3)
+    assert [(p["n"], p["name"]) for p in piles] == [(5, None), (3, None)]
+
+def test_the_named_piles_reach_the_endpoint(tmp_path):
+    _shoot(tmp_path, [("p0.jpg", AHMEDABAD), ("p1.jpg", GOA)])
+    c = TestClient(create_app(tmp_path))
+    named = {(cl["name"], cl["country"]) for cl in c.get("/api/places").json()["clusters"]}
+    assert named == {("Ahmedabad", "India"), ("Panaji", "India")}
 
 def test_cluster_of_nothing_is_nothing():
     assert places.cluster([]) == []

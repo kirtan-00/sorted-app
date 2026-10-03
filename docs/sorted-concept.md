@@ -48,7 +48,7 @@ and from then on you ask for things the way you would ask a person.
   Premiere, Resolve, Lightroom, whatever the person already uses.
 - Not a cloud service. There is no server doing the work. There never will be; that is the point.
 - Not "AI" in the chatbot sense. No language model is used anywhere. It uses two small on-device
-  vision models: one that understands images and words in the same space (MobileCLIP), one that
+  vision models: one that understands images and words in the same space (SigLIP), one that
   detects and recognises faces (YuNet and SFace). They run on the Mac's own chip.
 - Video faces: not yet. Faces are on photos; clips get the scene breakdown instead.
 
@@ -73,7 +73,7 @@ estate and hotel shoots, event coverage, archives with old drives, and the solo 
 
 The app is a small local program (Python) that runs on the Mac and shows its interface in the
 browser (Chrome). It walks the disk, makes a thumbnail of every photo and a handful of frames of
-every clip, runs each through MobileCLIP to get a fingerprint that captures what is in it, runs a
+every clip, runs each through SigLIP to get a fingerprint that captures what is in it, runs a
 face detector on the stills, and stores all of that in one database on the Mac. A search turns
 the words into the same kind of fingerprint and finds the closest images. Categories are the
 same trick with fixed descriptions plus clustering. People are face fingerprints grouped by

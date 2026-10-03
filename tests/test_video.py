@@ -278,6 +278,55 @@ def test_capture_gamma_reads_the_sony_sidecar_and_is_none_otherwise(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["C0011.MP4", "C0011M01.XML", "C0012.MP4", "C0012M01.XML"]
 
 
+# The rest of a real NonRealTimeMeta file, in the shape Sony writes it. Not checked against a sidecar off a
+# real card on this Mac (none was mounted when this was written), so every field is optional and absent ones
+# come back None rather than raising.
+SONY_XML_FULL = """<?xml version="1.0" encoding="UTF-8"?>
+<NonRealTimeMeta xmlns="urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.20" lastUpdate="2026-08-06T10:11:12+05:30">
+  <Duration value="1523"/>
+  <CreationDate value="2026-08-06T10:11:12+05:30"/>
+  <VideoFormat>
+    <VideoRecPort port="DIRECT"/>
+    <VideoFrame videoCodec="AVC_3840_2160_HP@L51" captureFps="{capture}" formatFps="25p"/>
+    <VideoLayout pixel="3840" numOfVerticalLine="2160" aspectRatio="16:9"/>
+  </VideoFormat>
+  <Device manufacturer="Sony" modelName="ILCE-7SM3" serialNo="1234567"/>
+  <RecordingMode type="normal" cacheRec="false"/>
+  <AcquisitionRecord>
+    <Group name="CameraUnitMetadataSet">
+      <Item name="CaptureGammaEquation" value="{gamma}"/>
+      <Item name="CaptureColorPrimaries" value="s-gamut3-cine"/>
+    </Group>
+  </AcquisitionRecord>
+</NonRealTimeMeta>
+"""
+
+
+def test_read_sidecar_gives_gamma_camera_and_frame_rates_in_one_read(tmp_path):
+    from photosort.video import read_sidecar, capture_gamma
+    clip = tmp_path / "C0042.MP4"; clip.write_bytes(b"v")
+    assert read_sidecar(clip) == {"gamma": None, "camera": None, "capture_fps": None, "format_fps": None}
+    (tmp_path / "C0042M01.XML").write_text(SONY_XML_FULL.format(gamma="s-log3-cine", capture="100p"))
+    got = read_sidecar(clip)
+    # SONY in capitals, the way the same body writes Make into a still's EXIF, so the camera filter finds
+    # the photos and the clips of one body under one name
+    assert got == {"gamma": "s-log3-cine", "camera": "SONY ILCE-7SM3", "capture_fps": 100.0, "format_fps": 25.0}
+    assert capture_gamma(clip) == "s-log3-cine"                                  # the old call still answers
+    # the short sidecar the log thumbnail tests use: gamma only, everything else absent
+    (tmp_path / "C0042M01.XML").write_text(SONY_XML.format(gamma="rec709"))
+    assert read_sidecar(clip) == {"gamma": "rec709", "camera": None, "capture_fps": None, "format_fps": None}
+    (tmp_path / "C0042M01.XML").write_text(SONY_XML_FULL.format(gamma="s-log3", capture="59.94i"))
+    assert read_sidecar(clip)["capture_fps"] == pytest.approx(59.94)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["C0042.MP4", "C0042M01.XML"]
+
+
+def test_is_log_is_the_s_log_family_only():
+    from photosort.video import is_log
+    assert is_log("s-log3-cine") and is_log("s-log3") and is_log("S-Log2")
+    assert not is_log("rec709") and not is_log("hlg2") and not is_log("s-cinetone")
+    assert not is_log(None) and not is_log("")
+
+
 def test_slog3_to_rec709_maps_mid_grey_up_and_keeps_black_black():
     import numpy as np
     from photosort.video import slog3_to_rec709

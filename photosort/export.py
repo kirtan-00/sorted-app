@@ -103,24 +103,58 @@ def _is_existing_copy(dst: Path, src: Path, web: bool = False) -> bool:
         return False
 
 def _resolve_destination(dst_dir: Path, name: str, pid: int, src: Path, web: bool = False):
-    """Where one file lands: ("write", path) for a free name, ("skip", None) when the taken name
-    is already this same file (a prior export, so re-running must not fail or duplicate), or
-    ("fail", message) when 99 numbered fallbacks are all taken by something else."""
+    """Where one file lands: ("write", path) for a free name, ("skip", path) when the taken name
+    is already this same file (a prior export, so re-running must not fail or duplicate; path is
+    where that copy is, so its XMP sidecar can still be refreshed), or ("fail", message) when 99
+    numbered fallbacks are all taken by something else."""
     dst = dst_dir / name
     if not (dst.exists() or dst.is_symlink()):
         return "write", dst
     if _is_existing_copy(dst, src, web):
-        return "skip", None
+        return "skip", dst
     for i in range(1, 100):
         cand = dst_dir / (f"{pid}_{name}" if i == 1 else f"{pid}_{i}_{name}")
         if not (cand.exists() or cand.is_symlink()):
             return "write", cand
         if _is_existing_copy(cand, src, web):
-            return "skip", None
+            return "skip", cand
     return "fail", f"no free name for {name} in {dst_dir} after 99 tries"
 
+# ===== XMP sidecars on export: <stem>.xmp beside every exported copy (or link) of an item that carries a flag,
+# stars or a label, so the cull opens in Lightroom, Bridge or Capture One. Written in the export folder only,
+# never under the shoot (xmp.write_sidecar checks). An item whose marks came off still gets its old sorted
+# sidecar rewritten (to rating 0), and a sidecar sorted did not write is never touched. =====
+XMP_LOG = "xmp-skipped.txt"
+
+def write_sidecars(root: Path, landed: list[tuple[int, Path]], log_dir: Path) -> dict:
+    """landed: (photo id, path of the exported file). Writes the sidecars, returns {written, foreign, clash}.
+    clash is a sidecar name two different items would share in one folder (IMG_1.JPG and IMG_1.MOV both
+    marked): the first keeps it. What was left alone, and why, goes in <log_dir>/xmp-skipped.txt."""
+    from . import xmp
+    root = Path(root)
+    marks = db.get_marks(db.connect(root), sorted({pid for pid, _ in landed}))
+    claimed: dict[Path, int] = {}; notes: list[str] = []; n = {"written": 0, "foreign": 0, "clash": 0}
+    for pid, dst in landed:
+        side = xmp.sidecar_path(dst); m = marks.get(pid)
+        if m is None or not (db.is_marked(m) or xmp.is_ours(side)):
+            continue
+        if side in claimed:
+            if claimed[side] != pid:
+                n["clash"] += 1; notes.append(f"{side.name}\talready written for another item with the same name")
+            continue
+        claimed[side] = pid
+        if xmp.write_sidecar(side, m, root) == "written":
+            n["written"] += 1
+        else:
+            n["foreign"] += 1; notes.append(f"{side.name}\tleft alone: an .xmp that sorted did not write is already there")
+    if notes:
+        with open(Path(log_dir) / XMP_LOG, "a") as fh:
+            fh.write("\n".join(notes) + "\n")
+    return n
+# ===== end XMP sidecars on export =====
+
 def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, failed_file: Path, progress=None,
-                   web_size: int | None = None) -> list[str]:
+                   web_size: int | None = None, xmp: bool = True) -> list[str]:
     """The per-file loop every export shares. jobs are (photo id, rel, destination folder); each file
     lands in its folder under its own name, or {id}_{name} (then {id}_2_{name}, ...) when that name
     is already taken by something else. A name already taken by this same file (symlink target or
@@ -128,15 +162,16 @@ def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, fai
     already has the photos does not fail or duplicate. mode is "copy" or "symlink". A per-file OSError
     is counted, not raised, and the list is written to failed_file at the end. progress (if given)
     sees {done, total, failed, skipped} after every file. Destination folders must already exist.
-    web_size (copy only): photos go out re-encoded to that long edge; RAW files and clips as they are."""
+    web_size (copy only): photos go out re-encoded to that long edge; RAW files and clips as they are.
+    xmp: a sidecar beside every landed (written or already there) copy of a marked item, see write_sidecars."""
     root = Path(root); notify = progress or (lambda d: None)
-    failed: list[str] = []; skipped = 0; total = len(jobs)
+    failed: list[str] = []; skipped = 0; total = len(jobs); landed: list[tuple[int, Path]] = []
     for n, (pid, rel, dst_dir) in enumerate(jobs, 1):
         src = root / rel; name = Path(rel).name
         web = bool(web_size) and mode == "copy" and src.suffix.lower() in STD_EXTS
         action, val = _resolve_destination(dst_dir, name, pid, src, web)
         if action == "skip":
-            skipped += 1
+            skipped += 1; landed.append((pid, val))
         elif action == "fail":
             failed.append(f"{rel}\t{val}")
         else:
@@ -147,17 +182,24 @@ def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, fai
                 if web and web_copy(src, dst, int(web_size)): pass
                 elif mode == "copy": shutil.copy2(src, dst)
                 else: os.symlink(src.resolve(), dst)
+                landed.append((pid, dst))
             except OSError as e:
                 failed.append(f"{rel}\t{e}")
         notify({"done": n, "total": total, "failed": len(failed), "skipped": skipped})
+    if xmp and landed:
+        try:
+            write_sidecars(root, landed, failed_file.parent)
+        except (OSError, ValueError) as e:      # the copies are done; a sidecar problem is reported, not raised
+            failed.append(f"(xmp sidecars)\t{e}")
     if failed:
         failed_file.write_text("\n".join(failed) + "\n")
     return failed
 
 def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progress=None, base: Path | None = None,
-               include_raw: bool = False, web_size: int | None = None) -> Path:
+               include_raw: bool = False, web_size: int | None = None, xmp: bool = True) -> Path:
     """A flat selection under <base>/<shoot>/<name>: copies, links or a CSV. include_raw puts each RAW sibling
-    next to its JPEG; web_size (copies only) re-encodes photos to that long edge, RAW and clips go as they are."""
+    next to its JPEG; web_size (copies only) re-encodes photos to that long edge, RAW and clips go as they are.
+    xmp: a sidecar beside each marked copy (see write_sidecars); the CSV carries flag, rating and label columns."""
     root = Path(root); out = export_dir(root, name, base)
     notify = progress or (lambda d: None)
     out.mkdir(parents=True, exist_ok=True)
@@ -165,15 +207,49 @@ def export_ids(root: Path, ids: list[int], name: str, mode: str = "copy", progre
         conn = db.connect(root); rows = []
         for i in range(0, len(ids), 900):        # chunk: SQLite caps bound variables
             chunk = ids[i:i + 900]; q = ",".join("?" * len(chunk))
-            rows += conn.execute(f"SELECT id, rel, sharp, n_faces, taken_at FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
+            rows += conn.execute(f"SELECT id, rel, sharp, n_faces, taken_at, flag, COALESCE(rating, 0) AS rating, label FROM photos "
+                                 f"WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
         with open(out / "photos.csv", "w", newline="") as fh:
-            w = csv.writer(fh); w.writerow(["id", "path", "sharp", "n_faces", "taken_at"])
-            for r in rows: w.writerow([r["id"], str(root / r["rel"]), r["sharp"], r["n_faces"], r["taken_at"]])
+            w = csv.writer(fh); w.writerow(["id", "path", "sharp", "n_faces", "taken_at", "flag", "rating", "label"])
+            for r in rows: w.writerow([r["id"], str(root / r["rel"]), r["sharp"], r["n_faces"], r["taken_at"],
+                                       r["flag"] or "", r["rating"], r["label"] or ""])
         notify({"done": len(rows), "total": len(rows), "failed": 0, "skipped": 0})
         return out
     transfer_files(root, [(pid, rel, out) for pid, rel, _ in ids_jobs(root, ids, include_raw)], mode, out / "failed.txt", progress,
-                   web_size=web_size)
+                   web_size=web_size, xmp=xmp)
     return out
+
+# ===== Write XMP: the sidecars on their own, for the originals. <base>/<shoot>/xmp/ mirrors the shoot's folders
+# (card2/DSC_2.JPG -> xmp/card2/DSC_2.xmp), so merging that folder over a copy of the cards puts every sidecar
+# beside its original. Same destination guards as every export: never in or above the shoot. =====
+def write_xmp(root: Path, ids: list[int], base: Path | None = None, name: str = "xmp") -> tuple[Path, dict]:
+    """(folder, {written, foreign, clash, unmarked}) for these ok ids. An unmarked item gets no sidecar unless
+    an old sorted one is there to be cleared."""
+    from . import xmp
+    root = Path(root); out = export_dir(root, name, base)
+    rows = rows_for_ids(root, ids)
+    marks = db.get_marks(db.connect(root), [r["id"] for r in rows])
+    n = {"written": 0, "foreign": 0, "clash": 0, "unmarked": 0}; claimed: dict[Path, int] = {}; notes: list[str] = []
+    for r in rows:
+        m = marks.get(r["id"])
+        side = xmp.sidecar_path(out / r["rel"])
+        if not (db.is_marked(m) or xmp.is_ours(side)):
+            n["unmarked"] += 1; continue
+        if side in claimed:
+            n["clash"] += 1; notes.append(f"{r['rel']}\tanother item in that folder already has {side.name}"); continue
+        claimed[side] = r["id"]
+        xmp.check_outside(side, root)
+        side.parent.mkdir(parents=True, exist_ok=True)
+        if xmp.write_sidecar(side, m, root) == "written":
+            n["written"] += 1
+        else:
+            n["foreign"] += 1; notes.append(f"{r['rel']}\tleft alone: an .xmp that sorted did not write is already there")
+    out.mkdir(parents=True, exist_ok=True)
+    if notes:
+        with open(out / XMP_LOG, "a") as fh:
+            fh.write("\n".join(notes) + "\n")
+    return out, n
+# ===== end Write XMP =====
 
 def category_rows(root: Path, categories: list[str] | None, include_unsure: bool = False, hide_bad: bool = False) -> list[dict]:
     """status='ok' rows (id, rel, sibling, size, category, kind, duration) placed in the given categories,
@@ -277,21 +353,25 @@ def write_segment(src: Path, dst: Path, start: float, end: float) -> None:
         raise OSError(err[-1] if err else f"ffmpeg exit {out.returncode}")
 
 def transfer_segments(root: Path, jobs: list[tuple[int, str, dict, Path]], failed: list[str], progress=None,
-                      done0: int = 0, total: int | None = None, failed0: int = 0, skipped0: int = 0) -> int:
+                      done0: int = 0, total: int | None = None, failed0: int = 0, skipped0: int = 0,
+                      landed: list | None = None) -> int:
     """The per-segment loop: (photo id, rel, segment, destination folder) each become one trimmed
     mp4, or count as skipped when that name is already there. Appends to `failed`, continues an
-    outer progress counter from done0/total, returns the number skipped."""
+    outer progress counter from done0/total, returns the number skipped. landed (if given) gets
+    (photo id, segment path) for every segment that is there at the end, for the XMP sidecars."""
     root = Path(root); notify = progress or (lambda d: None)
     total = len(jobs) if total is None else total; skipped = skipped0
     for n, (pid, rel, seg, dst_dir) in enumerate(jobs, done0 + 1):
         src = root / rel; dst = dst_dir / segment_name(rel, seg)
         if dst.exists() or dst.is_symlink():
             skipped += 1
+            if landed is not None: landed.append((pid, dst))
         else:
             try:
                 if not src.exists():
                     raise FileNotFoundError(str(src))
                 write_segment(src, dst, seg["start"], seg["end"])
+                if landed is not None: landed.append((pid, dst))
             except OSError as e:
                 failed.append(f"{rel} [{seg['idx']}]\t{e}")
         notify({"done": n, "total": total, "failed": failed0 + len(failed), "skipped": skipped})
@@ -305,8 +385,10 @@ def export_segments(root: Path, photo_ids: list[int], category: str | None = Non
     root = Path(root); out = export_dir(root, "segments", base)
     jobs = [(pid, rel, seg, out) for pid, rel, seg in segment_jobs(root, photo_ids, category)]
     out.mkdir(parents=True, exist_ok=True)
-    failed: list[str] = []
-    transfer_segments(root, jobs, failed, progress)
+    failed: list[str] = []; landed: list = []
+    transfer_segments(root, jobs, failed, progress, landed=landed)
+    if landed:
+        write_sidecars(root, landed, out)               # a trimmed segment of a marked clip carries its marks too
     if failed:
         (out / "failed.txt").write_text("\n".join(failed) + "\n")
     return out
@@ -432,8 +514,11 @@ def export_categories(root: Path, categories: list[str] | None, mode: str = "cop
         notify(dict(d, total=total))
     failed = transfer_files(root, jobs, mode, out / "failed.txt", prog)
     if seg_jobs:
-        more: list[str] = []
-        transfer_segments(root, seg_jobs, more, notify, done0=len(jobs), total=total, failed0=len(failed), skipped0=last["skipped"])
+        more: list[str] = []; landed: list = []
+        transfer_segments(root, seg_jobs, more, notify, done0=len(jobs), total=total, failed0=len(failed), skipped0=last["skipped"],
+                          landed=landed)
+        if landed:
+            write_sidecars(root, landed, out)
         if more:
             with open(out / "failed.txt", "a") as fh:
                 fh.write("\n".join(more) + "\n")

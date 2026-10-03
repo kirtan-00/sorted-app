@@ -19,6 +19,18 @@ def make_image(tmp_path, name="a.jpg", size=(1600, 1200), kind="sharp", seed=0):
 def make_img(tmp_path):
     return lambda **kw: make_image(tmp_path, **kw)
 
+def pytest_configure(config):
+    """A floor under the per-test isolation below, set before the first test and never taken away.
+
+    The per-test fixture uses monkeypatch, which restores the environment when the test ends. Two tests
+    start a background job and return without waiting for it (the point of both is that a failed job does
+    not wedge the server, so the job outliving the assert is the shape of the test). That thread then calls
+    app_home() with PHOTOSORT_HOME already restored, and writes an index folder into the real
+    ~/Library/Application Support/photosort, where a person's client shoots live. It had left 105 of them
+    there by 2026-09-24, two more per suite run. Pointing the variable at a session temp dir here means
+    monkeypatch restores to THIS value rather than to unset, so a late thread still lands in temp."""
+    os.environ.setdefault("PHOTOSORT_HOME", tempfile.mkdtemp(prefix="photosort-test-home-"))
+
 @pytest.fixture(autouse=True)
 def _isolated_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PHOTOSORT_HOME", str(tmp_path_factory.mktemp("home")))

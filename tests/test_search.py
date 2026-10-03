@@ -1,4 +1,5 @@
 from photosort import db
+from photosort.config import EMBED_DIM
 from photosort.index import index_folder
 from photosort.search import Index, Filters
 from PIL import Image
@@ -177,8 +178,8 @@ def test_bursts_fold_by_second_frame_number_and_embedding(tmp_path):
     ids = {}
     for rel, t, s in rows:
         ids[rel] = db.upsert_photo(conn, _row(rel, t, s, kind="video" if rel.endswith(".MP4") else "photo"))
-    v = np.zeros(512, np.float32); v[0] = 1.0
-    w = np.zeros(512, np.float32); w[1] = 1.0
+    v = np.zeros(EMBED_DIM, np.float32); v[0] = 1.0
+    w = np.zeros(EMBED_DIM, np.float32); w[1] = 1.0
     for rel in ("s/DSC00010.jpg", "s/DSC00011.jpg", "s/DSC00012.jpg"): db.set_embed(conn, ids[rel], v)
     db.set_embed(conn, ids["s/DSC00013.jpg"], w)
     conn.commit()
@@ -256,3 +257,214 @@ def test_days_counts_the_shoot_day_by_day(tmp_path):
     assert [d["n"] for d in days] == [1, 1, 1]
     assert [d["bytes"] for d in days] == [100, 5000, 900000]
     assert all(d["videos"] == 0 for d in days)
+
+def test_query_by_vector_is_the_same_scorer_as_image_id(tmp_path):
+    """An image from outside the shoot scores through Index.query(vector=...). Handed the embedding of a
+    file that IS in the shoot, it has to agree with image_id on that file: one scorer, two front doors."""
+    from conftest import make_image
+    from photosort.decode import load_upload
+    from photosort.embed import get_embedder
+    for i, name in enumerate(("a.jpg", "b.jpg", "c.jpg")):
+        make_image(tmp_path, name, seed=i)
+    index_folder(tmp_path, faces=False, workers=1)
+    ix = Index(tmp_path)
+    b = next(r for r in ix.search() if r["rel"] == "b.jpg")
+
+    vec = get_embedder().encode_images([load_upload((tmp_path / "b.jpg").read_bytes())])[0]
+    assert vec.shape == (EMBED_DIM,)
+    by_vector = ix.search(vector=vec)
+    assert by_vector[0]["rel"] == "b.jpg" and by_vector[0]["score"] > 0.9
+    # The same ranking as asking for the row itself: the re-encode of a re-decoded JPEG is not bit
+    # identical to the stored float16 embedding, so the order is the assertion, not the scores.
+    assert [r["rel"] for r in by_vector] == [r["rel"] for r in ix.search(image_id=b["id"])]
+    # Filters still apply to a vector query: three rows, so only the sharpest is above the 99th percentile.
+    assert len(ix.search(vector=vec, filters=Filters(sharp_min_pct=99))) == 1
+
+
+def test_query_by_vector_of_the_wrong_width_is_refused(tmp_path):
+    """A vector from another encoder cannot be scored against this index, and says so rather than
+    failing inside numpy."""
+    import numpy as np
+    import pytest
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1)
+    with pytest.raises(LookupError):
+        Index(tmp_path).search(vector=np.zeros(EMBED_DIM // 2, np.float32))
+
+
+def _two_camera_shoot(tmp_path):
+    """Six frames: three from camera A across one minute, two from camera B inside that minute, one from B
+    an hour later, and one clip with no camera recorded beside the A frames (the real shape: every
+    camera-less row in a shoot is a video, because the camera is read off still EXIF)."""
+    from conftest import make_image
+    rows = [
+        ("a1.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:00", "photo"),
+        ("a2.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:20", "photo"),
+        ("a3.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:40", "photo"),
+        ("b1.jpg", "SONY ILME-FX3", "2026-04-17T09:30:10", "photo"),
+        ("b2.jpg", "SONY ILME-FX3", "2026-04-17T09:31:00", "photo"),
+        ("b3.jpg", "SONY ILME-FX3", "2026-04-17T10:30:00", "photo"),
+        ("c1.jpg", None, "2026-04-17T09:30:05", "video"),
+    ]
+    for i, r in enumerate(rows):
+        make_image(tmp_path, r[0], seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    for rel, camera, taken, kind in rows:
+        conn.execute("UPDATE photos SET camera=?, taken_at=?, kind=? WHERE rel=?", (camera, taken, kind, rel))
+    conn.commit()
+    return Index(tmp_path)
+
+
+def _ranked(ix, order):
+    """The rows of ix in the given order, scored as a similarity query would score them (1.0 down)."""
+    by_rel = {r["rel"]: r for r in ix.query()}
+    return [dict(by_rel[rel], score=1.0 - i * 0.01) for i, rel in enumerate(order)]
+
+
+def test_angles_best_per_camera_and_the_same_moment_elsewhere(tmp_path):
+    """The whole point of task D: three frames off the strongest camera must not fill the answer."""
+    from photosort.search import angles
+    ix = _two_camera_shoot(tmp_path)
+    rows = _ranked(ix, ["a1.jpg", "a2.jpg", "a3.jpg", "b1.jpg", "c1.jpg", "b2.jpg", "b3.jpg"])
+    got = angles(rows)
+    # One row per camera, best first, and the three A frames do not crowd B out.
+    assert [(c["camera"], c["n"], c["best"]["rel"]) for c in got["cameras"]] == [
+        ("SONY ILCE-7RM5", 3, "a1.jpg"), ("SONY ILME-FX3", 3, "b1.jpg")]
+    # The clip is its own bucket: unknown is not a camera, and it is not hidden either.
+    assert got["unknown"]["n"] == 1 and got["unknown"]["best"]["rel"] == "c1.jpg"
+    m = got["moment"]
+    assert m["anchor_camera"] == "SONY ILCE-7RM5" and m["taken_at"] == "2026-04-17T09:30:00"
+    # b1 and b2 are inside the five minute window; b3 is an hour later; a2 and a3 are the same camera.
+    assert [(r["rel"], r["dt_s"]) for r in m["others"]] == [("b1.jpg", 10.0), ("b2.jpg", 60.0)]
+    assert [r["rel"] for r in m["unknown"]] == ["c1.jpg"]
+
+
+def test_angles_window_is_the_only_thing_that_admits_a_row(tmp_path):
+    from photosort.search import angles
+    ix = _two_camera_shoot(tmp_path)
+    rows = _ranked(ix, ["a1.jpg", "b1.jpg", "b2.jpg", "b3.jpg", "a2.jpg", "a3.jpg", "c1.jpg"])
+    assert [r["rel"] for r in angles(rows, window_s=30)["moment"]["others"]] == ["b1.jpg"]
+    assert [r["rel"] for r in angles(rows, window_s=7200)["moment"]["others"]] == ["b1.jpg", "b2.jpg", "b3.jpg"]
+
+
+def test_angles_anchor_without_a_camera_names_what_it_can(tmp_path):
+    """The clip ranks top. Nothing can be called a different camera from an unknown one, so anchor_camera
+    is null and every named camera in the window is offered as what it is: a camera we can name."""
+    from photosort.search import angles
+    ix = _two_camera_shoot(tmp_path)
+    rows = _ranked(ix, ["c1.jpg", "a1.jpg", "b1.jpg", "a2.jpg", "a3.jpg", "b2.jpg", "b3.jpg"])
+    m = angles(rows)["moment"]
+    assert m["anchor_camera"] is None
+    assert [r["rel"] for r in m["others"]] == ["a1.jpg", "b1.jpg", "a2.jpg", "a3.jpg", "b2.jpg"]
+    assert m["unknown"] == []
+
+
+def test_angles_of_nothing_and_of_a_row_with_no_capture_time(tmp_path):
+    from photosort.search import angles
+    ix = _two_camera_shoot(tmp_path)
+    assert angles([]) == {"cameras": [], "window_s": 300.0, "unknown": None, "moment": None}
+    rows = _ranked(ix, ["a1.jpg", "b1.jpg"])
+    rows[0] = dict(rows[0], taken_at=None)
+    assert angles(rows)["moment"] is None          # no time, no moment; the camera list still stands
+    assert [c["camera"] for c in angles(rows)["cameras"]] == ["SONY ILCE-7RM5", "SONY ILME-FX3"]
+
+def test_shot_size_filter(tmp_path):
+    """close / medium / wide / unknown each keep exactly their own rows, and a row the pass never
+    scored (shot_size NULL) is in none of them: unscored is an absence, not a fifth framing."""
+    from conftest import make_image
+    for i, name in enumerate(("close.jpg", "wide.jpg", "unsure.jpg", "unscored.jpg")):
+        make_image(tmp_path, name, seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    ids = {r["rel"]: r["id"] for r in conn.execute("SELECT id, rel FROM photos")}
+    for rel, size in (("close.jpg", "close"), ("wide.jpg", "wide"), ("unsure.jpg", "unknown")):
+        conn.execute("UPDATE photos SET shot_size=?, shot_size_score=0.6 WHERE id=?", (size, ids[rel]))
+    conn.commit()
+
+    ix = Index(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(shot_size="close"))] == ["close.jpg"]
+    assert [r["rel"] for r in ix.search(filters=Filters(shot_size="wide"))] == ["wide.jpg"]
+    assert [r["rel"] for r in ix.search(filters=Filters(shot_size="unknown"))] == ["unsure.jpg"]
+    assert ix.search(filters=Filters(shot_size="medium")) == []
+    assert len(ix.search()) == 4                        # unscored.jpg is still in the shoot
+    assert all(r["shot_size"] is None for r in ix.search() if r["rel"] == "unscored.jpg")
+
+def test_slowmo_filter_is_about_clips_and_only_about_clips(tmp_path):
+    """A still has no frame rate, so it is absent from both halves rather than counted as normal
+    speed, and a clip whose fps was never read is absent too: "not known to be" is not "is not"."""
+    from conftest import make_image
+    make_image(tmp_path, "still.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    base = dict(size=1, mtime=1.0, qhash="q", sibling=None, width=1920, height=1080, taken_at=None,
+                camera=None, phash="0" * 16, sharp_tile=1.0, sharp_max=1.0, sharp_eye=None, sharp=1.0,
+                n_faces=0, status="ok", kind="video", duration=4.0)
+    db.upsert_photo(conn, dict(base, rel="slow.mp4", qhash="a", fps=120.0))
+    db.upsert_photo(conn, dict(base, rel="normal.mp4", qhash="b", fps=25.0))
+    db.upsert_photo(conn, dict(base, rel="unread.mp4", qhash="c", fps=None))
+    conn.commit()
+
+    ix = Index(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(slowmo=True))] == ["slow.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(slowmo=False))] == ["normal.mp4"]
+    assert len(ix.search()) == 4
+    assert db.slowmo_counts(conn) == {"slow": 1, "normal": 1, "unknown": 1}
+
+
+def _clip_shoot(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "still.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET camera='SONY ILCE-7SM3', n_faces=2 WHERE rel='still.jpg'")
+    base = dict(size=1, mtime=1.0, sibling=None, width=1920, height=1080, taken_at=None, camera=None,
+                phash="0" * 16, sharp_tile=1.0, sharp_max=1.0, sharp_eye=None, sharp=1.0, n_faces=0,
+                status="ok", kind="video")
+    for rel, extra in (("log.mp4", dict(camera="SONY ILCE-7SM3", gamma="s-log3-cine", duration=4.0, fps=25.0, people=1)),
+                       ("709.mp4", dict(camera="SONY ILCE-7SM3", gamma="rec709", duration=15.0, fps=25.0, capture_fps=100.0, people=2)),
+                       ("phone.mp4", dict(camera="Apple iPhone 15 Pro", gamma="", duration=200.0, fps=30.0, people=0)),
+                       ("old.mp4", dict(gamma=None, duration=45.0, fps=None, people=None))):
+        db.upsert_photo(conn, dict(base, rel=rel, qhash=rel, **extra))
+    conn.commit()
+    return Index(tmp_path)
+
+
+def test_camera_filter_keeps_a_bodys_stills_and_clips(tmp_path):
+    ix = _clip_shoot(tmp_path)
+    assert sorted(r["rel"] for r in ix.search(filters=Filters(camera="SONY ILCE-7SM3"))) == ["709.mp4", "log.mp4", "still.jpg"]
+    assert [r["rel"] for r in ix.search(filters=Filters(camera="Apple iPhone 15 Pro"))] == ["phone.mp4"]
+    assert ix.search(filters=Filters(camera="Canon")) == []
+
+
+def test_profile_filter_is_about_clips_and_unknown_is_neither(tmp_path):
+    """Log is the S-Log family; standard is any other profile the sidecar named. A clip with no sidecar
+    (gamma '') or never read (NULL) is in neither half, and a still never is."""
+    ix = _clip_shoot(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(look="log"))] == ["log.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(look="standard"))] == ["709.mp4"]
+
+
+def test_duration_filter_buckets_clips_only(tmp_path):
+    ix = _clip_shoot(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(duration="lt10"))] == ["log.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(duration="10to30"))] == ["709.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(duration="30to120"))] == ["old.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(duration="gt120"))] == ["phone.mp4"]
+
+
+def test_slowmo_takes_the_sidecars_capture_rate(tmp_path):
+    ix = _clip_shoot(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(slowmo=True))] == ["709.mp4"]
+
+
+def test_the_faces_filter_counts_people_in_a_clip_and_skips_clips_never_looked_at(tmp_path):
+    """A clip's head count is photos.people, not n_faces (which stays 0 on a clip). Before clips had faces
+    every clip passed "No people"; now a clip nobody looked at passes no faces filter at all."""
+    ix = _clip_shoot(tmp_path)
+    assert [r["rel"] for r in ix.search(filters=Filters(faces="none"))] == ["phone.mp4"]
+    assert [r["rel"] for r in ix.search(filters=Filters(faces="one"))] == ["log.mp4"]
+    assert sorted(r["rel"] for r in ix.search(filters=Filters(faces="two"))) == ["709.mp4", "still.jpg"]
+    row = next(r for r in ix.search() if r["rel"] == "709.mp4")
+    assert (row["people"], row["gamma"], row["capture_fps"]) == (2, "rec709", 100.0)

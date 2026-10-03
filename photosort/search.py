@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from . import db
-from .config import GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN, BURST_SIM, BURST_GAP_S
+from .config import (GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN, BURST_SIM, BURST_GAP_S, ANGLE_WINDOW_S, SLOWMO_MIN_FPS,
+                     DURATION_BUCKETS)
+LOOKS = ("log", "standard")            # the two answers the picture profile filter takes (see _passes)
+DURATION_KEYS = tuple(k for k, _, _ in DURATION_BUCKETS)
 
 SORTS = ("oldest", "newest", "biggest", "smallest", "name", "longest")
 
@@ -38,9 +41,21 @@ class Filters:
     cluster: str | None = None      # a discovered category (photos.cluster)
     sure_only: bool = False         # drop the "less sure" band (exports want only what the model is sure of)
     aerial: bool | None = None      # True: drone shots only (photos.aerial), False: none of them, None: both
+    # close | medium | wide | "unknown" (scored, no clear answer). A row the pass has never scored
+    # (shot_size NULL) is never in any of the four: it is not a fifth framing, it is an absence.
+    shot_size: str | None = None
+    slowmo: bool | None = None      # True: clips at SLOWMO_MIN_FPS or above, False: clips below it (see _passes)
+    camera: str | None = None       # photos.camera exactly, stills and clips alike: one body shoots both
+    look: str | None = None         # "log": an S-Log clip, the footage that needs grading; "standard": any other named profile
+    duration: str | None = None     # a config.DURATION_BUCKETS key; clips only
     hide_bad: bool = False          # drop rows the focus pass labelled bad (photos.focus); unchecked rows stay
     hide_soft: bool = False         # drop soft and bad
     fold: bool = False              # one tile per duplicate set and per burst (the first in order shows; see Index.groups)
+    # ===== marks (see _passes_marks) =====
+    flag: str | None = None         # "pick" | "reject" | "none" (neither)
+    stars_min: int | None = None    # at least this many stars, 1 to 5
+    label: str | None = None        # one of db.LABELS, or "none" (no label)
+    # ===== end marks =====
 
 def category_match(p, cat: str) -> tuple[bool, float] | None:
     """(sure, confidence) for a photo row against fixed category cat, or None when it is not there at all.
@@ -86,6 +101,81 @@ def _taken(p: dict) -> _dt.datetime | None:
         return _dt.datetime.fromisoformat(str(t)[:19])
     except ValueError:
         return None
+
+def angles(rows: list[dict], window_s: float = ANGLE_WINDOW_S) -> dict:
+    """The same moment from the other cameras, out of an already ranked result (backlog task D, search
+    diversity).
+
+    Nearest neighbour on an embedding answers "what looks like this", and what looks most like a frame is
+    the next frame from the same body: the top of a similarity list is a burst, fifty tiles of the shot you
+    already had. Nobody asks that. What a production team asks is who else was covering this, so the answer
+    is a set of angles, not a list of near misses.
+
+    Two cuts of the same result, because they answer different halves of the question:
+
+      cameras  one row per camera, its best scoring match, ranked by that score. This is the answer when
+               the reference came off a phone or a client's deck and there is no moment to anchor to.
+      moment   the best match overall is the anchor; everything shot within window_s either side of it by
+               a camera that is not the anchor's is the same moment from somewhere else. Time is the only
+               honest way to say "the same moment": two bodies fifteen metres apart on the same action do
+               not look alike to an embedding, which is exactly why similarity alone keeps returning the
+               burst instead. ANGLE_WINDOW_S says where 300 s comes from.
+
+    A NULL camera is an unknown camera, not a distinct one, and there are a lot of them: 739 of 1,627 rows
+    on the client's shoot. Every one of them is a clip, and the shape is worth knowing: all 487 stills
+    carry a camera, and so do 401 of the 1,140 clips (an iPhone .MOV names itself), but a DJI or GoPro
+    .MP4 does not. So they are never a group in cameras and never counted as another angle, which would
+    be the UI stating something nobody measured. They are not thrown away either, since half the shoot is
+    not an acceptable thing to hide: they come back in their own bucket, labelled unknown, and separately
+    inside the moment window, where a clip rolling across the same minute is often the best answer on the
+    page. When the anchor itself has no camera, anchor_camera comes back null and every named camera in the
+    window lands in others: "a camera we can name" is the most that can be said, and the null says so.
+
+    Pass the WHOLE ranked result, not the first page: a camera whose best frame ranks four hundredth is
+    precisely the angle this exists to surface, and paging it away first would rebuild the burst problem.
+    Rows are copied, not marked in place: the dicts belong to the Index.
+    """
+    known = [r for r in rows if r.get("camera")]
+    unknown = [r for r in rows if not r.get("camera")]
+    best: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    for r in known:
+        cam = r["camera"]
+        counts[cam] = counts.get(cam, 0) + 1
+        if cam not in best or r.get("score", 0.0) > best[cam].get("score", 0.0):
+            best[cam] = r
+    cameras = [{"camera": cam, "n": counts[cam], "best": dict(best[cam])} for cam in
+               sorted(best, key=lambda c: -best[c].get("score", 0.0))]
+    out = {"cameras": cameras, "window_s": window_s,
+           "unknown": ({"n": len(unknown), "best": dict(unknown[0])} if unknown else None),
+           "moment": None}
+    if not rows:
+        return out
+    anchor = rows[0]
+    at = _taken(anchor)
+    if at is None:                      # nothing to anchor to: a row with no capture time has no moment
+        return out
+    near, near_unknown = [], []
+    for r in rows:
+        if r["id"] == anchor["id"]:
+            continue
+        t = _taken(r)
+        if t is None:
+            continue
+        dt = (t - at).total_seconds()
+        if abs(dt) > window_s:
+            continue
+        row = dict(r, dt_s=round(dt, 1))
+        if not r.get("camera"):
+            near_unknown.append(row)
+        elif r["camera"] != anchor.get("camera"):
+            near.append(row)
+    near.sort(key=lambda r: -r.get("score", 0.0))
+    near_unknown.sort(key=lambda r: -r.get("score", 0.0))
+    out["moment"] = {"anchor_id": anchor["id"], "anchor_camera": anchor.get("camera"),
+                     "taken_at": anchor.get("taken_at"), "others": near, "unknown": near_unknown}
+    return out
+
 
 class Index:
     def __init__(self, root: Path):
@@ -173,10 +263,16 @@ class Index:
         # Index is often built on one thread (app startup) then queried from
         # FastAPI's worker threadpool.
         conn = db.connect(self.root)
-        rows = conn.execute("SELECT id, rel, size, mtime, lat, lon, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus FROM photos WHERE status='ok' ORDER BY id").fetchall()
+        # "+status" refuses the (status, ...) covering indexes for this one read. ANALYZE used to be
+        # enough on its own: knowing status='ok' is nearly every row, the planner scanned. SQLite 3.50
+        # picks photos_status_faces plus a temp b-tree sort even with fresh statistics, which is 43 ms
+        # against 38 ms at 20k rows. Small, but this is the whole table in id order, so a scan is simply
+        # the right plan and the unary plus says so in a way no planner version can drift away from.
+        rows = conn.execute("SELECT id, rel, size, mtime, lat, lon, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus, shot_size, shot_size_score, fps, capture_fps, gamma, people, face_h, flag, rating, label FROM photos WHERE +status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
         for p in self.photos.values():
             p["when"] = when_of(p)
+            p["rating"] = p["rating"] or 0          # ===== marks: NULL on a row from before the column =====
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
         for r, rank in zip(rows, order):
@@ -191,7 +287,14 @@ class Index:
 
     def _passes(self, p: dict, f: Filters, person_ids: set[int] | None) -> bool:
         if f.sharp_min_pct is not None and p["sharp_pct"] < f.sharp_min_pct: return False
-        n = p["n_faces"] or 0
+        # A clip's head count is photos.people (faces on its frames), never n_faces, which stays 0 on a clip so
+        # classify's face rule leaves interviews alone. A clip nobody has looked at has no count and so passes
+        # no faces filter: before clips had faces every one of them passed "No people", which was a lie.
+        if p.get("kind") == "video":
+            if f.faces and p.get("people") is None: return False
+            n = p.get("people") or 0
+        else:
+            n = p["n_faces"] or 0
         if f.faces == "none" and n != 0: return False
         if f.faces == "one" and n != 1: return False
         if f.faces == "two" and n != 2: return False
@@ -202,6 +305,29 @@ class Index:
             if f.kind == "videos" and not is_video: return False
             if f.kind == "photos" and is_video: return False
         if f.aerial is not None and bool(p.get("aerial")) != f.aerial: return False
+        if f.shot_size is not None and p.get("shot_size") != f.shot_size: return False
+        # Slow motion is a fact about a clip and nothing else. A still has no frame rate, so it fails
+        # both halves of this filter rather than counting as "normal speed", and a clip whose fps was
+        # never read (an index from before the column, ffprobe unable to say) fails both too: the
+        # honest answer there is "not known to be", not "is not".
+        # The rate is the larger of the container's and the sidecar's capture rate, so an S&Q clip conformed
+        # in camera (shot at 100, written at 25) is slow motion too.
+        if f.slowmo is not None:
+            rates = [float(x) for x in (p.get("fps"), p.get("capture_fps")) if x is not None]
+            if p.get("kind") != "video" or not rates: return False
+            if (max(rates) >= SLOWMO_MIN_FPS) != f.slowmo: return False
+        if f.camera is not None and p.get("camera") != f.camera: return False
+        # The profile and the length are facts about a clip; a still is in neither half of either. A clip whose
+        # sidecar was never read (gamma NULL) or that has none ('') is not "standard": nobody knows what it is.
+        if f.look is not None:
+            g = (p.get("gamma") or "").lower()
+            if p.get("kind") != "video" or not g: return False
+            if (f.look == "log") != g.startswith("s-log"): return False
+        if f.duration is not None:
+            d = p.get("duration")
+            if p.get("kind") != "video" or d is None: return False
+            lo, hi = next((lo, hi) for k, lo, hi in DURATION_BUCKETS if k == f.duration)
+            if not (lo <= float(d) < hi): return False
         focus = p.get("focus")
         if f.hide_bad and focus == "bad": return False
         if f.hide_soft and focus in ("soft", "bad"): return False
@@ -224,7 +350,23 @@ class Index:
                 if not (west <= lon <= east): return False
             elif not (lon >= west or lon <= east):   # a box dragged across the date line
                 return False
+        return self._passes_marks(p, f)
+
+    # ===== marks: flag, minimum stars and colour label, all set by hand (db.set_marks) =====
+    @staticmethod
+    def _passes_marks(p: dict, f: Filters) -> bool:
+        if f.flag is not None and (p.get("flag") or "none") != f.flag: return False
+        if f.stars_min and (p.get("rating") or 0) < f.stars_min: return False
+        if f.label is not None and (p.get("label") or "none") != f.label: return False
         return True
+
+    def set_marks(self, marks: dict[int, dict]) -> None:
+        """Patch the live rows after db.set_marks, so a keystroke in the grid does not cost a whole refresh."""
+        for pid, m in marks.items():
+            p = self.photos.get(int(pid))
+            if p is not None:
+                p.update(flag=m.get("flag"), rating=m.get("rating") or 0, label=m.get("label"))
+    # ===== end marks =====
 
     def _confidence(self, p: dict, f: Filters) -> None:
         """Sets p["sure"] and p["confidence"] for the category/cluster filters in force (both must be sure;
@@ -274,20 +416,32 @@ class Index:
         return [out[k] for k in sorted(out)]
 
     def query(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
-              sort: str | None = None) -> list[dict]:
+              sort: str | None = None, vector: np.ndarray | None = None) -> list[dict]:
         """Every photo that passes the filters, in sort order, or by similarity when there is a text or image
         query (a query scores every photo, so ranking it any other way throws the query away: the UI greys
         the sort control out while one is running). With a category or cluster filter the sure ones come
         first in that order, then the "less sure" band (sure=False) sorted by confidence desc; sure_only
         drops the band. Every row in a duplicate set or a burst carries group (see _fold); fold keeps the
-        first of each set only."""
+        first of each set only.
+
+        vector is an already-encoded query embedding, for a reference image that is not in this shoot: the
+        upload endpoint encodes the dropped file and hands the result here. It scores through exactly the
+        same matrix product as image_id, because a second scorer would be a second thing to keep in step
+        with the encoder, the normalisation and the sure band."""
         person_ids = self._person_photo_ids(filters.person_id) if filters.person_id is not None else None
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         for p in cands: self._confidence(p, filters)
         if filters.sure_only:
             cands = [p for p in cands if p["sure"]]
-        if text or image_id is not None:
-            if image_id is not None:
+        if text or image_id is not None or vector is not None:
+            if vector is not None:
+                q = np.asarray(vector, np.float32).reshape(-1)
+                if q.shape[0] != self.M.shape[1]:
+                    # The encoder that filled this index and the one that made the vector disagree, which
+                    # can only happen if PHOTOSORT_CLIP_MODEL changed under a shoot. Say so here rather
+                    # than let numpy raise a shape error from inside the dot product.
+                    raise LookupError(f"query embedding has {q.shape[0]} dims, this index has {self.M.shape[1]}")
+            elif image_id is not None:
                 i = self.pos.get(image_id)
                 if i is None:
                     raise LookupError(f"no embedding for photo {image_id}")
@@ -309,5 +463,6 @@ class Index:
         return self._fold(cands, filters.fold)
 
     def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
-               limit: int = 200, offset: int = 0, sort: str | None = None) -> list[dict]:
-        return [dict(p) for p in self.query(text, image_id, filters, sort)[offset:offset + limit]]
+               limit: int = 200, offset: int = 0, sort: str | None = None,
+               vector: np.ndarray | None = None) -> list[dict]:
+        return [dict(p) for p in self.query(text, image_id, filters, sort, vector)[offset:offset + limit]]

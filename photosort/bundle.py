@@ -5,7 +5,13 @@ project. Older files are named <shoot>.photosort-index.zip and load the same; th
 changed. Format "photosort-index/1": bundle.json, index.db, thumbs/*.jpg,
 grid/*.jpg, frames/*.jpg (sampled video frames). bundle.json also carries "scan", how far the scan had got
 (db.scan_counts plus faces), so a bundle of a half-scanned shoot says so before it is loaded; the key is
-optional, an older bundle without it loads the same. The shoot root is only ever read; a bundle never lands under it."""
+optional, an older bundle without it loads the same.
+
+The shoot root is only ever read, with one exception: the project file itself may sit directly in the
+scanned folder, as <root>/sorted_<shoot>.sorted, so the scan travels on the SSD with the footage and whoever
+plugs the disk in next can open it. That one file (and its .part while it is being written) is the only
+thing the app ever creates under a root; a subfolder of the root, a photo export or anything else is still
+refused. The scanner never lists it (walk.find_images only takes photo and video extensions)."""
 from __future__ import annotations
 import json, os, shutil, sqlite3, tempfile, time, zipfile
 from pathlib import Path
@@ -25,23 +31,79 @@ def project_name(root: Path) -> str:
 
 
 def bundle_path(root: Path, out_dir: Path) -> Path:
-    """<out_dir>/sorted_<shoot name>.sorted. Refuses an out_dir that is the (read-only)
-    shoot root or inside it. Does not create anything."""
+    """<out_dir>/sorted_<shoot name>.sorted. out_dir may be the shoot root itself (the file sits beside the
+    footage, the one write the root ever gets); a folder inside the root is refused, because nothing else
+    is ever created under a shoot, not even a folder to hold the project file. Does not create anything."""
     root_res = Path(root).resolve(); out_res = Path(out_dir).resolve()
-    if out_res == root_res or out_res.is_relative_to(root_res):
-        raise ValueError("the project file cannot go inside the source folder (the shoot)")
+    if out_res != root_res and out_res.is_relative_to(root_res):
+        raise ValueError("the project file cannot go inside the source folder (the shoot); it goes in the shoot folder itself or somewhere else")
     return Path(out_dir) / project_name(root_res)
 
 
 def default_project_dir(root: Path, home: Path | None = None) -> Path:
-    """Where Save puts the project file when nobody has chosen: a "sorted" folder beside the shoot
-    folder (so /Volumes/Prod_02/NSG_26 saves to /Volumes/Prod_02/sorted and the file travels with the
-    disk), when that parent is a folder we can write to; otherwise ~/Documents/sorted. Nothing is created."""
+    """Where the project file goes when nobody has chosen: the scanned folder itself, so
+    /Volumes/Prod_02/NSG_26 gets /Volumes/Prod_02/NSG_26/sorted_NSG_26.sorted and the file travels with the
+    disk. ~/Documents/sorted only when the folder is not there or says it cannot be written. os.access is a
+    hint here, not the gate (it says yes on a read-only exFAT or a locked SD card); the scan's preflight does
+    a real write before it starts and asks for a place when that fails. Nothing is created."""
     root_res = Path(root).resolve()
-    parent = root_res.parent
-    if parent != root_res and parent.is_dir() and os.access(parent, os.W_OK) and parent.parts[-1:] != ("Volumes",):
-        return parent / "sorted"
+    if root_res.is_dir() and os.access(root_res, os.W_OK):
+        return root_res
     return (home or Path.home()) / "Documents" / "sorted"
+
+
+# ===== how big the project file will get, before a single photo is read. Measured 2026-09 on a mixed shoot:
+# 955 items (photos and clips) packed to 211 MB, about 220 KB an item; a clip carries six sampled frames and
+# its scene frames on top of the thumb and grid, so it is priced separately and higher. Both are rounded up
+# and the sum takes a 1.5 margin, because the preflight's job is to never let a 6-hour scan end on a full
+# disk: asking for a bit more than it needs is the cheap mistake. =====
+PROJECT_BYTES_PER_PHOTO = 300 * 1024
+PROJECT_BYTES_PER_VIDEO = 1024 * 1024
+PROJECT_MARGIN = 1.5
+
+
+def estimate_bytes(n_photos: int, n_videos: int) -> int:
+    """The project file for a shoot of this many photos and clips, rounded up with the margin. 955 photos
+    alone come to 440 MB, about twice the 211 MB measured, which is the point."""
+    return int((n_photos * PROJECT_BYTES_PER_PHOTO + n_videos * PROJECT_BYTES_PER_VIDEO) * PROJECT_MARGIN)
+
+
+# What the disk must still have free after the project file is written. A flat 1 GiB (the photo export's
+# floor) made a 24-photo card "need 1.1 GB" for an 11 MB file, which is a refusal nobody can act on. So it
+# scales: a tenth of the file, never under 100 MB (a filesystem wants some slack whatever the size), never
+# over 1 GiB. A big shoot stays conservative: 20k photos estimate 9.2 GB (already about twice the measured
+# size) and keep 920 MB on top; from about 23k photos up it is the old 1 GiB exactly.
+PROJECT_HEADROOM_MIN = 100 * 1000 * 1000
+PROJECT_HEADROOM_MAX = 1 << 30
+
+
+def project_headroom(estimate: int) -> int:
+    """Bytes to keep free beside a project file of `estimate` bytes: max(100 MB, 10%), capped at 1 GiB."""
+    return min(max(PROJECT_HEADROOM_MIN, int(estimate) // 10), PROJECT_HEADROOM_MAX)
+
+
+def probe_writable(d: Path) -> str | None:
+    """None when a file can really be created (and removed) in d, else why not, in words. A real write,
+    because os.access asks the permission bits and a read-only exFAT or NTFS volume, or an SD card with its
+    lock switch on, has permissive bits and refuses the write itself. The probe is a hidden name (the walker
+    skips dot files) created with O_EXCL, so it can never overwrite anything, and is removed at once."""
+    probe = Path(d) / f".sorted-probe-{os.getpid()}-{time.monotonic_ns()}"
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as e:
+        return e.strerror or str(e)
+    try:
+        os.write(fd, b"x")
+    except OSError as e:
+        return e.strerror or str(e)
+    finally:
+        os.close(fd)
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    return None
+# ===== end size =====
 
 
 def bundle_files(root: Path) -> list[tuple[str, Path]]:
@@ -65,16 +127,21 @@ def bundle_bytes(root: Path) -> int:
     return int(total)
 
 
-def export_bundle(root: Path, out_dir: Path, progress=None) -> Path:
+def export_bundle(root: Path, out_dir: Path, progress=None, thumbs: bool = True) -> Path:
     """Write the bundle and return its path. index.db goes in as a consistent snapshot taken with
     the sqlite backup API (never a raw copy of a WAL-mode file); thumbs and grid are stored, not
     deflated, since they are JPEGs already. progress (if given) sees {done, total, failed} after
     every thumb; a thumb that cannot be read is counted as failed, not raised. The zip is built
-    under a temp name and renamed into place, so a half-written bundle never carries the real name."""
+    under a temp name and renamed into place, so a half-written bundle never carries the real name,
+    and a rescan overwrites the last one in a single step.
+
+    thumbs False writes the skeleton: bundle.json (with "skeleton": true) and the database, no JPEGs. It is
+    what a picked location gets before a scan starts, a few KB that prove the place can really be written
+    and hold the name the finished scan will replace. It opens like any project file."""
     root = Path(root); out_dir = Path(out_dir)
     out = bundle_path(root, out_dir)
     notify = progress or (lambda d: None)
-    files = bundle_files(root); total = len(files); failed = 0
+    files = bundle_files(root) if thumbs else []; total = len(files); failed = 0
     out_dir.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
     with tempfile.TemporaryDirectory(prefix=".photosort-bundle-") as td:
@@ -93,10 +160,13 @@ def export_bundle(root: Path, out_dir: Path, progress=None) -> Path:
             "photos": n("SELECT count(*) FROM photos WHERE status='ok'"),
             "faces": n("SELECT count(*) FROM faces"),
             "references": n("SELECT count(*) FROM ref_faces"),
+            "marked": db.mark_counts(s)["marked"],          # flags, stars and labels ride along in index.db
             "scan": dict(db.scan_counts(s), faces=db.get_meta(s, "scan_faces") != "0"),
             "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "note": NOTE,
         }
+        if not thumbs:
+            info["skeleton"] = True
         s.close()
         try:
             with zipfile.ZipFile(part, "w", compression=zipfile.ZIP_DEFLATED) as z:

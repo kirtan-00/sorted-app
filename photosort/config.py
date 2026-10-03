@@ -7,9 +7,39 @@ MODELS_DIR = ROOT / "models"
 YUNET_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 SFACE_PATH = MODELS_DIR / "face_recognition_sface_2021dec.onnx"
 
-CLIP_MODEL = "MobileCLIP-S1"
-CLIP_PRETRAINED = "datacompdr"
-EMBED_DIM = 512
+# The encoder is a licence choice, not a quality one. MobileCLIP-S1's weights are apple-amlr: research
+# only, excludes commercial exploitation, and this app is going to be sold, so it cannot ship as the
+# default. ViT-B-16-SigLIP/webli is Apache-2.0 (Google). What it costs: open_clip's published zero-shot
+# ImageNet is 0.7604 for SigLIP B/16 against about 0.726 for MobileCLIP-S1 (SigLIP is actually a hair
+# ahead); on this M1 over 96 images SigLIP encodes 20.7 img/s against MobileCLIP's 32.4, but the whole
+# pipeline runs at about 12 files/s because decode dominates, so a scan costs about 17% more wall time;
+# and the weights a buyer downloads on first run go from 325 MB to 812 MB. Each entry is
+# (pretrained tag, embed_dim, the zero-shot text template CLIP was trained with).
+ENCODERS: dict[str, tuple[str, int, str]] = {
+    "MobileCLIP-S1": ("datacompdr", 512, "a photo of {}"),
+    "ViT-B-16-SigLIP": ("webli", 768, "a photo of {}."),
+}
+# PHOTOSORT_CLIP_MODEL picks the encoder; unset is ViT-B-16-SigLIP, the one the product ships with,
+# because it is the only one of the two that may be sold. PHOTOSORT_CLIP_MODEL=MobileCLIP-S1 reverses
+# this without a code change, and MobileCLIP stays supported and tested. A name outside ENCODERS raises
+# here rather than falling through: a typo that silently indexes a shoot with the wrong encoder is
+# exactly the failure db.EMBED_BYTES exists to catch, and it is cheaper to catch it at import than
+# after 20,000 photos are embedded with it.
+CLIP_MODEL = os.environ.get("PHOTOSORT_CLIP_MODEL") or "ViT-B-16-SigLIP"
+if CLIP_MODEL not in ENCODERS:
+    raise ValueError(f"unknown PHOTOSORT_CLIP_MODEL {CLIP_MODEL!r}; allowed: {sorted(ENCODERS)}")
+CLIP_PRETRAINED, EMBED_DIM, CLIP_TEMPLATE = ENCODERS[CLIP_MODEL]
+# SigLIP's text side is tokenised by a sentencepiece vocabulary open_clip fetches from the model's own
+# Hugging Face repo through transformers.AutoTokenizer. That repo carries no config.json, and
+# transformers 5.x asks AutoConfig for one before it will build a tokenizer, so with HF_HUB_OFFLINE=1
+# the lookup cannot fall back to the cache and raises: the app would need the network to turn a search
+# box into tokens, which breaks the one promise it makes. The three tokenizer files are 2.3 MB, so they
+# ship in models/ beside the face networks (Apache-2.0, the same licence as the weights) and are loaded
+# from that folder, where AutoTokenizer reads tokenizer_config.json for the class and never asks the hub.
+TOKENIZER_DIRS = {"ViT-B-16-SigLIP": MODELS_DIR / "siglip-tokenizer"}
+CLIP_TOKENIZER_DIR = TOKENIZER_DIRS.get(CLIP_MODEL)
+# What gets stamped into an index (db.stamp_model) so a shoot remembers which encoder filled it.
+MODEL_TAG = f"{CLIP_MODEL}/{CLIP_PRETRAINED}"
 
 INDEX_DIRNAME = ".photosort"
 DB_NAME = "index.db"
@@ -54,6 +84,33 @@ LONG_SEGMENT_S = 120.0      # the window on a long clip (widened evenly when MAX
 FFMPEG_HWACCEL = "videotoolbox"   # macOS hardware decode; retried without it once if a codec is not accelerated
 MAX_SEGMENTS = 24           # longest segments kept when a clip has more cuts than this
 MIN_SEGMENT_S = 1.0         # a cut that would leave a shorter segment is merged into the previous one
+# A clip at or above this container frame rate is slow motion. 100 and 120 are what the backlog asked for
+# by name and they are unambiguous: nobody shoots a 120 fps timeline. 48, 50 and 60 are deliberately left
+# out. They are a delivery frame rate as often as they are an over-crank, so half of the clips a 50 fps
+# floor caught would be ordinary coverage, and a facet that returns ordinary coverage under the word
+# "slow motion" teaches an editor to stop trusting it. Raise or lower it here if a shoot says otherwise.
+# What this cannot see, and no container field can: Sony S&Q and the like conform in camera, writing 25
+# fps into a file whose pictures are already slowed. Those clips read as normal speed and that is a real
+# gap, not a bug to hide. Only a look at the footage would find them.
+SLOWMO_MIN_FPS = 100.0
+# Sony's S&Q is now the one case the sidecar can see: <stem>M01.XML records captureFps beside formatFps, so a
+# clip shot at 100 and conformed in camera to 25 says captureFps="100p". video.read_sidecar keeps that as
+# photos.capture_fps and the slow motion facet takes the larger of the two rates. Phones and DJI write no
+# such sidecar, so for them the gap above still stands.
+
+# Clip length, four buckets over photos.duration, which every clip row has had since video support landed, so
+# this needs no catch-up pass. Measured on the two client shoots on this Mac:
+#   GT 1 TB (1,140 clips, event coverage):  548 under 10 s, 444 from 10 to 30 s, 120 to 2 min, 28 longer
+#   NSG_26 Part 2 (325 clips, documentary): 106, 115, 46, 58
+# The edges are the ones an editor already uses when asking for footage (a cutaway, a moment, a take, an
+# interview) and no bucket is empty or swallows a shoot on either. (key, lower bound inclusive, upper bound
+# exclusive, in seconds); the keys are what the API and the URL carry.
+DURATION_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("lt10", 0.0, 10.0),
+    ("10to30", 10.0, 30.0),
+    ("30to120", 30.0, 120.0),
+    ("gt120", 120.0, float("inf")),
+)
 
 # The thumbnail pass (JPEG/HEIC decode, thumbs, sharpness, faces) runs one process per core but one, capped:
 # the main process stores rows and drives progress. RAW stays at 2 (a rawpy decode holds ~10x the memory of
@@ -71,6 +128,16 @@ JPEG_WORKERS = thumb_workers(os.cpu_count())
 # frames have embeddings, cosine BURST_SIM or closer. Duplicates need no threshold: the same qhash is the same file.
 BURST_GAP_S = 1.0
 BURST_SIM = 0.9
+# Another camera, same moment (search.angles): how far either side of a match to look for the same moment
+# covered by a different camera. Measured on a client shoot of 1,627 rows, 888 of them carrying a camera
+# across twelve bodies: where the camera changes from one frame to the next, 33% of those handovers are
+# within 30 s, 49% within a minute, 62% within two, 74% within five, and 75% within ten. The curve is flat
+# past five minutes, so doubling the window buys one more frame. Tight sync barely exists on a shoot like
+# this (2.4% of handovers are under a second), so "the same moment" here means the same setup, which is
+# minutes, and taken_at comes off each body's own clock: a Sony, a DJI and an iPhone are never synced, and
+# minutes of drift are normal. Five minutes absorbs that while staying far under the 88 minute median gap
+# to the next camera on a day when several were shooting, so a window still separates a setup from a day.
+ANGLE_WINDOW_S = 300.0
 
 RAW_WORKERS = 2
 EMBED_BATCH = 32

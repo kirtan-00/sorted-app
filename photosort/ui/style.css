@@ -351,6 +351,12 @@ header { display: contents; }
 }
 .tb-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .tb-icon:hover { background: var(--g200); color: var(--g800); }
+
+/* the mark, far right of the toolbar. Sized to the 18px icon glyphs beside it rather than to the 28px
+   buttons, so it reads as a mark and not another thing to click; muted to --g500 so the pink lifting
+   tile is the only part that carries, and lifted to --g700 with the rest of the chrome on hover. */
+.tb-mark { width: 18px; height: 18px; flex: none; color: var(--g500); margin-left: 4px; }
+.toolbar:hover .tb-mark { color: var(--g700); }
 .tb-icon[aria-pressed="true"] { background: var(--g200); color: var(--g800); border-color: var(--g300); }
 
 nav {
@@ -401,6 +407,12 @@ nav button.from.on::after { display: none; }
 .nav-row { margin: 0 2px; }
 label.nav-row { padding: 0 8px; height: 32px; font-size: 14px; color: var(--g700); }
 fieldset.nav-row { margin: 6px 2px 0; }
+/* a pick-one list inside Filters (framing, clip length, camera): a quiet caption over check rows that behave as one
+   choice, so clicking the lit row again clears it. The caption is smaller than a .nav-group so it reads as a sub-head. */
+.pick-group { margin-top: 8px; }
+.nav-label { padding: 0 10px; height: 22px; line-height: 22px; font-size: 12px; color: var(--g500); }
+.pick-group label.nav-row { height: 28px; }
+nav select.nav-row { width: calc(100% - 4px); margin: 2px 2px 0; }
 
 main {
   grid-column: 2;
@@ -1161,6 +1173,8 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .scan-resume { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; background: var(--g100); border: 1px solid var(--g300); border-left: 3px solid var(--notice); border-radius: 4px; }
 .scan-resume-text { flex: 1 1 320px; min-width: 0; font-size: 14px; line-height: 1.4; color: var(--g800); }
 .scan-resume .btn { flex: none; }
+/* the folder in flight, under the bar: quieter than the readout, one line, elided rather than wrapped */
+.scan-current { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--g500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .scan-awake { margin-top: 8px; color: var(--g500); }
 .scan-health { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--g100); }
 .scan-health-text { font-size: 13px; color: var(--g600); line-height: 1.4; }
@@ -1181,8 +1195,15 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .project-state.stale { color: var(--g600); }
 .project-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: flex-start; }
 @media (max-width: 900px) { .project-card { flex-wrap: wrap; } .project-actions { width: 100%; justify-content: flex-start; } }
+/* The failures: one line during a pass, the paths behind it, red only once the pass has ended and the
+   call to action can be acted on. A file failing right now is the one thing loud enough to interrupt. */
 #index-errors { margin-top: 12px; }
-#index-errors-title { color: var(--red); font-size: 13px; margin-bottom: 6px; }
+#index-errors-title { color: var(--g500); font-size: 13px; cursor: pointer; list-style-position: outside; }
+#index-errors-title:hover { color: var(--g700); }
+#index-errors details[open] summary { margin-bottom: 6px; }
+#index-errors.ended #index-errors-title { color: var(--red); }
+.index-errors-new { color: var(--red); font-size: 13px; font-weight: 600; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.index-errors-new.quiet { color: var(--g600); font-weight: 400; }
 #index-errors-list, .drive-failures {
   padding: 8px 10px;
   background: var(--g100);
@@ -1361,3 +1382,115 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .place-row:hover { background: var(--g200); color: var(--g900); }
 .place-row .place-where { color: var(--g600); font-size: 11px; }
 .place-row .place-n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--g700); font-size: 12px; }
+
+/* ===== the project file needs a place: the blocking ask before (or after) a scan. A native <dialog> opened with
+   showModal, so the page behind cannot be clicked and Esc is the Cancel button. ===== */
+dialog.ask {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--g300);
+  border-radius: 10px;
+  background: var(--g75);
+  color: var(--g800);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+dialog.ask::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog.ask[open] { animation: ask-in 160ms ease-out; }
+@keyframes ask-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ask-inner { display: flex; gap: 16px; padding: 20px 20px 16px; }
+.ask-inner .glyph { width: 40px; height: 40px; flex: none; stroke: var(--g700); fill: none; stroke-width: 1.3; margin-top: 2px; }
+.ask-inner .glyph-project rect { fill: var(--g700); }
+.ask-inner .glyph-project rect[fill="#f3c8d0"] { fill: #f3c8d0; }
+.ask-main { flex: 1; min-width: 0; }
+.ask-main h2 { margin: 0 0 8px; font-size: 17px; font-weight: 600; color: var(--g900); }
+.ask-why { margin: 0 0 12px; font-size: 14px; line-height: 1.45; color: var(--g800); overflow-wrap: anywhere; }
+.ask-nums { display: flex; gap: 24px; margin: 0 0 12px; padding: 10px 12px; border-left: 2px solid var(--notice); background: var(--g50); border-radius: 0 6px 6px 0; }
+.ask-nums div { display: flex; flex-direction: column; gap: 2px; }
+.ask-nums dt { font-size: 12px; color: var(--g500); }
+.ask-nums dd { margin: 0; font-size: 20px; font-weight: 600; color: var(--g900); }
+.ask-what { margin: 0 0 14px; font-size: 13px; line-height: 1.45; color: var(--g600); }
+.ask-err { margin: -4px 0 12px; font-size: 13px; line-height: 1.4; color: var(--red); overflow-wrap: anywhere; }
+.ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ask-actions .btn:disabled { cursor: default; }
+@media (max-width: 480px) { .ask-inner .glyph { display: none; } .ask-nums { gap: 16px; } }
+
+/* ===== marks: flags, stars and colour labels. The label colours are Lightroom's five, toned to sit on the gray ramp. ===== */
+:root {
+  --lab-red: #e34850;
+  --lab-yellow: #dfbf00;
+  --lab-green: #2d9d78;
+  --lab-blue: #2680eb;
+  --lab-purple: #9256d9;
+  --star: #f0c341;
+}
+.mk-red { --lab: var(--lab-red); }
+.mk-yellow { --lab: var(--lab-yellow); }
+.mk-green { --lab: var(--lab-green); }
+.mk-blue { --lab: var(--lab-blue); }
+.mk-purple { --lab: var(--lab-purple); }
+/* the tile: a reject is dimmed (still clickable, still there), a label is a 3 px edge under the picture */
+#grid .card.rejected img { opacity: 0.32; }
+#grid .card[data-label]::after {
+  content: ""; position: absolute; left: 4px; right: 4px; bottom: 4px; height: 3px; border-radius: 0 0 2px 2px;
+  background: var(--lab, transparent);
+}
+#grid .card[data-label="red"]::after { background: var(--lab-red); }
+#grid .card[data-label="yellow"]::after { background: var(--lab-yellow); }
+#grid .card[data-label="green"]::after { background: var(--lab-green); }
+#grid .card[data-label="blue"]::after { background: var(--lab-blue); }
+#grid .card[data-label="purple"]::after { background: var(--lab-purple); }
+#grid .badge.marks { right: auto; left: 8px; gap: 3px; padding: 0 5px; }
+#grid .badge.marks.above { bottom: 30px; }
+#grid .badge.marks::before { display: none; }
+.mk-flag { display: inline-flex; width: 11px; height: 11px; }
+.mk-flag svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.mk-flag.mk-pick { color: var(--g900); }
+.mk-flag.mk-pick svg { fill: currentColor; }
+.mk-flag.mk-reject { color: var(--red); }
+.mk-stars { color: var(--star); letter-spacing: 1px; font-size: 10px; }
+/* the inspector rows and the sidebar block share these controls */
+.insp-marks { margin: 2px 0 8px; }
+.mk-ctl { display: flex; align-items: center; gap: 2px; overflow: visible !important; }
+.mk-btn, .mk-star, .mk-swatch {
+  appearance: none; border: 0; background: none; padding: 0; margin: 0; cursor: default;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--g500);
+  border-radius: 4px; transition: background-color var(--ease), color var(--ease);
+}
+.mk-btn { height: 24px; gap: 5px; padding: 0 7px; font-size: 12px; font-weight: 500; border: 1px solid var(--g300); margin-right: 4px; }
+.mk-btn svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.mk-btn:hover { background: var(--g200); color: var(--g800); }
+.mk-btn.mk-pick[aria-pressed="true"] { background: var(--g800); border-color: var(--g800); color: var(--g50); }
+.mk-btn.mk-pick[aria-pressed="true"] svg { fill: currentColor; }
+.mk-btn.mk-reject[aria-pressed="true"] { background: var(--red); border-color: var(--red); color: var(--g900); }
+.mk-star { width: 22px; height: 22px; }
+.mk-star svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linejoin: round; }
+.mk-star:hover { background: var(--g200); color: var(--g700); }
+.mk-star.on { color: var(--star); }
+.mk-star.on svg { fill: currentColor; }
+.mk-swatch { width: 22px; height: 22px; }
+.mk-swatch::before { content: ""; width: 12px; height: 12px; border-radius: 50%; background: var(--lab); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25); }
+.mk-swatch.mk-none::before { background: none; box-shadow: inset 0 0 0 1.5px var(--g400); }
+.mk-swatch:hover { background: var(--g200); }
+.mk-swatch[aria-pressed="true"] { background: var(--g300); }
+.mk-swatch[aria-pressed="true"]::before { box-shadow: 0 0 0 2px var(--g900); }
+.mk-btn:focus-visible, .mk-star:focus-visible, .mk-swatch:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* the sidebar Ratings block: nav button styles must not reach these */
+.marks-head { display: flex; align-items: baseline; gap: 6px; }
+.marks-head .link.small { margin-left: auto; height: 16px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.marks-filter { display: flex; flex-direction: column; gap: 4px; padding: 0 6px; }
+.marks-filter .seg span { font-size: 12px; padding: 0 2px; }
+nav .marks-filter button { width: 22px; height: 22px; padding: 0; gap: 0; }
+nav .marks-filter button:hover { background: var(--g200); }
+nav .marks-filter button svg { width: 14px; height: 14px; color: inherit; stroke-width: 1.1; }
+nav .marks-filter .mk-star.on svg { fill: currentColor; }
+nav .marks-filter .link.small { width: auto; height: 22px; padding: 0 4px; margin-left: -4px; align-self: flex-start; font-size: 12px; }
+nav .marks-filter .link.small:disabled { color: var(--g400); text-decoration: none; }
+.marks-line { display: flex; flex-direction: column; gap: 2px; }
+.marks-stars, .marks-labels { display: flex; gap: 1px; margin-left: -3px; }
+/* the full-size view */
+.lb-marks { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.lb-marks .mk-stars { font-size: 13px; }
+.lb-marks .mk-flag, .lb-marks .mk-flag svg { width: 13px; height: 13px; }
+.mk-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--lab); }
+/* ===== end marks ===== */
+nav .marks-head button { width: auto; height: 16px; padding: 0 4px; font-size: 11px; }

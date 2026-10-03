@@ -9,27 +9,35 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import db
 from . import usage
 from . import awake
 from . import classify as classify_mod
 from . import focus as focus_mod
+from . import index
 from . import places as places_mod
 from . import settings
 from . import version as version_mod
-from .config import DB_NAME, app_home, export_root, shoot_slug
-from .search import Index, Filters, SORTS
+from .config import DB_NAME, ANGLE_WINDOW_S, app_home, export_root, shoot_slug
+from .classify import SHOT_SIZE_NAMES
+from .search import Index, Filters, SORTS, angles, LOOKS, DURATION_KEYS
 from .export import export_ids, export_bytes, ids_jobs, jobs_bytes
 
 UI = Path(__file__).parent / "ui"
 RECENT_FILE = "recent.json"
 RECENT_MAX = 8
+# The biggest reference image /api/search/upload will hold in memory. A 61 MP A7R V frame is about 25 MB
+# as a full quality JPEG and a phone screenshot is under 5, so this takes anything a person would drag in
+# and refuses anything they would not have meant to.
+UPLOAD_MAX_BYTES = 40 * 1024 * 1024
 
 
 class ExportReq(BaseModel):
@@ -82,6 +90,13 @@ class IndexReq(BaseModel):
     faces: bool = True
     retry_errors: bool = False
     resume: bool = False          # Continue scan: faces as the interrupted scan had it (meta scan_faces), not the box
+
+
+class IndexAtReq(BaseModel):
+    path: str                     # the folder the project file goes in, when the shoot folder cannot hold it
+    faces: bool = True
+    retry_errors: bool = False
+    resume: bool = False
 
 
 class ModeReq(BaseModel):
@@ -180,6 +195,19 @@ class DriveExportReq(BaseModel):
     skip_videos: bool = False               # with web_size: leave videos out altogether
 
 
+# ===== marks: typed loosely on purpose, so a bad value is db.set_marks' 400 with words, not a 422 =====
+class MarksReq(BaseModel):
+    ids: list[int]
+    flag: Any = None                        # "pick" | "reject" | null; a field left out is left alone
+    rating: Any = None                      # 0 to 5
+    label: Any = None                       # red | yellow | green | blue | purple | null
+
+
+class XmpReq(BaseModel):
+    ids: list[int] | None = None            # None: every marked item in the shoot
+# ===== end marks =====
+
+
 def _load_recent() -> list[str]:
     p = app_home() / RECENT_FILE
     if not p.is_file():
@@ -252,6 +280,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         "classify": {"running": False, "counts": {}, "discovered": {}, "error": None},
         "focus": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "places": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "fps": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "clipfaces": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
         "export_req": None,        # {route, body, root} of the running export, for the export history row at the end
         # Where exports land instead of export_root() (another disk), or None for the default.
@@ -261,6 +291,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         "export_lock": threading.Lock(),
         "focus_lock": threading.Lock(),
         "places_lock": threading.Lock(),
+        "fps_lock": threading.Lock(),
+        "clipfaces_lock": threading.Lock(),
     }
     app.state.photosort = state
 
@@ -333,7 +365,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     EMPTY_SCAN = dict(items=0, scanned=0, embedded=0, faced=0, errors=0, pending=0, pending_photos=0, pending_clips=0,
                       photos=0, clips=0, scanned_photos=0, scanned_clips=0, unembedded=0, complete=True,
-                      faces=True, interrupted=None)
+                      stale_embeds=0, embed_model=None, faces=True, interrupted=None)
 
     def _scan_block(conn) -> dict:
         """The scan: {items, scanned, embedded, faced, complete, ...counts, faces, interrupted}. faces is what
@@ -385,7 +417,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def _auto_classify(root_at_start: Path, stats: dict) -> None:
         """Categorise at the end of an index run that changed something. A classify failure is
         recorded on state["classify"] and never marks the index run itself as failed."""
-        if stats.get("indexed", 0) == 0 and stats.get("embedded", 0) == 0 and stats.get("faced", 0) == 0:
+        if stats.get("indexed", 0) == 0 and stats.get("embedded", 0) == 0 and stats.get("faced", 0) == 0 \
+                and stats.get("clip_faced", 0) == 0:
             return
         if state["classify"]["running"]:          # a manual Categorise is already on it
             return
@@ -413,17 +446,22 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         def prog(d):
             state["progress"] = d
         from .index import SourceUnavailable
-        t0 = time.time(); stats = {}; err = None
+        t0 = time.time(); stats = {}; err = None; saved = None
         try:
             with awake.hold():
                 stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
                 _auto_classify(root_at_start, stats)
+                saved = _autosave_project(root_at_start, stats.get("total", 0))
         except SourceUnavailable as e:
             # The disk went away: not a failure, a pause. What was scanned is kept; Continue does the rest
             # once the disk is back (the UI reads mounted from /api/stats).
             err = str(e)
             last = state["progress"] if isinstance(state["progress"], dict) else {}
-            state["progress"] = {"stage": "paused", "error": err, "done": last.get("done", 0), "total": last.get("total", 0)}
+            # Keep what the last emit carried (which step, which folder) and change only what the pause
+            # changes: where the pass stopped is the useful thing to show, and a fresh stage_started so
+            # the panel times the pause rather than the stage that was interrupted.
+            state["progress"] = dict(last, stage="paused", error=err, stage_started=time.time(),
+                                     done=last.get("done", 0), total=last.get("total", 0))
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             err = msg
@@ -438,7 +476,87 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 pass
             usage.log("index_done", shoot=root_at_start.name, items=stats.get("total", 0), indexed=stats.get("indexed", 0),
                       skipped=stats.get("skipped", 0), photos=kinds.get("photos"), videos=kinds.get("videos"), faces=faces,
-                      faced=stats.get("faced", 0), failures=stats.get("errors", 0), seconds=round(time.time() - t0, 1), error=err)
+                      faced=stats.get("faced", 0), failures=stats.get("errors", 0), seconds=round(time.time() - t0, 1), error=err,
+                      project_saved=bool(saved and not saved["error"]), project_error=saved["error"] if saved else None)
+
+    # ===== the project file follows the scan: written at the end of every scan that finished, where the
+    # preflight said it would go (the shoot folder, or the place picked when that could not hold it), with
+    # no click. A save that fails (the disk filled during a six-hour scan) is reported on the progress, never
+    # raised: the index itself lives in app_home and is untouched, so nothing is lost, and the UI offers the
+    # picker. The scan is still "running" while this writes, which keeps a manual Save and a folder switch
+    # out of the way until the file is in place. =====
+    def _autosave_project(root_at_start: Path, total: int) -> dict:
+        from . import bundle
+        dest = _scan_project_dir(root_at_start)
+        target = bundle.bundle_path(root_at_start, dest)
+        state["progress"] = {"stage": "save", "done": 0, "total": 0, "stage_started": time.time()}
+        out = {"path": str(target), "dir": str(dest), "error": None}
+        try:
+            bundle.export_bundle(root_at_start, dest, progress=lambda d: state["progress"].update(d))
+            _remember_project(root_at_start, target)
+        except Exception as e:
+            out["error"] = (e.strerror or str(e)) if isinstance(e, OSError) else f"{type(e).__name__}: {e}"
+        state["progress"] = {"stage": "done", "done": total, "total": total, "stage_started": time.time(), "project": out}
+        return out
+
+    def _scan_project_dir(root: Path) -> Path:
+        """Where a scan puts the project file: the folder it was last saved to or opened from, while that
+        folder is there, else the shoot folder itself. Never ~/Documents quietly: when the shoot folder
+        cannot hold the file the preflight stops and asks, so the person knows where their scan went."""
+        try:
+            conn = db.connect(root)
+            try:
+                remembered = db.get_meta(conn, "project_path")
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            remembered = None
+        if remembered and Path(remembered).parent.is_dir():
+            return Path(remembered).parent
+        return Path(root)
+
+    def _size(b: int) -> str:
+        """1.1 GB, or 111 MB under a GB: a card with 18 MB left should not read as "0.0 GB", nor a 111 MB
+        project file as "0.1 GB"."""
+        return f"{b / 1e9:.1f} GB" if b >= 1e9 else f"{b / 1e6:.0f} MB"
+
+    def _project_preflight(root: Path, dest: Path, need_file: int | None = None) -> dict | None:
+        """None when dest can take this shoot's project file, else {reason, message, dir, need_bytes,
+        free_bytes, detail}. reason "readonly": a real file could not be created there (bundle.probe_writable,
+        not os.access, which says yes on a read-only exFAT or a locked card). reason "space": the estimate for
+        every photo and clip in the folder (listed by name and size, nothing decoded) plus the headroom kept
+        beside it (bundle.project_headroom: a tenth of the file, 100 MB to 1 GiB) is more than the disk has."""
+        from . import bundle
+        from .walk import find_images
+        where = _disk_name(dest)
+        if not Path(dest).is_dir():
+            # the shoot's disk is not plugged in (or the remembered folder went away): say that, not ENOENT
+            return {"reason": "missing", "dir": str(dest), "need_bytes": None, "free_bytes": None, "detail": None,
+                    "message": f"{where} is not connected, so the project file cannot be saved there."}
+        why = bundle.probe_writable(dest)
+        if why:
+            return {"reason": "readonly", "dir": str(dest), "need_bytes": None, "free_bytes": None, "detail": why,
+                    "message": f"{where} cannot be written to ({why}), so the project file cannot be saved there."}
+        if need_file is None:
+            try:
+                files = find_images(root)
+            except OSError:
+                files = []
+            videos = sum(1 for f in files if f.is_video)
+            est = bundle.estimate_bytes(len(files) - videos, videos)
+            what = f"The project file for {len(files):,} items"
+        else:
+            est = int(need_file)                   # a Save knows the real size: the thumbs on this Mac
+            what = "The project file"
+        keep = bundle.project_headroom(est)
+        need = est + keep
+        free = shutil.disk_usage(dest).free
+        if need > free:
+            return {"reason": "space", "dir": str(dest), "need_bytes": need, "free_bytes": free, "detail": None,
+                    "message": f"{what} needs about {_size(need)} on {where} "
+                               f"(with {_size(keep)} kept free) and it has {_size(free)}."}
+        return None
+    # ===== end the project file follows the scan =====
 
     def ix() -> Index:
         if state["root"] is None:
@@ -451,6 +569,12 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     @app.get("/")
     def home():
         return FileResponse(UI / "index.html")
+
+    @app.get("/favicon.ico")
+    def favicon():
+        # browsers request this at the root whether or not a page declares an icon; without a
+        # route it 404s on every tab and usage.log records it as an api_error on no route at all
+        return FileResponse(UI / "favicon-32.png", media_type="image/png")
 
     @app.get("/ui/{name}")
     def ui(name: str):
@@ -573,6 +697,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             fix = "focus"                     # Continue for a focus pass is POST /api/focus, not a scan
         elif cut and cut["kind"] == "places":
             fix = "places"                    # and for a locations pass it is POST /api/places/read
+        elif cut and cut["kind"] == "fps":
+            fix = "fps"                       # and for a frame rate pass it is POST /api/fps/read
+        elif cut and cut["kind"] == "clipfaces":
+            fix = "clipfaces"                 # and for faces in clips it is POST /api/clipfaces/find
         elif new_on_disk:
             fix = "rescan"
         elif faces_pending:
@@ -582,16 +710,41 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         return dict(scan, on_disk=on_disk, new_on_disk=new_on_disk, faces_pending=faces_pending, mounted=mounted,
                     running=state["running"], fix=fix)
 
-    @app.get("/api/errors")
-    def errors():
-        if state["root"] is None:
-            return {"errors": []}
-        conn = db.connect(state["root"])
-        rows = conn.execute("SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel").fetchall()
-        return {"errors": [{"rel": r[0], "indexed_at": r[1]} for r in rows]}
+    # Enough folders to say where the failures are without turning the summary into the list it replaces.
+    FOLDER_SUMMARY_MAX = 20
 
-    @app.post("/api/index")
-    def start_index(req: IndexReq):
+    @app.get("/api/errors")
+    def errors(only: str | None = None):
+        """The files that could not be read, split into the ones this pass wrote down and the ones carried
+        over from an earlier one. That is the distinction the panel needs: 1,932 rows from a disk that
+        dropped out yesterday are not news and cannot be acted on until the pass ends, while one file
+        failing right now is live evidence the disk is playing up again, and is the earliest warning there
+        is. New is indexed_at at or after the scan job's started, both written by datetime('now').
+
+        {errors: [{rel, indexed_at, new}], since, n_new, n_old, total, folders}. only=new or only=old
+        filters the list; the counts and since always describe the whole set, so a panel polling for new
+        rows alone can still say how many are carried over. folders is the returned set counted by
+        directory, biggest first: "1,904 in .../FINAL JPG" says more than 1,904 filenames."""
+        if only not in (None, "", "new", "old"):
+            raise HTTPException(400, "only must be new or old")
+        if state["root"] is None:
+            return {"errors": [], "since": None, "n_new": 0, "n_old": 0, "total": 0, "folders": []}
+        conn = db.connect(state["root"])
+        since = (db.latest_jobs(conn).get("scan") or {}).get("started")
+        rows = [{"rel": r[0], "indexed_at": r[1], "new": bool(since and r[1] and r[1] >= since)}
+                for r in conn.execute("SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel")]
+        n_new = sum(1 for r in rows if r["new"])
+        out = [r for r in rows if only not in ("new", "old") or r["new"] == (only == "new")]
+        counts: dict[str, int] = {}
+        for r in out:
+            folder = r["rel"].rsplit("/", 1)[0] if "/" in r["rel"] else ""      # "" is the root of the shoot
+            counts[folder] = counts.get(folder, 0) + 1
+        folders = sorted(({"folder": k, "n": v} for k, v in counts.items()), key=lambda f: (-f["n"], f["folder"]))
+        return {"errors": out, "since": since, "n_new": n_new, "n_old": len(rows) - n_new,
+                "total": len(rows), "folders": folders[:FOLDER_SUMMARY_MAX]}
+
+    def _index_gates(req) -> bool:
+        """Every reason a scan cannot start now, raised; else the faces choice this scan runs with."""
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         if state["running"]:
@@ -602,6 +755,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             raise HTTPException(409, "cannot scan while the disk is being reorganised")
         if state["focus"]["running"]:
             raise HTTPException(409, "cannot scan while the focus check is running")
+        if state["fps"]["running"]:
+            raise HTTPException(409, "cannot scan while frame rates are being read")
+        if state["clipfaces"]["running"]:
+            raise HTTPException(409, "cannot scan while faces in clips are being found")
         faces = req.faces
         if req.resume:
             # Continue scan: the interrupted scan's own faces choice, so a scan started with faces off does
@@ -609,28 +766,128 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             faces = db.get_meta(db.connect(state["root"]), "scan_faces") != "0"
         if not state["root"].is_dir():
             raise HTTPException(409, f"{_disk_name(state['root'])} is not connected; plug it in first")
+        return faces
+
+    def _launch_index(req, faces: bool, project: str | None = None) -> dict:
         state["running"] = True
         state["progress"] = {"stage": "scan", "done": 0, "total": 0, "stage_started": time.time()}
         usage.log("index_start", shoot=state["root"].name, faces=faces, retry_errors=req.retry_errors, resume=req.resume)
         threading.Thread(target=_run, args=(state["root"], faces, req.retry_errors), daemon=True).start()
-        return {"started": True, "faces": faces}
+        return {"started": True, "faces": faces} if project is None else {"started": True, "faces": faces, "project": project}
+
+    @app.post("/api/index")
+    def start_index(req: IndexReq):
+        """Start a scan, after the project file's preflight: the place it will be written at the end (the shoot
+        folder, or the one picked for this shoot) must take a real write and have room for it. When it cannot,
+        nothing starts and the reply is {started: false, blocked: {reason, message, ...}}, a 200, because a full
+        or locked disk is a normal answer and not an error: the UI stops and asks where to keep the file, then
+        calls /api/index/choose (the picker) or /api/index/at (the path the picker hands over)."""
+        faces = _index_gates(req)
+        dest = _scan_project_dir(state["root"])
+        blocked = _project_preflight(state["root"], dest)
+        if blocked:
+            usage.log("index_blocked", reason=blocked["reason"])
+            return {"started": False, "faces": faces, "blocked": blocked}
+        return _launch_index(req, faces)
+
+    def _start_index_at(dest: Path, req) -> dict:
+        """The picked place for the project file: checked the same way as the preflight (a real write, room for
+        the estimate), then a skeleton project file is written there at once, before a single photo is read,
+        so a place that only looked writable fails now and not six hours from now. Only then is it remembered
+        for this shoot and the scan started. A folder inside the shoot is refused (the shoot folder itself is
+        fine). Every refusal is a 400 whose detail says why, and then nothing is remembered and no scan runs."""
+        from . import bundle
+        faces = _index_gates(req)
+        root = state["root"]
+        p = dest.expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"not a directory: {dest}")
+        p = p.resolve()
+        try:
+            bundle.bundle_path(root, p)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        blocked = _project_preflight(root, p)
+        if blocked:
+            raise HTTPException(400, blocked["message"])
+        try:
+            out = bundle.export_bundle(root, p, thumbs=False)
+        except OSError as e:
+            raise HTTPException(400, f"could not write the project file in {p}: {e.strerror or e}")
+        _remember_project(root, out, skeleton=True)
+        usage.log("project_location", same_disk=_disk_name(p) == _disk_name(root))
+        return _launch_index(req, faces, project=str(out))
+
+    @app.post("/api/index/at")
+    def start_index_at(req: IndexAtReq):
+        return _start_index_at(Path(req.path), req)
+
+    @app.post("/api/index/choose")
+    def start_index_choose(req: IndexReq):
+        """The blocking ask: the native folder picker (opening on ~/Documents, which is always writable), then
+        _start_index_at with the pick. 204 when the picker is cancelled, and then no scan runs."""
+        _index_gates(req)
+        start = Path.home() / "Documents"
+        if not start.is_dir():
+            start = Path.home()
+        quoted = str(start).replace("\\", "\\\\").replace('"', '\\"')
+        path_str = _run_picker(f'POSIX path of (choose folder with prompt "Where should the project file for this shoot go?" default location (POSIX file "{quoted}"))', "folder")
+        if path_str is None:
+            return Response(status_code=204)
+        return _start_index_at(Path(path_str), req)
+
+    # Every key index.notify() emits, defaulted here: a categorise, a pause and a crash set the progress
+    # too and none of them is a numbered step, so the panel reads one shape whoever wrote it.
+    PROGRESS_DEFAULTS = {"step": None, "steps": None, "current": None, "project": None,
+                         "substage": None, "substage_done": None, "substage_total": None,
+                         "substage_started": None, "rate": None, "eta_s": None}
 
     @app.get("/api/progress")
     def progress():
-        """The scan's progress plus running and awake (caffeinate is holding the Mac awake for a job)."""
-        return dict(state["progress"], running=state["running"], awake=awake.held())
+        """The scan's progress plus running and awake (caffeinate is holding the Mac awake for a job).
+        step of steps numbers the stages this pass will actually run (index.notify decides which); both
+        are None outside a scan, and for the terminal done. current is the file being read right now,
+        relative to the shoot root, or None for a stage that is not reading the disk. substage names the
+        sub-stage within embed (photos, clips, segments) with its own counter and start time, because an
+        item is one frame in the first, six to thirty in the second and usually none in the third. rate
+        (items per second of the running sub-stage) and eta_s (seconds left in the stage, priced per
+        sub-stage, see index.embed_eta) come with the embed stage only, and are None everywhere else."""
+        return dict(PROGRESS_DEFAULTS, **state["progress"], running=state["running"], awake=awake.held())
 
     def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
-                 hide_bad=0, hide_soft=0, fold=0, day=None, bbox=None) -> Filters:
+                 hide_bad=0, hide_soft=0, fold=0, day=None, bbox=None, shot_size=None, slowmo=0,
+                 camera=None, look=None, duration=None) -> Filters:
         if kind not in (None, "", "photos", "videos"):
             raise HTTPException(400, "kind must be photos or videos")
         if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             raise HTTPException(400, "day must be YYYY-MM-DD")
+        # "unknown" is a value the pass writes, so it is accepted here; a typo is refused rather than
+        # quietly matching nothing, which would look like a shoot with no wide shots in it.
+        if shot_size not in (None, "", *SHOT_SIZE_NAMES):
+            raise HTTPException(400, f"shot_size must be one of {', '.join(SHOT_SIZE_NAMES)}")
+        if look not in (None, "", *LOOKS):
+            raise HTTPException(400, f"look must be one of {', '.join(LOOKS)}")
+        if duration not in (None, "", *DURATION_KEYS):
+            raise HTTPException(400, f"duration must be one of {', '.join(DURATION_KEYS)}")
         box = _bbox(bbox)
         return Filters(sharp_min_pct=sharp, faces=faces or None, person_id=person, taken_from=taken_from,
                        taken_to=taken_to, day=day or None, bbox=box, category=category or None, kind=kind or None,
                        cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None,
+                       shot_size=shot_size or None, slowmo=True if slowmo else None,
+                       camera=camera or None, look=look or None, duration=duration or None,
                        hide_bad=bool(hide_bad), hide_soft=bool(hide_soft), fold=bool(fold))
+
+    # ===== marks: the flag / stars / label filters, laid over whatever _filters built =====
+    def _with_marks(f: Filters, flag: str | None = None, stars: int | None = None, label: str | None = None) -> Filters:
+        if flag not in (None, "", "pick", "reject", "none"):
+            raise HTTPException(400, "flag must be pick, reject or none")
+        if stars is not None and not 1 <= stars <= 5:
+            raise HTTPException(400, "stars must be 1 to 5")
+        if label not in (None, "", "none", *db.LABELS):
+            raise HTTPException(400, f"label must be one of {', '.join(db.LABELS)} or none")
+        f.flag = flag or None; f.stars_min = stars; f.label = label or None
+        return f
+    # ===== end marks =====
 
     def _bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
         """south,west,north,east as the map hands it over. A box may cross the date line (west > east), which
@@ -657,7 +914,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
                aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
-               bbox: str | None = None, sort: str | None = None, limit: int = 200, offset: int = 0):
+               bbox: str | None = None, shot_size: str | None = None, slowmo: int = 0,
+               camera: str | None = None, look: str | None = None, duration: str | None = None,
+               sort: str | None = None, limit: int = 200, offset: int = 0,
+               flag: str | None = None, stars: int | None = None, label: str | None = None):
         """Each result carries kind, duration and aerial, sure and confidence, and focus (None until the focus
         pass ran, else ok / soft / bad); with a category or cluster filter the sure ones come first, then the
         "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it).
@@ -672,20 +932,24 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         t0 = time.time()
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox), sort=sort)
+            rows = ix().query(text=q or None, image_id=image_id, filters=_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration), flag=flag, stars=stars, label=label), sort=sort)
         except LookupError as e:
             raise HTTPException(404, str(e))
         # The usage log keeps the query's length and first characters plus which filters were on; an empty
         # search (the grid's own reload) and a "Show more" page are not logged.
         filt = {k: v for k, v in dict(sharp=sharp, faces=faces, person=bool(person), taken_from=taken_from, taken_to=taken_to,
                                       day=day, bbox=bbox, category=category, kind=kind, cluster=cluster, sure_only=sure_only, aerial=aerial,
-                                      hide_bad=hide_bad, hide_soft=hide_soft, image_id=bool(image_id)).items() if v}
+                                      hide_bad=hide_bad, hide_soft=hide_soft, shot_size=shot_size, slowmo=slowmo,
+                                      camera=bool(camera), look=look, duration=duration,
+                                      image_id=bool(image_id)).items() if v}
+        filt.update({k: v for k, v in dict(flag=flag, stars=stars, label=label).items() if v})   # ===== marks =====
         if offset == 0 and (q or filt):
             usage.log("search", q=q or "", filters=filt, total=len(rows), ms=round((time.time() - t0) * 1000))
         # ===== search history: a search with text goes into the shoot's searches table with the filters it ran with =====
         if offset == 0 and q and q.strip():
             hist = {k: v for k, v in dict(sharp=sharp, faces=faces, person=person, category=category, kind=kind, cluster=cluster,
-                                          aerial=aerial, hide_bad=hide_bad, hide_soft=hide_soft).items() if v}
+                                          aerial=aerial, hide_bad=hide_bad, hide_soft=hide_soft, shot_size=shot_size,
+                                          slowmo=slowmo, camera=camera, look=look, duration=duration).items() if v}
             try:
                 db.record_search(db.connect(state["root"]), q, hist)
             except sqlite3.Error as e:
@@ -730,14 +994,109 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                    person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
                    category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
                    aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
-                   bbox: str | None = None, sort: str | None = None):
+                   bbox: str | None = None, shot_size: str | None = None, slowmo: int = 0,
+                   camera: str | None = None, look: str | None = None, duration: str | None = None, sort: str | None = None,
+                   flag: str | None = None, stars: int | None = None, label: str | None = None):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox), sort=_sort(sort))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration), flag=flag, stars=stars, label=label), sort=_sort(sort))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
+
+    # ===== search by an image that is not in the shoot: the file is dropped on the window, not indexed =====
+
+    async def _upload_bytes(request: Request) -> bytes:
+        """The request body, refused the moment it goes past UPLOAD_MAX_BYTES.
+
+        Content-Length is checked first so an obviously huge file is turned away before a byte of it is
+        read, and the running total is checked again while streaming because a chunked upload sends no
+        length at all and a lying one would otherwise be believed. The cap exists because this body is
+        held in memory: the app is a local server, but a local server is still something a stray script
+        can point a 4 GB file at."""
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > UPLOAD_MAX_BYTES:
+            raise HTTPException(413, f"that image is larger than {UPLOAD_MAX_BYTES // (1024 * 1024)} MB")
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > UPLOAD_MAX_BYTES:
+                raise HTTPException(413, f"that image is larger than {UPLOAD_MAX_BYTES // (1024 * 1024)} MB")
+        if not buf:
+            raise HTTPException(400, "no image in the request body")
+        return bytes(buf)
+
+    @app.post("/api/search/upload")
+    async def search_upload(request: Request, sharp: float | None = None, faces: str | None = None,
+                            person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
+                            category: str | None = None, kind: str | None = None, cluster: str | None = None,
+                            sure_only: int = 0, aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0,
+                            fold: int = 0, day: str | None = None, bbox: str | None = None,
+                            shot_size: str | None = None, slowmo: int = 0,
+                            camera: str | None = None, look: str | None = None, duration: str | None = None,
+                            limit: int = 200, offset: int = 0,
+                            flag: str | None = None, stars: int | None = None, label: str | None = None):
+        """Rank the shoot against an image that is not in it. The body is the image file itself (POST the
+        File straight from a drop zone; the Content-Type is ignored, the bytes decide), the filters are the
+        same query parameters /api/search takes, and results come back in the same shape, each row with
+        score = cosine similarity, so the grid renders them unchanged. embed_ms is what encoding the
+        dropped image cost, which is the whole cost of this route: scoring is one matrix product.
+
+        On top of results, the answer everyone actually came for (search.angles): cameras, the best match
+        from each camera ranked by score, so the page is a set of angles rather than a burst off whichever
+        body shot most; moment, the top match plus everything a different camera shot within window_s of
+        it; and unknown, the rows whose camera nobody recorded, kept apart because unknown is not a camera.
+
+        Nothing is written. The bytes are decoded from memory and dropped when the request ends."""
+        data = await _upload_bytes(request)
+        if state["root"] is None:
+            return {"results": [], "total": 0, "offset": 0, "limit": limit, "folded": 0, "embed_ms": 0,
+                    "cameras": [], "unknown": None, "moment": None, "window_s": ANGLE_WINDOW_S}
+        limit = max(1, min(limit, 1000)); offset = max(0, offset)
+        return await run_in_threadpool(
+            _upload_search, data,
+            _with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only,
+                                 aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration),
+                        flag=flag, stars=stars, label=label),
+            limit, offset)
+
+    def _upload_search(data: bytes, filters: Filters, limit: int, offset: int) -> dict:
+        """Decode, encode, score. Runs off the event loop because the loop is also serving the thumbnails
+        the grid is asking for while this runs.
+
+        Measured on the M1, one 12 MP JPEG: decode 55 ms, encode 70 ms on CPU and 47 ms on MPS, so a
+        warm answer is about an eighth of a second. Two costs are not in that number and are paid once
+        per run of the app: loading the weights, 3 to 5 s, and the first tensor op on MPS, which spends
+        another half second compiling Metal kernels. Scoring is M @ q, 1,627 x 768 floats, under a
+        millisecond, which is why this route reuses the index rather than building anything."""
+        from .decode import load_upload, DecodeError
+        from .embed import get_embedder
+        try:
+            im = load_upload(data)
+        except DecodeError as e:
+            # What PIL said goes to the log, not to the person: "cannot identify image file
+            # <_io.BytesIO object at 0x136f82840>" is true and useless on a drop zone. What they
+            # need is which files this takes.
+            usage.log("search_upload_rejected", bytes=len(data), why=str(e)[:200])
+            raise HTTPException(400, "not an image this app can read; drop a JPEG, PNG, HEIC, WEBP or TIFF still")
+        t0 = time.time()
+        vec = get_embedder().encode_images([im])[0]
+        embed_ms = round((time.time() - t0) * 1000)
+        try:
+            rows = ix().query(vector=vec, filters=filters)
+        except LookupError as e:
+            raise HTTPException(409, str(e))
+        folded = sum((r.get("group") or {}).get("n", 1) - 1 for r in rows) if filters.fold else 0
+        # Over every row, not the page: see search.angles on why the first page is the wrong input.
+        grouped = angles(rows)
+        usage.log("search_upload", bytes=len(data), total=len(rows), embed_ms=embed_ms,
+                  cameras=len(grouped["cameras"]),
+                  moment=len((grouped["moment"] or {}).get("others", [])))
+        return {"results": [dict(p) for p in rows[offset:offset + limit]], "total": len(rows),
+                "offset": offset, "limit": limit, "folded": folded, "embed_ms": embed_ms, **grouped}
+
+    # ===== end search by an uploaded image =====
 
     @app.get("/api/thumb/{qhash}")
     def thumb(qhash: str, size: str = "grid"):
@@ -1001,6 +1360,194 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         conn = db.connect(state["root"])
         return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn)}
 
+    @app.get("/api/facets")
+    def facets():
+        """The live numbers behind the facet rail, for the axes that are not categories.
+
+        shot_size: close / medium / wide / unknown, plus "unscored" for rows the pass has never seen
+        (an index from before the column, or a row with no embedding). unknown and unscored are two
+        different facts and the rail must be able to say which it has.
+        slowmo: {slow, normal, unknown} over the CLIPS of the shoot only. A still has no frame rate.
+        fps_read: index.fps_status, so the UI knows whether to offer the catch-up pass at all.
+        cameras: camera -> rows, stills and clips together, most used first.
+        look: {log, standard, unknown} over the clips (the picture profile off Sony's sidecar).
+        duration: config.DURATION_BUCKETS key -> clips.
+        clip_read: index.clip_info_status, the header and sidecar pass (fps_read is the same numbers
+        under the name v0.4.0 shipped). clip_faces: index.clip_faces_status, the faces-in-clips pass.
+        Camera motion (locked off versus moving): not here. classify.py records the measurement that says
+        a frame to frame difference over frames seconds apart cannot answer it, so there is no number to
+        show and inventing one would be worse than the greyed out tile."""
+        if state["root"] is None:
+            return {"shot_size": {}, "slowmo": {}, "fps_read": None, "cameras": {}, "look": {}, "duration": {},
+                    "clip_read": None, "clip_faces": None}
+        conn = db.connect(state["root"])
+        read = index.clip_info_status(state["root"])
+        return {"shot_size": db.shot_size_counts(conn), "slowmo": db.slowmo_counts(conn), "fps_read": read,
+                "cameras": db.camera_counts(conn), "look": db.look_counts(conn), "duration": db.duration_counts(conn),
+                "clip_read": read, "clip_faces": index.clip_faces_status(state["root"])}
+
+    # ===== marks: flags, stars and colour labels, set from the grid's keys and the inspector =====
+    @app.post("/api/marks")
+    def set_marks(req: MarksReq):
+        """Set any of flag, rating and label on ids in one write (a keystroke on a 200-tile selection is one call).
+        A field left out of the body is left alone; one sent as null is cleared. Returns the marks as stored."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if not req.ids:
+            raise HTTPException(400, "no items given")
+        given = {k: getattr(req, k) for k in ("flag", "rating", "label") if k in req.model_fields_set}
+        if not given:
+            raise HTTPException(400, "nothing to set: send flag, rating or label")
+        if "rating" in given and given["rating"] is None:
+            given["rating"] = 0
+        conn = db.connect(state["root"])
+        try:
+            db.set_marks(conn, req.ids, **given)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        marks = db.get_marks(conn, req.ids)
+        if state["index"] is not None:
+            state["index"].set_marks(marks)
+        usage.log("marks", n=len(req.ids), **given)
+        return {"marks": {str(k): v for k, v in marks.items()}}
+
+    @app.get("/api/marks/counts")
+    def mark_counts():
+        """The sidebar's numbers: flag {pick, reject, none}, stars {"1".."5": at least that many}, label, marked."""
+        if state["root"] is None:
+            return {"flag": {}, "stars": {}, "label": {}, "marked": 0}
+        return db.mark_counts(db.connect(state["root"]))
+
+    @app.post("/api/xmp")
+    def write_xmp_api(req: XmpReq):
+        """XMP sidecars on their own, under <destination>/<shoot>/xmp/ in the shoot's own folder layout, for the
+        originals (merge that folder over a copy of the cards). ids None: every marked item. Never in the shoot."""
+        from .export import write_xmp
+        root = state["root"]
+        if root is None:
+            raise HTTPException(400, "no folder open")
+        conn = db.connect(root)
+        ids = req.ids if req.ids is not None else [r[0] for r in conn.execute(
+            "SELECT id FROM photos WHERE status='ok' AND (flag IS NOT NULL OR COALESCE(rating, 0) > 0 OR label IS NOT NULL) ORDER BY id")]
+        if not ids:
+            raise HTTPException(400, "nothing is flagged, rated or labelled yet")
+        try:
+            out, n = write_xmp(root, ids, base=_resolve_base())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except OSError as e:
+            raise HTTPException(500, f"could not write the sidecars: {e.strerror or e}")
+        usage.log("xmp_written", **n)
+        return dict(n, path=str(out))
+    # ===== end marks =====
+
+    @app.post("/api/fps/read")
+    def start_fps():
+        """Read the frame rate of every ok clip that has none, from the container header. 409 while
+        indexing, categorising, checking focus, reading locations or exporting. {"started": true,
+        "total": n}. This is the one facet pass that needs the shoot disk plugged in; index.read_fps
+        says what it costs and why it is not a rescan."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        if state["running"]:
+            raise HTTPException(409, "cannot read frame rates while scanning")
+        if state["classify"]["running"]:
+            raise HTTPException(409, "cannot read frame rates while categorising")
+        if state["focus"]["running"]:
+            raise HTTPException(409, "cannot read frame rates while the focus pass is running")
+        if state["places"]["running"]:
+            raise HTTPException(409, "cannot read frame rates while locations are being read")
+        if state["export"]["running"]:
+            raise HTTPException(409, "cannot read frame rates while an export is running")
+        if state["clipfaces"]["running"]:
+            raise HTTPException(409, "cannot read frame rates while faces in clips are being found")
+        with state["fps_lock"]:
+            if state["fps"]["running"]:
+                raise HTTPException(409, "already reading frame rates")
+            root_at_start = state["root"]
+            total = index.fps_status(root_at_start)["unknown"]
+            state["fps"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def prog(d):
+            state["fps"].update(done=d.get("done", 0), total=d.get("total", total))
+
+        t0 = time.time()
+
+        def _run_fps():
+            try:
+                with awake.hold():
+                    state["fps"]["counts"] = index.read_fps(root_at_start, progress=prog)
+            except Exception as e:
+                state["fps"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True      # the search Index caches the fps column
+                state["fps"]["running"] = False
+                c = state["fps"]["counts"] or {}
+                usage.log("fps_read", found=c.get("found", 0), read=c.get("read", 0),
+                          missing=c.get("missing", 0), seconds=round(time.time() - t0, 1),
+                          error=state["fps"]["error"])
+
+        threading.Thread(target=_run_fps, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.get("/api/fps/progress")
+    def fps_progress():
+        """{running, done, total, counts, error, awake}; counts is {found, read, missing} once it ended."""
+        return dict(state["fps"], awake=awake.held())
+
+    @app.post("/api/clipfaces/find")
+    def start_clip_faces():
+        """Face detection on the frames already under the index for every clip that never had it
+        (index.find_clip_faces): no disk needed. When it ends the shot sizes are refreshed, because a clip's
+        face size is what tells its medium from its wide (classify.refine_shot_size). 409 while scanning,
+        categorising, checking focus, reading locations or frame rates, or exporting. {"started", "total"}."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        for key, what in (("running", "scanning"),):
+            if state[key]:
+                raise HTTPException(409, f"cannot find faces in clips while {what}")
+        for key, what in (("classify", "categorising"), ("focus", "the focus pass is running"),
+                          ("places", "locations are being read"), ("fps", "frame rates are being read"),
+                          ("export", "an export is running")):
+            if state[key]["running"]:
+                raise HTTPException(409, f"cannot find faces in clips while {what}")
+        with state["clipfaces_lock"]:
+            if state["clipfaces"]["running"]:
+                raise HTTPException(409, "already finding faces in clips")
+            root_at_start = state["root"]
+            total = index.clip_faces_status(root_at_start)["pending"]
+            state["clipfaces"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def prog(d):
+            state["clipfaces"].update(done=d.get("done", 0), total=d.get("total", total))
+
+        t0 = time.time()
+
+        def _run():
+            try:
+                with awake.hold():
+                    counts = index.find_clip_faces(root_at_start, progress=prog)
+                    if counts["read"] - counts["missing"] > 0:
+                        classify_mod.classify_shot_size(root_at_start)
+                    state["clipfaces"]["counts"] = counts
+            except Exception as e:
+                state["clipfaces"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True      # the search Index caches people, face_h and shot_size
+                state["clipfaces"]["running"] = False
+                c = state["clipfaces"]["counts"] or {}
+                usage.log("clip_faces", found=c.get("found", 0), read=c.get("read", 0),
+                          missing=c.get("missing", 0), seconds=round(time.time() - t0, 1),
+                          error=state["clipfaces"]["error"])
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.get("/api/clipfaces/progress")
+    def clip_faces_progress():
+        """{running, done, total, counts, error, awake}; counts is {found, read, missing} once it ended."""
+        return dict(state["clipfaces"], awake=awake.held())
+
     @app.get("/api/days")
     def days():
         """The shoot day by day, oldest first: {day, n, videos, bytes}. A file with no capture time counts on
@@ -1127,8 +1674,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     @app.get("/api/places")
     def places():
         """{clusters, located, unlocated, total, read_at, bounds}. clusters are 25 km piles, biggest first,
-        each with the box it covers so a click can filter to exactly it. bounds is the box around every
-        located file (null when nothing is located), which is where the map opens."""
+        each with the box it covers so a click can filter to exactly it, and with the name and country of
+        the nearest shipped city (both null when there is none within places.NAME_KM). One place is one
+        row: piles that resolve to the same city are merged, so a city on a grid edge is not two rows.
+        bounds is the box around every located file (null when nothing is located), where the map opens."""
         if state["root"] is None:
             return {"clusters": [], "located": 0, "unlocated": 0, "total": 0, "read_at": None, "bounds": None}
         st = places_mod.status(state["root"])
@@ -1205,11 +1754,14 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             raise HTTPException(400, "export destination is not mounted; plug that disk in or reset the destination")
         return base
 
-    def _check_free(need: int, base: Path, hint: str = "Use links, or export fewer photos.") -> None:
-        """400 when a copy of `need` bytes would leave less than EXPORT_HEADROOM on the disk holding base."""
+    def _check_free(need: int, base: Path, hint: str = "Use links, or export fewer photos.",
+                    headroom: int | None = None) -> None:
+        """400 when a copy of `need` bytes would leave less than `headroom` (EXPORT_HEADROOM unless given)
+        on the disk holding base. The project file passes bundle.project_headroom, so a Save is held to the
+        same floor as the scan's preflight and a card the scan accepted does not refuse the Save after it."""
         free = shutil.disk_usage(base).free
         where = "on this Mac" if _is_default_base(base) else "on that disk"
-        if need + EXPORT_HEADROOM > free:
+        if need + (EXPORT_HEADROOM if headroom is None else headroom) > free:
             raise HTTPException(400, f"copy needs {need / 1e9:.1f} GB but only {free / 1e9:.1f} GB is free {where}. {hint}")
 
     def _destination_info() -> dict:
@@ -1792,8 +2344,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     def _start_bundle_export(dest: Path | None, remember: bool = True, what: str = "bundle") -> dict:
         """Pack the open shoot's index into <dest>/sorted_<shoot>.sorted in the background.
-        dest None means the export destination. A dest that is the shoot root or inside it is refused
-        (bundle_path raises), as is one that is not a folder. remember False writes the file and nothing
+        dest None means the export destination. A dest inside the shoot root is refused (bundle_path
+        raises; the root itself is allowed, it is where the file lives by default), as is one that is not a folder. remember False writes the file and nothing
         else: the shoot's remembered folder and its last-saved stamp stay where they were (Save a copy)."""
         from . import bundle
         with state["export_lock"]:
@@ -1817,7 +2369,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 raise HTTPException(400, str(e))
             n_files = len(bundle.bundle_files(root_at_start))
             nbytes = bundle.bundle_bytes(root_at_start)
-            _check_free(nbytes, base, hint="Free some space there first.")
+            _check_free(nbytes, base, hint="Free some space there first.", headroom=bundle.project_headroom(nbytes))
             state["export"] = {"running": True, "done": 0, "total": n_files, "failed": 0, "skipped": 0, "path": None, "error": None, "what": what}
         t0 = _export_started(what, "local", n_files)
 
@@ -1847,15 +2399,18 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     # ===== the project file: sorted_<shoot>.sorted, saved to one remembered place (Save), or wherever
     # the picker says (Save to). The place is kept in the shoot's own index (project_path), so the next
     # Save, and the next Mac that loads the file, know where it lives. =====
-    def _remember_project(root: Path, path: Path, saved: bool = True) -> None:
+    def _remember_project(root: Path, path: Path, saved: bool = True, skeleton: bool = False) -> None:
         """saved False: the file was opened, not written; the save time inside it (the other Mac's) stands,
         and project_opened marks it, so the card says "opened from this file" instead of claiming this Mac
-        saved it. The next real save clears the mark."""
+        saved it. The next real save clears the mark. skeleton True: only the placeholder written before a
+        scan is there (bundle.export_bundle thumbs=False); the place is remembered but no save time is
+        claimed, so a scan whose save then fails does not leave the card saying "Saved"."""
         conn = db.connect(root)
         try:
             db.set_meta(conn, "project_path", str(path))
             db.set_meta(conn, "project_opened", "0" if saved else "1")
-            if saved:
+            db.set_meta(conn, "project_skeleton", "1" if skeleton else "0")
+            if saved and not skeleton:
                 db.set_meta(conn, "project_saved_at", time.strftime("%Y-%m-%d %H:%M:%S"))
         finally:
             conn.close()
@@ -1863,7 +2418,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def _project_info(root: Path) -> dict:
         """name: the file name for this shoot. path: where it was last saved or loaded from (None until then),
         exists: that file is there right now. dir: where Save writes next (the remembered folder, else the
-        default beside the shoot). saved_at: the last save on this Mac. opened: the remembered file was
+        shoot folder itself, see bundle.default_project_dir). saved_at: the last save on this Mac. opened: the remembered file was
         opened here, not written here, so saved_at (if any) came from the Mac that made it."""
         from . import bundle
         conn = db.connect(root)
@@ -1871,20 +2426,21 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             remembered = db.get_meta(conn, "project_path")
             saved_at = db.get_meta(conn, "project_saved_at")
             opened = db.get_meta(conn, "project_opened") == "1"
+            skeleton = db.get_meta(conn, "project_skeleton") == "1"
         finally:
             conn.close()
         rp = Path(remembered) if remembered else None
-        if rp is not None and rp.parent.is_dir():
-            d = rp.parent
-        else:
-            d = bundle.default_project_dir(root)
+        # The same place Save and the scan write to, so the card never names a folder the button would not
+        # use: the remembered folder while it is there, else the shoot folder (Save asks when that fails).
+        d = _scan_project_dir(root)
         try:
-            bundle.bundle_path(root, d)
-        except ValueError:
-            d = Path.home() / "Documents" / "sorted"
+            d = d.resolve()
+        except OSError:
+            pass
         return {"name": bundle.project_name(root), "path": str(rp) if rp else None,
                 "exists": bool(rp and rp.is_file()), "dir": str(d), "saved_at": saved_at,
-                "opened": bool(rp and opened), "default_dir": str(bundle.default_project_dir(root))}
+                "opened": bool(rp and opened), "skeleton": bool(rp and skeleton),
+                "default_dir": str(bundle.default_project_dir(root))}
 
     @app.get("/api/project")
     def get_project():
@@ -1894,15 +2450,21 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     @app.post("/api/project/save")
     def save_project():
-        """Save: the project file into its remembered folder (or the default beside the shoot), no picker.
-        The folder is created if need be."""
-        if state["root"] is None:
+        """Save: the project file into its remembered folder (or the shoot folder itself), no picker, after
+        the same checks a scan makes: a real write there and room for the file. When the place cannot take it
+        (a read-only or full disk, the disk unplugged) nothing is written and nothing is remembered; the reply
+        is {started: false, blocked} at 200, as /api/index does, and the UI asks for a place (Save to). Save
+        never falls back to ~/Documents on its own: a file the person did not choose a place for is a file
+        they cannot find."""
+        from . import bundle
+        root = state["root"]
+        if root is None:
             raise HTTPException(400, "no folder open")
-        d = Path(_project_info(state["root"])["dir"])
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise HTTPException(400, f"cannot create {d}: {e.strerror or e}")
+        d = _scan_project_dir(root)
+        blocked = _project_preflight(root, d, need_file=bundle.bundle_bytes(root))
+        if blocked:
+            usage.log("save_blocked", reason=blocked["reason"])
+            return {"started": False, "blocked": blocked}
         return _start_bundle_export(d)
 
     # ===== Save a copy: the same file written somewhere else, and nothing about the shoot moves. Save to
@@ -1919,6 +2481,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             return
         if picked == home:
             raise HTTPException(400, "that is the folder Save project already writes to; use Save project instead")
+        # The shoot folder is where the real project file lives by default; a copy there would take its name.
+        if picked == state["root"].resolve():
+            raise HTTPException(400, "a copy cannot go in the shoot folder; that is where the project file itself lives")
 
     @app.post("/api/bundle/copy")
     def copy_bundle_api(req: BundleExportReq):

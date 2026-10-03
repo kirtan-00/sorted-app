@@ -42,12 +42,26 @@ def test_export_bundle_writes_one_zip(tmp_path, tmp_path_factory):
 
 
 def test_export_bundle_refuses_out_dir_inside_the_shoot(tmp_path):
+    """A folder under the shoot is still refused, and refusing it creates nothing, not even the folder."""
     from photosort.bundle import export_bundle
     before = _three_photo_shoot(tmp_path)
-    for bad in [tmp_path, tmp_path / "sub"]:
+    for bad in [tmp_path / "sub", tmp_path / "sub" / "deeper"]:
         with pytest.raises(ValueError, match="inside the source folder"):
             export_bundle(tmp_path, bad)
     assert sorted(os.listdir(tmp_path)) == before
+
+
+def test_export_bundle_may_write_the_project_file_into_the_shoot_folder_itself(tmp_path):
+    """The one exception to the read-only shoot: sorted_<shoot>.sorted directly in the scanned folder, so it
+    travels on the disk. Exactly that file is added, no .part is left, and a second export replaces it in
+    place (a rescan overwrites cleanly) instead of stacking copies."""
+    from photosort.bundle import export_bundle, inspect_bundle
+    before = _three_photo_shoot(tmp_path)
+    z = export_bundle(tmp_path, tmp_path)
+    assert z == tmp_path / f"sorted_{tmp_path.name}.sorted" and inspect_bundle(z)["photos"] == 3
+    assert sorted(os.listdir(tmp_path)) == sorted(before + [z.name])
+    export_bundle(tmp_path, tmp_path)
+    assert sorted(os.listdir(tmp_path)) == sorted(before + [z.name])
 
 
 def test_inspect_bundle_rejects_a_zip_that_is_not_a_bundle(tmp_path, tmp_path_factory):
@@ -262,11 +276,58 @@ def test_project_name_and_default_dir(tmp_path, monkeypatch):
     shoot = tmp_path / "disk" / "NSG_26_Part 1"; shoot.mkdir(parents=True)
     assert project_name(shoot) == "sorted_NSG_26_Part 1.sorted"
     assert bundle_path(shoot, tmp_path / "x") == tmp_path / "x" / "sorted_NSG_26_Part 1.sorted"
-    # beside the shoot, in a "sorted" folder, when the parent can be written to
-    assert default_project_dir(shoot) == tmp_path / "disk" / "sorted"
-    # a parent we cannot write to: ~/Documents/sorted instead
+    assert bundle_path(shoot, shoot) == shoot / "sorted_NSG_26_Part 1.sorted"          # in the shoot folder itself
+    # the scanned folder itself, so the file travels with the disk
+    assert default_project_dir(shoot) == shoot.resolve()
+    # a folder that says it cannot be written: ~/Documents/sorted, the last resort
     monkeypatch.setattr("os.access", lambda p, m: False)
     assert default_project_dir(shoot, home=tmp_path / "home") == tmp_path / "home" / "Documents" / "sorted"
+    # and a folder that is not there at all (the disk is unplugged)
+    monkeypatch.undo()
+    assert default_project_dir(tmp_path / "gone", home=tmp_path / "home") == tmp_path / "home" / "Documents" / "sorted"
+
+
+def test_skeleton_project_file_has_the_database_and_no_jpegs(tmp_path, tmp_path_factory):
+    """thumbs=False: what a picked location gets before the scan starts. It opens like any project file and
+    says it is a skeleton."""
+    from photosort.bundle import export_bundle, inspect_bundle
+    _three_photo_shoot(tmp_path)
+    out = tmp_path_factory.mktemp("picked")
+    seen = []
+    z = export_bundle(tmp_path, out, progress=seen.append, thumbs=False)
+    with zipfile.ZipFile(z) as zf:
+        assert sorted(zf.namelist()) == ["bundle.json", "index.db"]
+    info = inspect_bundle(z)
+    assert info["skeleton"] is True and info["photos"] == 3
+    assert seen == [{"done": 0, "total": 0, "failed": 0}]
+    full = export_bundle(tmp_path, out)
+    assert full == z and "skeleton" not in inspect_bundle(z)          # the finished scan replaces it
+
+
+def test_estimate_is_above_the_measured_size():
+    """955 mixed items packed to 211 MB when measured; the estimate for 955 photos alone must clear that with
+    room to spare, and a clip costs more than a photo."""
+    from photosort.bundle import estimate_bytes
+    assert estimate_bytes(955, 0) > 1.5 * 211e6
+    assert estimate_bytes(0, 1) > estimate_bytes(1, 0) > 0
+    assert estimate_bytes(0, 0) == 0
+
+
+def test_probe_writable_really_writes_and_leaves_nothing(tmp_path, monkeypatch):
+    from photosort.bundle import probe_writable
+    assert probe_writable(tmp_path) is None and os.listdir(tmp_path) == []
+    assert probe_writable(tmp_path / "missing")                          # a reason, in words
+    # permissive bits, refusing volume: the shape of a read-only exFAT or a locked SD card. os.access says
+    # yes; only the write can tell.
+    import errno
+    real_open = os.open
+    def ro_open(path, flags, *a):
+        if str(path).startswith(str(tmp_path)) and flags & os.O_CREAT:
+            raise OSError(errno.EROFS, "Read-only file system")
+        return real_open(path, flags, *a)
+    monkeypatch.setattr(os, "open", ro_open)
+    assert os.access(tmp_path, os.W_OK)
+    assert probe_writable(tmp_path) == "Read-only file system"
 
 
 def test_legacy_name_still_opens(tmp_path, tmp_path_factory, monkeypatch):
@@ -280,3 +341,17 @@ def test_legacy_name_still_opens(tmp_path, tmp_path_factory, monkeypatch):
     assert inspect_bundle(legacy)["photos"] == 3
     home = tmp_path_factory.mktemp("home"); monkeypatch.setenv("PHOTOSORT_HOME", str(home))
     assert import_bundle(legacy).is_dir()
+
+
+def test_headroom_scales_with_the_shoot_and_caps_at_the_old_floor():
+    """A 24-photo card is asked for about 111 MB, not 1.1 GB; a big shoot keeps a tenth of a generous
+    estimate free, and from about 23k photos up the full 1 GiB it was always asked for."""
+    from photosort.bundle import estimate_bytes, project_headroom
+    small = estimate_bytes(24, 0)
+    assert project_headroom(small) == 100 * 1000 * 1000
+    assert 105e6 < small + project_headroom(small) < 115e6
+    mid = estimate_bytes(3000, 0)                     # 1.35 GB: a tenth of it
+    assert project_headroom(mid) == mid // 10
+    assert project_headroom(estimate_bytes(20000, 0)) > 900e6
+    assert project_headroom(estimate_bytes(25000, 0)) == 1 << 30
+    assert project_headroom(0) == 100 * 1000 * 1000

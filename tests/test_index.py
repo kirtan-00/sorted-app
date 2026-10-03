@@ -1,6 +1,7 @@
 import numpy as np
 from photosort.index import index_folder
 from photosort import db
+from photosort.config import EMBED_DIM
 
 def test_index_then_incremental(tmp_path):
     from conftest import make_image
@@ -18,7 +19,7 @@ def test_index_then_incremental(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([f"p{i}.jpg" for i in range(6)] + ["junk.jpg"])   # nothing written into the shoot
     sharp = [r["sharp"] for r in rows]
     assert min(sharp[:4]) > max(sharp[4:])
-    ids, M = db.load_embeds(conn); assert M.shape == (6, 512)
+    ids, M = db.load_embeds(conn); assert M.shape == (6, EMBED_DIM)
     s2 = index_folder(tmp_path, faces=True, workers=2)
     assert s2["skipped"] == 7 and s2["indexed"] == 0 and s2["errors"] == 0
 
@@ -126,6 +127,60 @@ def test_progress_carries_stage_start(tmp_path):
     feat = [d for d in seen if d["stage"] == "features"]
     assert feat and feat[0]["stage_started"] <= feat[-1]["stage_started"]
 
+def test_progress_numbers_the_steps_of_this_pass(tmp_path):
+    """Step 1 of 2 rather than the word Scanning twice. The first scan emit comes before the disk has been
+    listed, so it cannot know how many steps there are; every emit after the walk can."""
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    seen = []
+    index_folder(tmp_path, faces=False, workers=1, embed=False, progress=seen.append)
+    assert (seen[0]["stage"], seen[0]["step"], seen[0]["steps"]) == ("scan", None, None)
+    scan = [d for d in seen if d["stage"] == "scan"]
+    assert (scan[-1]["step"], scan[-1]["steps"], scan[-1]["total"]) == (1, 2, 1)
+    feat = [d for d in seen if d["stage"] == "features"]
+    assert feat and all((d["step"], d["steps"]) == (2, 2) for d in feat)
+    assert seen[-1]["stage"] == "done" and seen[-1]["step"] is None      # the end of the pass, not a step of it
+
+def test_the_step_count_only_counts_the_stages_this_pass_will_run(tmp_path):
+    """A faces-only pass over photos already read has no features stage at all, so faces is step 2 of 2 and
+    not step 3 of 4. Hardcoding the count in the UI would number it wrong on exactly this pass."""
+    from conftest import make_image
+    for i in range(2):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    seen = []
+    index_folder(tmp_path, faces=True, workers=1, embed=False, progress=seen.append)
+    faces = [d for d in seen if d["stage"] == "faces"]
+    assert faces and all((d["step"], d["steps"]) == (2, 2) for d in faces)
+    assert not [d for d in seen if d["stage"] == "features"]
+
+def test_progress_says_which_file_is_being_read(tmp_path):
+    """On a client card with a dozen top-level folders, "392 of 644" does not say where it is. The rel path
+    of the file in flight rides along, so the panel can name the folder being read."""
+    from conftest import make_image
+    deep = tmp_path / "SHIVALIK FURNITURE DEALEARS MEET (06-08-2026)" / "FINAL JPG"
+    deep.mkdir(parents=True)
+    make_image(deep, "DSC01158.jpg")
+    seen = []
+    index_folder(tmp_path, faces=False, workers=1, embed=False, progress=seen.append)
+    feat = [d for d in seen if d["stage"] == "features"]
+    assert [d["current"] for d in feat] == ["SHIVALIK FURNITURE DEALEARS MEET (06-08-2026)/FINAL JPG/DSC01158.jpg"]
+    assert all(d["current"] is None for d in seen if d["stage"] in ("scan", "done"))
+    seen.clear()
+    index_folder(tmp_path, faces=True, workers=1, embed=False, progress=seen.append)   # the faces-only pass
+    faces = [d for d in seen if d["stage"] == "faces"]
+    assert faces and all(d["current"].endswith("DSC01158.jpg") for d in faces)
+
+def test_an_enormous_path_is_cut_from_the_left(tmp_path):
+    """The tail identifies the file, so a path too long to carry loses its head, not its tail. A guard
+    against one pathological path, not the display rule: the UI elides to whatever width it has."""
+    from photosort.index import _short_rel, CURRENT_MAX
+    assert _short_rel(None) is None and _short_rel("a/b.jpg") == "a/b.jpg"
+    deep = "/".join(["SHIVALIK FURNITURE DEALEARS MEET (06-08-2026)"] * 4) + "/FINAL JPG/DSC01158.jpg"
+    cut = _short_rel(deep)
+    assert len(cut) <= CURRENT_MAX and cut.startswith("\u2026/") and cut.endswith("/FINAL JPG/DSC01158.jpg")
+    assert len(_short_rel("x" * 400 + ".jpg")) <= CURRENT_MAX          # no component boundary to cut on
+
 def test_transient_error_keeps_the_old_row_intact(tmp_path):
     """A photo that indexed fine, then fails to read on a later pass (disk hiccup, corrupt re-copy):
     the row flips to error but keeps its qhash, embed and category so a retry does not re-decode
@@ -193,15 +248,37 @@ def test_index_video_embeds_the_clip_and_its_segments(tmp_path, tmp_path_factory
     assert s["indexed"] == 1 and s["embedded"] >= 1
     conn = db.connect(tmp_path)
     ids, M = db.load_embeds(conn)
-    assert M.shape == (1, 512) and abs(float(np.linalg.norm(M[0])) - 1.0) < 1e-2
+    assert M.shape == (1, EMBED_DIM) and abs(float(np.linalg.norm(M[0])) - 1.0) < 1e-2
     seg_ids, S = db.load_segment_embeds(conn)
-    assert S.shape == (2, 512) and all(abs(float(np.linalg.norm(S[i])) - 1.0) < 1e-2 for i in range(2))
+    assert S.shape == (2, EMBED_DIM) and all(abs(float(np.linalg.norm(S[i])) - 1.0) < 1e-2 for i in range(2))
     assert conn.execute("SELECT count(*) FROM segments WHERE embed IS NULL").fetchone()[0] == 0
     # the whole-clip embedding is the mean of its frames, so it sits between the two scenes
     assert float(S[0] @ M[0]) > 0.5 and float(S[1] @ M[0]) > 0.5
     s2 = index_folder(tmp_path, faces=False, workers=1, embed=True)
     assert s2["embedded"] == 0
 
+
+def test_the_embed_stage_names_its_three_sub_stages(tmp_path, tmp_path_factory):
+    """A clip's vector is the mean of every sampled frame, about eight encodes with a commit each, while
+    the photos and segments on either side of it go through EMBED_BATCH. The rate drops about seven times
+    in the middle of one stage and recovers at the end. Named, that reads as a different kind of work;
+    unnamed, as on the GT 1 TB scan, it reads as a hang."""
+    from conftest import make_image, make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    make_image(tmp_path, "a.jpg")
+    make_video(tmp_path / "clip.mp4", scenes=2, work=tmp_path_factory.mktemp("work"))
+    seen = []
+    index_folder(tmp_path, faces=False, workers=1, embed=True, progress=seen.append)
+    emb = [d for d in seen if d["stage"] == "embed"]
+    assert [d["substage"] for d in emb] == ["photos", "clips", "segments"]
+    assert [(d["substage_done"], d["substage_total"]) for d in emb] == [(1, 1), (1, 1), (2, 2)]
+    # each sub-stage times itself, so an estimate can be made from the rate of the work actually running
+    assert emb[0]["substage_started"] <= emb[1]["substage_started"] <= emb[2]["substage_started"]
+    assert [d["done"] for d in emb] == [1, 2, 4] and all(d["total"] == 4 for d in emb)
+    assert all(d["substage"] is None and d["substage_started"] is None
+               for d in seen if d["stage"] != "embed")
 
 def test_video_without_ffmpeg_is_an_error_row_not_a_crash(tmp_path, tmp_path_factory, monkeypatch):
     from conftest import make_video, needs_ffmpeg
@@ -247,7 +324,7 @@ def test_scan_lists_pending_rows_and_counts_track_each_stage(tmp_path):
     conn = db.connect(tmp_path)
     assert db.scan_counts(conn) == dict(items=0, scanned=0, embedded=0, faced=0, errors=0, pending=0, pending_photos=0,
                                         pending_clips=0, photos=0, clips=0, scanned_photos=0, scanned_clips=0,
-                                        unembedded=0, complete=True)
+                                        unembedded=0, complete=True, stale_embeds=0, embed_model=None)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = db.scan_counts(conn)
     assert (c["items"], c["scanned"], c["embedded"], c["faced"], c["pending"], c["unembedded"], c["complete"]) == (3, 3, 0, 0, 0, 3, False)
@@ -346,3 +423,222 @@ def test_raw_twins_are_recorded_never_opened(tmp_path):
     assert len(rows) == 12 and all(r.endswith(".JPG") for r in rows)
     assert rows["same/DSC00001.JPG"] == "same/DSC00001.ARW"
     assert rows["day1/JPG/DSC00002.JPG"] == "day1/RAW/DSC00002.ARW" and rows["day2/JPG/DSC00002.JPG"] == "day2/RAW/DSC00002.ARW"
+
+
+def test_index_stores_the_clips_frame_rate(tmp_path, tmp_path_factory):
+    """probe() has always computed fps and the row used to drop it. A still gets NULL: a frame rate is
+    not a thing a still has, so it is absent rather than zero. The scan also stamps FPS_READ_KEY, so a
+    shoot indexed by this version is never offered the catch-up pass."""
+    from conftest import make_image, make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort.index import CLIP_READ_KEY, FPS_READ_KEY, fps_status
+    make_image(tmp_path, "a.jpg", seed=1)
+    make_video(tmp_path / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    rows = {r["rel"]: r["fps"] for r in conn.execute("SELECT rel, fps FROM photos")}
+    assert rows["a.jpg"] is None
+    assert rows["clip.mp4"] == 10.0            # conftest.make_video writes testsrc at rate=10
+    assert db.get_meta(conn, FPS_READ_KEY) is not None
+    assert fps_status(tmp_path) == {"clips": 1, "known": 1, "unknown": 0,
+                                    "read_at": db.get_meta(conn, CLIP_READ_KEY)}
+    assert db.slowmo_counts(conn) == {"slow": 0, "normal": 1, "unknown": 0}
+
+
+def test_read_fps_backfills_an_index_that_has_none(tmp_path, tmp_path_factory):
+    """The client's path: 1,140 clips already indexed, fps NULL on every one of them, and nobody is
+    going to rescan. read_fps reads the container header and nothing else, so no thumb, frame or
+    embedding is touched and the pass can be run again safely."""
+    from conftest import make_image, make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort.index import CLIP_READ_KEY, FPS_READ_KEY, fps_status, read_fps
+    make_image(tmp_path, "a.jpg", seed=1)
+    make_video(tmp_path / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    idx = db.index_dir(tmp_path)
+    # back to the state of an index written before the column existed
+    conn.execute("UPDATE photos SET fps=NULL"); conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (FPS_READ_KEY, CLIP_READ_KEY))
+    conn.commit()
+    thumbs = sorted(p.name for p in (idx / "thumbs").iterdir())
+    frames = sorted(p.name for p in (idx / "frames").iterdir())
+    assert fps_status(tmp_path) == {"clips": 1, "known": 0, "unknown": 1, "read_at": None}
+
+    seen = []
+    assert read_fps(tmp_path, progress=lambda d: seen.append(dict(d))) == {"found": 1, "read": 1, "missing": 0}
+    conn2 = db.connect(tmp_path)
+    assert conn2.execute("SELECT fps FROM photos WHERE rel='clip.mp4'").fetchone()[0] == 10.0
+    assert conn2.execute("SELECT fps FROM photos WHERE rel='a.jpg'").fetchone()[0] is None
+    assert db.get_meta(conn2, FPS_READ_KEY) is not None
+    assert seen and seen[-1] == {"stage": "fps", "done": 1, "total": 1}
+    # nothing under the index moved, and the shoot folder still holds only what it came with
+    assert sorted(p.name for p in (idx / "thumbs").iterdir()) == thumbs
+    assert sorted(p.name for p in (idx / "frames").iterdir()) == frames
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.jpg", "clip.mp4"]
+    # idempotent: a second run has nothing to do rather than re-probing
+    assert read_fps(tmp_path) == {"found": 0, "read": 0, "missing": 0}
+
+
+def test_read_fps_counts_a_clip_that_is_not_on_the_disk_as_missing(tmp_path):
+    """Half the shoot unplugged must not turn into a row that says "this clip has no frame rate". It
+    stays NULL and is counted missing, so running the pass again with the disk mounted finishes it."""
+    from photosort.index import read_fps
+    conn = db.connect(tmp_path)
+    db.upsert_photo(conn, dict(rel="gone.mp4", size=1, mtime=1.0, qhash="h", sibling=None, width=1920,
+                               height=1080, taken_at=None, camera=None, phash="0" * 16, sharp_tile=1.0,
+                               sharp_max=1.0, sharp_eye=None, sharp=1.0, n_faces=0, status="ok",
+                               kind="video", duration=3.0))
+    conn.commit()
+    assert read_fps(tmp_path) == {"found": 0, "read": 1, "missing": 1}
+    assert db.connect(tmp_path).execute("SELECT fps FROM photos").fetchone()[0] is None
+    # nothing was reachable, so nothing was read: the offer stays up for when the disk is plugged in
+    from photosort.index import clip_info_status
+    assert clip_info_status(tmp_path)["read_at"] is None
+
+
+# ===== clip facts: Sony's sidecar at scan time and in the catch-up, faces on the frames already on the Mac =====
+def _sony_clip(tmp_path, work, stem="C0001", gamma="s-log3-cine", capture="100p"):
+    from conftest import make_video
+    from test_video import SONY_XML_FULL
+    make_video(tmp_path / f"{stem}.MP4", scenes=1, work=work)
+    (tmp_path / f"{stem}M01.XML").write_text(SONY_XML_FULL.format(gamma=gamma, capture=capture))
+
+
+def test_index_reads_the_sony_sidecar_for_camera_profile_and_capture_rate(tmp_path, tmp_path_factory):
+    """Sony puts no make or model in the container, so the sidecar is where the body comes from; the
+    profile and the S&Q capture rate ride in the same 64 KB read. A clip with no sidecar gets gamma ''
+    (looked for, nothing there), which is why the catch-up pass has nothing to offer a fresh scan."""
+    from conftest import make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort.index import CLIP_READ_KEY, clip_info_status
+    work = tmp_path_factory.mktemp("work")
+    _sony_clip(tmp_path, work)
+    make_video(tmp_path / "phone.mp4", scenes=1, work=work)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    rows = {r["rel"]: dict(r) for r in conn.execute("SELECT rel, camera, gamma, capture_fps, fps, people, face_h FROM photos")}
+    assert rows["C0001.MP4"]["camera"] == "SONY ILCE-7SM3"
+    assert rows["C0001.MP4"]["gamma"] == "s-log3-cine" and rows["C0001.MP4"]["capture_fps"] == 100.0
+    assert rows["phone.mp4"]["gamma"] == "" and rows["phone.mp4"]["camera"] is None
+    assert rows["phone.mp4"]["people"] is None and rows["phone.mp4"]["face_h"] is None     # faces were off
+    assert db.slowmo_counts(conn)["slow"] == 1                       # 10 fps in the container, 100 captured
+    assert db.look_counts(conn) == {"log": 1, "standard": 0, "unknown": 1}
+    assert clip_info_status(tmp_path) == {"clips": 2, "known": 2, "unknown": 0, "read_at": db.get_meta(conn, CLIP_READ_KEY)}
+
+
+def test_read_clip_info_backfills_profile_and_camera_without_touching_the_index_folders(tmp_path, tmp_path_factory):
+    """The client's shoots were read before any of this; the header pass fills the profile, the capture
+    rate and an empty camera from the sidecar, keeps a camera the row already has, and stamps its own key,
+    so a shoot that already ran v0.4.0's frame rate read is still offered it."""
+    from conftest import needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort.index import CLIP_READ_KEY, FPS_READ_KEY, clip_info_status, read_clip_info
+    work = tmp_path_factory.mktemp("work")
+    _sony_clip(tmp_path, work, "C0001")
+    _sony_clip(tmp_path, work, "C0002", gamma="rec709", capture="25p")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE photos SET gamma=NULL, capture_fps=NULL, camera=NULL WHERE rel='C0001.MP4'")
+    conn.execute("UPDATE photos SET gamma=NULL, camera='kept' WHERE rel='C0002.MP4'")
+    conn.execute("DELETE FROM meta WHERE key=?", (CLIP_READ_KEY,)); conn.commit()
+    assert db.get_meta(conn, FPS_READ_KEY) is not None               # the v0.4.0 read already ran
+    assert clip_info_status(tmp_path) == {"clips": 2, "known": 0, "unknown": 2, "read_at": None}
+    idx = db.index_dir(tmp_path)
+    before = sorted(p.name for p in (idx / "frames").iterdir())
+    assert read_clip_info(tmp_path) == {"found": 0, "read": 2, "missing": 0}      # fps was already in
+    rows = {r["rel"]: tuple(r)[1:] for r in db.connect(tmp_path).execute("SELECT rel, camera, gamma, capture_fps FROM photos")}
+    assert rows == {"C0001.MP4": ("SONY ILCE-7SM3", "s-log3-cine", 100.0), "C0002.MP4": ("kept", "rec709", 25.0)}
+    assert clip_info_status(tmp_path)["unknown"] == 0 and clip_info_status(tmp_path)["read_at"]
+    assert sorted(p.name for p in (idx / "frames").iterdir()) == before
+    assert read_clip_info(tmp_path) == {"found": 0, "read": 0, "missing": 0}
+
+
+class _StubFace:
+    def __init__(self, h, x=0):
+        self.x, self.y, self.w, self.h, self.score = x, 0, h, h, 0.9
+        self.embed = np.ones(128, np.float32) / np.sqrt(128)
+
+
+def test_clip_face_summary_takes_medians():
+    """people: the median per-frame count over every frame, rounded down; face_h: the median over the frames
+    with a face of the largest face's share of the frame's short edge."""
+    from photosort.index import clip_face_summary
+    F = _StubFace
+    per = [[F(60), F(20)], [F(48)], [], [F(72), F(10), F(5)], [F(54)]]
+    assert clip_face_summary(per, [240] * 5) == (1, round(float(np.median([60, 48, 72, 54])) / 240, 4))
+    assert clip_face_summary([[], [], [F(30)]], [240] * 3) == (0, 0.125)
+    assert clip_face_summary([[], []], [240, 240]) == (0, None)
+
+
+def test_a_vertical_clip_measures_its_faces_against_the_width(monkeypatch):
+    """A waist up shot on a vertical phone clip puts the face at half the share of the height it would have in
+    landscape; measured against the short edge, the same framing reads the same either way round."""
+    from PIL import Image
+    from photosort import index as I
+    class Eng:
+        def detect(self, im): return [_StubFace(270)]
+    monkeypatch.setattr(I, "_ENGINE", Eng())
+    people, face_h, rows = I._clip_faces([Image.new("RGB", (1080, 1920)), Image.new("RGB", (1920, 1080))])
+    assert (people, face_h) == (1, 0.25) and [r["frame"] for r in rows] == [0, 1]
+
+
+def test_find_clip_faces_runs_on_the_frames_on_the_mac_with_the_shoot_unplugged(tmp_path, tmp_path_factory, monkeypatch):
+    """No disk: the pass reads frames/ under the index. Every frame of the stub clip has one face a quarter of
+    the frame tall, so the clip is one person at face_h 0.25, and its faces are kept per frame for a person
+    search later. people NULL is the only thing that marks a clip as still to do, so a second run is a no-op."""
+    from conftest import make_video, needs_ffmpeg
+    import pytest, shutil
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort import index as I
+    shoot = tmp_path / "shoot"; shoot.mkdir()
+    make_video(shoot / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    index_folder(shoot, faces=False, workers=1, embed=False)
+    class Eng:
+        def detect(self, im): return [_StubFace(im.height // 4)]
+    monkeypatch.setattr(I, "_ENGINE", Eng())
+    assert I.clip_faces_status(shoot) == {"clips": 1, "scanned": 0, "pending": 1}
+    shutil.move(str(shoot), str(tmp_path / "unplugged"))           # the disk is gone; the frames are not
+    try:
+        assert I.find_clip_faces(shoot) == {"found": 1, "read": 1, "missing": 0}
+    finally:
+        shutil.move(str(tmp_path / "unplugged"), str(shoot))
+    conn = db.connect(shoot)
+    r = conn.execute("SELECT id, people, face_h, n_faces FROM photos").fetchone()
+    assert (r["people"], r["face_h"], r["n_faces"]) == (1, 0.25, 0)  # n_faces stays 0: classify's face rule never sees a clip
+    n_frames = len(list((db.index_dir(shoot) / "frames").glob("*.jpg")))
+    assert conn.execute("SELECT count(*), count(DISTINCT frame) FROM clip_faces WHERE photo_id=?", (r["id"],)).fetchone()[:] == (n_frames, n_frames)
+    assert I.clip_faces_status(shoot) == {"clips": 1, "scanned": 1, "pending": 0}
+    assert I.find_clip_faces(shoot) == {"found": 0, "read": 0, "missing": 0}
+
+
+def test_a_scan_with_faces_on_catches_up_old_clips_last(tmp_path, tmp_path_factory, monkeypatch):
+    """An unchanged clip with people NULL gets the clip faces stage as the last step of a faces-on scan, and
+    the stage is in the step count; a scan with faces off never runs it."""
+    from conftest import make_video, needs_ffmpeg
+    import pytest
+    if needs_ffmpeg.args[0]:
+        pytest.skip("ffmpeg not installed")
+    from photosort import index as I
+    make_video(tmp_path / "clip.mp4", scenes=1, work=tmp_path_factory.mktemp("work"))
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    seen = []
+    index_folder(tmp_path, faces=False, workers=1, embed=False, progress=seen.append)
+    assert not [d for d in seen if d["stage"] == "clipfaces"]
+    class Eng:
+        def detect(self, im): return []
+    monkeypatch.setattr(I, "_ENGINE", Eng())
+    seen = []
+    s = index_folder(tmp_path, faces=True, workers=1, embed=False, progress=seen.append)
+    cf = [d for d in seen if d["stage"] == "clipfaces"]
+    assert cf and cf[-1]["done"] == 1 and all((d["step"], d["steps"]) == (2, 2) for d in cf)
+    assert s["clip_faced"] == 1
+    assert db.connect(tmp_path).execute("SELECT people, face_h FROM photos").fetchone()[:] == (0, None)

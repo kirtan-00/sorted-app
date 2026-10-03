@@ -115,6 +115,16 @@ def test_ui_unknown_static_file_404s(tmp_path):
     assert c.get("/ui/does-not-exist.js").status_code == 404
 
 
+def test_favicon_ico_is_served_so_the_bare_browser_request_does_not_404(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/favicon.ico")
+    assert r.status_code == 200
+    assert "image/png" in r.headers["content-type"]
+
+
 def test_search_after_reindex_and_person_filter_dont_500(tmp_path):
     """Index() opens its sqlite connection on the thread that builds the app; FastAPI
     runs sync endpoints in a worker thread. refresh() and person-filtered search must
@@ -465,6 +475,38 @@ def test_errors_listed_and_retryable(tmp_path):
     assert c.get("/api/stats").json()["errors"] == 1          # unchanged file, not retried by default
     assert c.post("/api/index", json={"faces": False, "retry_errors": True}).json()["started"]; _wait_idle(c)
     assert c.get("/api/stats").json()["errors"] == 0
+
+
+def test_errors_split_new_from_carried_over(tmp_path):
+    """The real shoot ended with 1,933 error rows, 1,932 of them written when the SSD dropped out on an
+    earlier pass and one that failed mid-pass. The panel has to be able to stay quiet about the 1,932 while
+    still reporting the one, so the endpoint stamps each row against the scan job it belongs to."""
+    from photosort import db
+    c = _shoot_client(tmp_path, n=3)
+    conn = db.connect(tmp_path)
+    conn.execute("UPDATE jobs SET started='2026-09-24 12:30:00' WHERE kind='scan'")
+    for rel, at, into in (("p0.jpg", "2026-09-24 12:06:50", "SHIVALIK/FINAL JPG/p0.jpg"),
+                          ("p1.jpg", "2026-09-24 12:06:50", "SHIVALIK/FINAL JPG/p1.jpg"),
+                          ("p2.jpg", "2026-09-24 13:19:45", "p2.jpg")):
+        conn.execute("UPDATE photos SET status='error', indexed_at=?, rel=? WHERE rel=?", (at, into, rel))
+    conn.commit()
+    d = c.get("/api/errors").json()
+    assert (d["total"], d["n_new"], d["n_old"], d["since"]) == (3, 1, 2, "2026-09-24 12:30:00")
+    assert [r["new"] for r in d["errors"]] == [False, False, True]        # ordered by rel, as it always was
+    assert d["folders"] == [{"folder": "SHIVALIK/FINAL JPG", "n": 2}, {"folder": "", "n": 1}]
+    fresh = c.get("/api/errors", params={"only": "new"}).json()
+    assert [r["rel"] for r in fresh["errors"]] == ["p2.jpg"]
+    assert (fresh["n_new"], fresh["n_old"]) == (1, 2)                     # the counts describe the whole set
+    stale = c.get("/api/errors", params={"only": "old"}).json()
+    assert len(stale["errors"]) == 2 and not any(r["new"] for r in stale["errors"])
+    assert c.get("/api/errors", params={"only": "sideways"}).status_code == 400
+    # An index with no scan job at all (an imported bundle, a shoot from an older version): nothing can be
+    # called new, which is the quiet answer rather than a panel that shouts about every old failure.
+    conn.execute("DELETE FROM jobs"); conn.commit()
+    q = c.get("/api/errors").json()
+    assert q["since"] is None and (q["n_new"], q["n_old"]) == (0, 3)
+    assert TestClient(create_app(None)).get("/api/errors").json() == {
+        "errors": [], "since": None, "n_new": 0, "n_old": 0, "total": 0, "folders": []}
 
 
 def test_search_by_category(tmp_path):
@@ -1267,15 +1309,15 @@ def test_bundle_export_409_while_busy_and_preflight(tmp_path, tmp_path_factory, 
 
 
 def test_bundle_export_dest_lands_there_and_refuses_the_shoot(tmp_path, tmp_path_factory):
-    """Save scan file anywhere: {dest} picks the folder; the shoot root, anything under it, and a
-    non-folder are refused before anything runs."""
+    """Save scan file anywhere: {dest} picks the folder; a folder inside the shoot and a non-folder are
+    refused before anything runs. (The shoot folder itself is allowed, see the test after this one.)"""
     from photosort.bundle import inspect_bundle
     c = _shoot_client(tmp_path, n=2)
+    (tmp_path / "sub").mkdir()
     before = sorted(os.listdir(tmp_path))
-    r = c.post("/api/bundle/export", json={"dest": str(tmp_path)})
-    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
     r = c.post("/api/bundle/export", json={"dest": str(tmp_path / "sub")})
-    assert r.status_code == 400
+    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
+    assert os.listdir(tmp_path / "sub") == []
     r = c.post("/api/bundle/export", json={"dest": str(tmp_path_factory.mktemp("x") / "missing")})
     assert r.status_code == 400 and "not a directory" in r.json()["detail"]
     assert c.get("/api/export/progress").json()["running"] is False
@@ -1291,6 +1333,22 @@ def test_bundle_export_dest_lands_there_and_refuses_the_shoot(tmp_path, tmp_path
     assert sorted(os.listdir(tmp_path)) == before
 
 
+def test_bundle_export_into_the_shoot_folder_itself_writes_only_the_project_file(tmp_path):
+    """The one write a shoot folder ever gets: sorted_<shoot>.sorted directly in it, remembered as where the
+    project lives, and nothing else added."""
+    from photosort.bundle import inspect_bundle
+    c = _shoot_client(tmp_path, n=2)
+    before = sorted(os.listdir(tmp_path))
+    r = c.post("/api/bundle/export", json={"dest": str(tmp_path)})
+    assert r.status_code == 200, r.text
+    p = _wait_export(c)
+    z = Path(p["path"])
+    assert p["error"] is None and z == tmp_path.resolve() / f"sorted_{tmp_path.resolve().name}.sorted"
+    assert inspect_bundle(z)["photos"] == 2
+    assert sorted(os.listdir(tmp_path)) == sorted(before + [z.name])
+    assert c.get("/api/project").json()["path"] == str(z)
+
+
 def test_bundle_export_choose_runs_the_picker_then_exports(tmp_path, tmp_path_factory, monkeypatch):
     import subprocess as sp
     c = _shoot_client(tmp_path, n=1)
@@ -1301,8 +1359,8 @@ def test_bundle_export_choose_runs_the_picker_then_exports(tmp_path, tmp_path_fa
         return sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
     monkeypatch.setattr("photosort.server.subprocess.run", fake_run)
     assert c.post("/api/bundle/export/choose").status_code == 204          # cancelled: nothing started
-    # the picker opens on the project folder (a "sorted" folder beside the shoot), or the nearest folder that exists
-    assert "choose folder" in scripts[-1] and f'default location (POSIX file "{tmp_path.resolve().parent}")' in scripts[-1]
+    # the picker opens on the project folder, which is now the shoot folder itself
+    assert "choose folder" in scripts[-1] and f'default location (POSIX file "{tmp_path.resolve()}")' in scripts[-1]
     assert c.get("/api/export/progress").json()["running"] is False
     # an export destination on a disk that is not there must not block the picker
     gone = tmp_path_factory.mktemp("gone") / "disk"; gone.mkdir()
@@ -1312,8 +1370,9 @@ def test_bundle_export_choose_runs_the_picker_then_exports(tmp_path, tmp_path_fa
     assert c.post("/api/bundle/export/choose").status_code == 204
     assert c.delete("/api/export/destination").status_code == 200
     # a pick inside the shoot is refused with bundle_path's message
+    (tmp_path / "inner").mkdir(); before = sorted(before + ["inner"])
     monkeypatch.setattr("photosort.server.subprocess.run",
-                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(tmp_path) + "\n", stderr=""))
+                        lambda *a, **k: sp.CompletedProcess(a, returncode=0, stdout=str(tmp_path / "inner") + "\n", stderr=""))
     r = c.post("/api/bundle/export/choose")
     assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
     dest = tmp_path_factory.mktemp("picked")
@@ -1866,7 +1925,10 @@ def test_second_index_with_faces_only_runs_faces(tmp_path, monkeypatch):
         make_image(tmp_path, f"p{i}.jpg", seed=i)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     conn = db.connect(tmp_path)
-    conn.execute("UPDATE photos SET embed=?, focus='ok', focus_score=500", (b"\x00" * 1024,))
+    # EMBED_BYTES, not a literal 1024: that is MobileCLIP's width, and under any other encoder this
+    # stands in as a wrong-width blob, which a Continue pass is now supposed to re-embed. The point
+    # here is that a faces-only pass leaves existing embeddings alone, not that stale ones survive.
+    conn.execute("UPDATE photos SET embed=?, focus='ok', focus_score=500", (b"\x00" * db.EMBED_BYTES,))
     conn.commit()
     classified = []
     monkeypatch.setattr(srv.classify_mod, "classify_and_store", lambda root, people_by_faces=True: classified.append(root) or {})
@@ -1882,14 +1944,15 @@ def test_second_index_with_faces_only_runs_faces(tmp_path, monkeypatch):
     assert st["faces_pending"] == 0
     rows = conn.execute("SELECT rel, n_faces, embed, focus, focus_score FROM photos ORDER BY rel").fetchall()
     assert [r["n_faces"] for r in rows] == [0, 0, 0]
-    assert all(r["embed"] == b"\x00" * 1024 and r["focus"] == "ok" and r["focus_score"] == 500 for r in rows)
+    assert all(r["embed"] == b"\x00" * db.EMBED_BYTES and r["focus"] == "ok" and r["focus_score"] == 500 for r in rows)
     assert {p.name: p.stat().st_mtime_ns for p in (idx / "thumbs").iterdir()} == thumbs
     assert classified == [tmp_path]          # faces changed, so the people category is decided again
     # and once more with faces on: nothing to do
     assert c.post("/api/index", json={"faces": True}).json()["started"]; _wait_idle(c)
     assert c.get("/api/stats").json()["faces_pending"] == 0
     assert c.get("/api/folder").json()["indexed"] is True
-    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg"]
+    # the shoot folder gained exactly one thing: the project file the finished scan saved into it
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg", f"sorted_{tmp_path.resolve().name}.sorted"]
 
 
 # Google Drive as a destination: the endpoints ride the export job machinery with what == "drive".
@@ -2244,6 +2307,23 @@ def test_index_409_while_the_disk_is_away_and_a_mid_scan_unplug_is_a_pause(tmp_p
     _wait_progress(c)
 
 
+def test_progress_keeps_one_shape_and_a_pause_keeps_its_place(tmp_path, monkeypatch):
+    """Whoever set the progress, the panel reads the same keys: an idle server has step and steps, just
+    empty. And a disk that goes away mid-pass keeps the step it was on, so the paused panel can say where
+    it stopped instead of falling back to a bare count."""
+    from photosort.index import SourceUnavailable
+    c = _shoot_client(tmp_path, n=1)
+    idle = c.get("/api/progress").json()
+    assert (idle["stage"], idle["step"], idle["steps"]) == ("idle", None, None)
+    def unplugged(root, faces=True, progress=None, retry_errors=False, **kw):
+        progress({"stage": "features", "done": 3, "total": 9, "stage_started": time.time(), "step": 2, "steps": 3})
+        raise SourceUnavailable(f"{root} went away during the scan.")
+    monkeypatch.setattr("photosort.index.index_folder", unplugged)
+    assert c.post("/api/index", json={"faces": False}).status_code == 200
+    p = _wait_progress(c)
+    assert p["stage"] == "paused" and (p["step"], p["steps"]) == (2, 3) and (p["done"], p["total"]) == (3, 9)
+
+
 def test_scan_health_names_the_one_fix(tmp_path, monkeypatch):
     from photosort import db
     from conftest import make_image
@@ -2341,14 +2421,15 @@ def test_project_info_save_and_remembered_folder(tmp_path, tmp_path_factory, mon
     info = c.get("/api/project").json()
     assert info["name"] == f"sorted_{tmp_path.resolve().name}.sorted"
     assert info["path"] is None and info["exists"] is False and info["saved_at"] is None
-    assert info["dir"] == str(tmp_path.resolve().parent / "sorted") == info["default_dir"]
+    assert info["dir"] == str(tmp_path.resolve()) == info["default_dir"]         # the shoot folder itself
     r = c.post("/api/project/save")
     assert r.status_code == 200, r.text
-    assert r.json()["dest"] == str(tmp_path.resolve().parent / "sorted")
+    assert r.json()["dest"] == str(tmp_path.resolve())
     p = _wait_export(c)
     assert p["error"] is None and p["what"] == "bundle"
     z = Path(p["path"])
-    assert z == tmp_path.resolve().parent / "sorted" / info["name"] and inspect_bundle(z)["photos"] == 2
+    assert z == tmp_path.resolve() / info["name"] and inspect_bundle(z)["photos"] == 2
+    before = sorted(before + [z.name])                  # the project file, and nothing else, joined the shoot
     info = c.get("/api/project").json()
     assert info["path"] == str(z) and info["exists"] is True and info["saved_at"]
     # Save to a picked folder: that folder is the one remembered from now on
@@ -2400,6 +2481,10 @@ def test_project_copy_writes_the_file_without_moving_the_remembered_folder(tmp_p
     assert bad.status_code == 400 and "Save project" in bad.json()["detail"]
     assert c.post("/api/bundle/copy", json={}).status_code == 400
     assert TestClient(create_app(None)).post("/api/bundle/copy", json={"dest": str(away)}).status_code == 400
+    # the shoot folder holds the real project file by default; a copy there would take its name
+    bad = c.post("/api/bundle/copy", json={"dest": str(tmp_path)})
+    assert bad.status_code == 400 and "shoot folder" in bad.json()["detail"]
+    assert not (tmp_path / before["name"]).exists()
 
 
 def test_project_copy_choose_runs_the_picker(tmp_path, tmp_path_factory, monkeypatch):
@@ -2528,3 +2613,478 @@ def test_day_filter_keeps_one_day(tmp_path):
     assert [r["rel"] for r in rows["results"]] == ["b.jpg"] and rows["total"] == 1
     bad = c.get("/api/search", params={"day": "18 Sep"})
     assert bad.status_code == 400 and "YYYY-MM-DD" in bad.json()["detail"]
+
+
+def test_search_upload_ranks_the_dropped_image_first_and_writes_nothing(tmp_path):
+    """POST an image the shoot has never seen and the shoot comes back ranked against it. The image here
+    IS one of the files, which is the only way to know the encoder and the index agree: it must come back
+    top. Nothing of it may reach the disk, so the shoot folder is checked after."""
+    from conftest import make_image
+    for i, name in enumerate(("a.jpg", "b.jpg", "c.jpg")):
+        make_image(tmp_path, name, seed=i)
+    index_folder(tmp_path, faces=False, workers=1)
+    c = TestClient(create_app(tmp_path))
+    r = c.post("/api/search/upload", content=(tmp_path / "b.jpg").read_bytes(),
+               headers={"Content-Type": "image/jpeg"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3 and body["offset"] == 0
+    assert body["results"][0]["rel"] == "b.jpg" and body["results"][0]["score"] > 0.9
+    assert body["embed_ms"] >= 0
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg", "b.jpg", "c.jpg"]
+
+
+def test_search_upload_takes_the_same_filters_as_search(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1)
+    c = TestClient(create_app(tmp_path))
+    data = (tmp_path / "a.jpg").read_bytes()
+    assert c.post("/api/search/upload", content=data).json()["total"] == 2
+    assert c.post("/api/search/upload", params={"kind": "videos"}, content=data).json()["total"] == 0
+    page = c.post("/api/search/upload", params={"limit": 1}, content=data).json()
+    assert page["total"] == 2 and len(page["results"]) == 1
+
+
+def test_search_upload_refuses_what_is_not_an_image(tmp_path):
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    assert c.post("/api/search/upload", content=b"this is not a photograph",
+                  headers={"Content-Type": "image/jpeg"}).status_code == 400
+    assert c.post("/api/search/upload", content=b"").status_code == 400
+
+
+def test_search_upload_caps_the_body(tmp_path, monkeypatch):
+    """Both gates: the declared length, and the running total while streaming (a chunked body declares
+    no length at all, so the first gate never sees it)."""
+    from photosort import server as server_mod
+    from conftest import make_image
+    make_image(tmp_path, "a.jpg")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    monkeypatch.setattr(server_mod, "UPLOAD_MAX_BYTES", 1024)
+    c = TestClient(create_app(tmp_path))
+    assert c.post("/api/search/upload", content=b"x" * 4096).status_code == 413
+    chunks = (b"x" * 512 for _ in range(8))
+    assert c.post("/api/search/upload", content=chunks).status_code == 413
+
+
+def test_search_upload_with_no_folder_open_is_empty(tmp_path):
+    from conftest import make_image
+    img = make_image(tmp_path, "a.jpg").read_bytes()
+    assert TestClient(create_app(None)).post("/api/search/upload", content=img).json() == {
+        "results": [], "total": 0, "offset": 0, "limit": 200, "folded": 0, "embed_ms": 0,
+        "cameras": [], "unknown": None, "moment": None, "window_s": 300.0}
+
+
+def test_search_upload_answers_with_angles_not_a_burst(tmp_path):
+    """The client's ask, end to end: drop a frame in, get the other cameras back. Three frames off one
+    body must not be the answer; the second body's best frame and the clip rolling through the same
+    minute must be, each named."""
+    from conftest import make_image
+    from photosort import db
+    rows = [("a1.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:00", "photo"),
+            ("a2.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:20", "photo"),
+            ("a3.jpg", "SONY ILCE-7RM5", "2026-04-17T09:30:40", "photo"),
+            ("b1.jpg", "SONY ILME-FX3", "2026-04-17T09:30:10", "photo"),
+            ("b2.jpg", "SONY ILME-FX3", "2026-04-17T14:00:00", "photo"),
+            ("c1.jpg", None, "2026-04-17T09:30:05", "video")]
+    for i, r in enumerate(rows):
+        make_image(tmp_path, r[0], seed=i)
+    index_folder(tmp_path, faces=False, workers=1)
+    conn = db.connect(tmp_path)
+    for rel, camera, taken, kind in rows:
+        conn.execute("UPDATE photos SET camera=?, taken_at=?, kind=? WHERE rel=?", (camera, taken, kind, rel))
+    conn.commit()
+
+    c = TestClient(create_app(tmp_path))
+    body = c.post("/api/search/upload", content=(tmp_path / "a1.jpg").read_bytes()).json()
+    assert body["results"][0]["rel"] == "a1.jpg"
+    assert body["window_s"] == 300.0
+    cams = {g["camera"]: g for g in body["cameras"]}
+    assert set(cams) == {"SONY ILCE-7RM5", "SONY ILME-FX3"}
+    assert cams["SONY ILCE-7RM5"]["best"]["rel"] == "a1.jpg" and cams["SONY ILCE-7RM5"]["n"] == 3
+    assert cams["SONY ILME-FX3"]["n"] == 2
+    assert body["unknown"]["n"] == 1 and body["unknown"]["best"]["rel"] == "c1.jpg"
+    m = body["moment"]
+    assert m["anchor_camera"] == "SONY ILCE-7RM5"
+    assert [r["rel"] for r in m["others"]] == ["b1.jpg"]      # b2 is four hours later
+    assert [r["rel"] for r in m["unknown"]] == ["c1.jpg"]     # the clip: kept, and not called a camera
+
+
+def test_facets_endpoint_and_the_shot_size_filter(tmp_path):
+    """The rail's live numbers and the filter behind them, over HTTP. unknown and unscored are two
+    different counts; a shot_size the pass never writes is a 400 rather than an empty grid, because an
+    empty grid reads as "this shoot has no wide shots" and a typo should not be able to say that."""
+    from conftest import make_image
+    from photosort import db
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db.connect(tmp_path)
+    ids = {r["rel"]: r["id"] for r in conn.execute("SELECT id, rel FROM photos")}
+    conn.execute("UPDATE photos SET shot_size='wide', shot_size_score=0.8 WHERE id=?", (ids["a.jpg"],))
+    conn.commit()
+
+    c = TestClient(create_app(tmp_path))
+    f = c.get("/api/facets").json()
+    assert f["shot_size"] == {"wide": 1, "unscored": 1}
+    assert f["slowmo"] == {"slow": 0, "normal": 0, "unknown": 0}      # no clips in this shoot
+    assert f["fps_read"]["clips"] == 0
+    assert "camera" not in f                                          # refused, see classify.py
+
+    got = c.get("/api/search?shot_size=wide").json()
+    assert [r["rel"] for r in got["results"]] == ["a.jpg"] and got["total"] == 1
+    assert c.get("/api/search?shot_size=medium").json()["total"] == 0
+    assert c.get("/api/search?shot_size=enormous").status_code == 400
+    assert [i for i in c.get("/api/search/ids?shot_size=wide").json()["ids"]] == [ids["a.jpg"]]
+    assert c.get("/api/search?slowmo=1").json()["total"] == 0
+
+
+def test_fps_read_endpoint_runs_and_refuses_while_something_else_is_running(tmp_path):
+    from photosort import db
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/facets").json()["fps_read"]["read_at"] is None
+    assert c.post("/api/fps/read").json() == {"started": True, "total": 0}
+    for _ in range(100):
+        p = c.get("/api/fps/progress").json()
+        if not p["running"]: break
+        time.sleep(0.05)
+    assert p["error"] is None and p["counts"] == {"found": 0, "read": 0, "missing": 0}
+    assert db.get_meta(db.connect(tmp_path), "fps_read_at") is not None
+
+    app = c.app
+    app.state.photosort["running"] = True
+    assert c.post("/api/fps/read").status_code == 409
+    app.state.photosort["running"] = False
+    app.state.photosort["classify"]["running"] = True
+    assert c.post("/api/fps/read").status_code == 409
+
+
+def _clip_rows(tmp_path):
+    from photosort import db
+    conn = db.connect(tmp_path)
+    base = dict(size=1, mtime=1.0, sibling=None, width=1920, height=1080, taken_at=None, phash="0" * 16,
+                sharp_tile=1.0, sharp_max=1.0, sharp_eye=None, sharp=1.0, n_faces=0, status="ok", kind="video")
+    db.upsert_photo(conn, dict(base, rel="C0001.MP4", qhash="a", camera="SONY ILCE-7SM3", gamma="s-log3-cine",
+                               duration=4.0, fps=25.0, people=1, face_h=0.2))
+    db.upsert_photo(conn, dict(base, rel="IMG_1.MOV", qhash="b", camera="Apple iPhone 15 Pro", gamma="",
+                               duration=40.0, fps=30.0, people=None, face_h=None))
+    conn.commit()
+
+
+def test_facets_carry_the_clip_filters_and_search_takes_them(tmp_path):
+    """cameras, look and duration ride on /api/facets beside shot size and slow motion; clip_read and
+    clip_faces say whether to offer the two catch-up passes. Every new filter is a query parameter of
+    search, ids and history, and a value the server does not know is a 400, never an empty grid."""
+    c = _shoot_client(tmp_path, n=1)
+    _clip_rows(tmp_path)
+    c.app.state.photosort["stale"] = True          # rows written behind the server's back, as a scan would
+    f = c.get("/api/facets").json()
+    assert f["cameras"] == {"SONY ILCE-7SM3": 1, "Apple iPhone 15 Pro": 1}
+    assert f["look"] == {"log": 1, "standard": 0, "unknown": 1}
+    assert f["duration"] == {"lt10": 1, "10to30": 0, "30to120": 1, "gt120": 0}
+    assert f["clip_read"]["clips"] == 2 and f["clip_read"]["unknown"] == 0
+    assert f["clip_faces"] == {"clips": 2, "scanned": 1, "pending": 1}
+    assert "camera_motion" not in f                                    # refused, see classify.py
+    s = lambda **p: [r["rel"] for r in c.get("/api/search", params=p).json()["results"]]
+    assert s(camera="SONY ILCE-7SM3") == ["C0001.MP4"]
+    assert s(look="log") == ["C0001.MP4"] and s(look="standard") == []
+    assert s(duration="30to120") == ["IMG_1.MOV"]
+    assert s(faces="one") == ["C0001.MP4"]
+    assert c.get("/api/search/ids", params={"camera": "Apple iPhone 15 Pro"}).json()["total"] == 1
+    for bad in ({"look": "flat"}, {"duration": "forever"}):
+        assert c.get("/api/search", params=bad).status_code == 400
+    c.get("/api/search", params={"q": "beach", "camera": "SONY ILCE-7SM3", "look": "log", "duration": "lt10"})
+    assert c.get("/api/searches").json()["recent"][0]["filters"] == {"camera": "SONY ILCE-7SM3", "look": "log", "duration": "lt10"}
+
+
+def test_clip_faces_endpoint_runs_and_refuses_while_something_else_is_running(tmp_path, monkeypatch):
+    from photosort import db, index as I
+    c = _shoot_client(tmp_path, n=1)
+    assert c.post("/api/clipfaces/find").json() == {"started": True, "total": 0}
+    for _ in range(100):
+        p = c.get("/api/clipfaces/progress").json()
+        if not p["running"]: break
+        time.sleep(0.05)
+    assert p["error"] is None and p["counts"] == {"found": 0, "read": 0, "missing": 0}
+    c.app.state.photosort["running"] = True
+    assert c.post("/api/clipfaces/find").status_code == 409
+    c.app.state.photosort["running"] = False
+    c.app.state.photosort["clipfaces"]["running"] = True
+    assert c.post("/api/clipfaces/find").status_code == 409
+    r = c.post("/api/index", json={"faces": False})
+    assert r.status_code == 409 and "faces in clips" in r.json()["detail"]
+    assert c.post("/api/fps/read").status_code == 409
+
+
+def test_slow_motion_rides_into_search_history_and_blocks_a_scan(tmp_path):
+    """The slow motion box is a filter like any other: a search with text remembers it, so running the
+    row from history puts the box back. A scan refuses to start while the frame rate read is running,
+    the same way it refuses during a focus check."""
+    c = _shoot_client(tmp_path, n=2)
+    c.get("/api/search", params={"q": "boats", "slowmo": 1, "shot_size": "wide"})
+    rows = c.get("/api/searches").json()
+    assert rows["recent"][0]["filters"] == {"slowmo": 1, "shot_size": "wide"}
+    c.app.state.photosort["fps"]["running"] = True
+    r = c.post("/api/index", json={"faces": False})
+    assert r.status_code == 409 and "frame rates" in r.json()["detail"]
+
+
+# ===== the project file follows the scan: preflight before it starts, the ask when the shoot folder cannot
+# hold it, the skeleton at the picked place, and the save at the end =====
+def _wait_scan(c, n=600):
+    for _ in range(n):
+        p = c.get("/api/progress").json()
+        if not p["running"]: return p
+        time.sleep(0.05)
+    return p
+
+
+def _fake_models(monkeypatch):
+    """The categorise pass loads a model; these tests are about where the file goes, not what is in it."""
+    import photosort.server as srv
+    monkeypatch.setattr(srv.classify_mod, "classify_and_store", lambda root, people_by_faces=True: {})
+    monkeypatch.setattr(srv.classify_mod, "discover_and_store", lambda root: {})
+
+
+def _refuse_writes_under(monkeypatch, d):
+    """A volume whose permission bits say yes and whose writes say no (read-only exFAT, a locked SD card)."""
+    import errno
+    real_open = os.open
+    d = str(Path(d).resolve())
+    def ro_open(path, flags, *a, **k):
+        if str(Path(path).resolve()).startswith(d) and flags & os.O_CREAT:
+            raise OSError(errno.EROFS, "Read-only file system")
+        return real_open(path, flags, *a, **k)
+    monkeypatch.setattr(os, "open", ro_open)
+
+
+def test_a_finished_scan_saves_the_project_file_into_the_shoot_folder(tmp_path, monkeypatch):
+    from conftest import make_image
+    from photosort.bundle import inspect_bundle
+    _fake_models(monkeypatch)
+    for i in range(3):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    c = TestClient(create_app(tmp_path))
+    r = c.post("/api/index", json={"faces": False})
+    assert r.json() == {"started": True, "faces": False}
+    p = _wait_scan(c)
+    z = tmp_path.resolve() / f"sorted_{tmp_path.resolve().name}.sorted"
+    assert p["stage"] == "done" and p["project"] == {"path": str(z), "dir": str(tmp_path.resolve()), "error": None}
+    assert inspect_bundle(z)["photos"] == 3 and "skeleton" not in inspect_bundle(z)
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg", z.name]
+    info = c.get("/api/project").json()
+    assert info["path"] == str(z) and info["exists"] is True and info["saved_at"]
+    # a rescan that finds one more photo overwrites the same file in place, and still nothing else appears
+    make_image(tmp_path, "p3.jpg", seed=3)
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is True
+    assert _wait_scan(c)["project"]["error"] is None
+    assert inspect_bundle(z)["photos"] == 4
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg", "p3.jpg", z.name]
+
+
+def test_a_read_only_shoot_folder_blocks_the_scan_and_asks(tmp_path, monkeypatch):
+    """A real write probe, not os.access: here the bits say writable and the write fails, the shape of a
+    read-only exFAT. The scan does not start and the reply says why."""
+    from conftest import make_image
+    _fake_models(monkeypatch)
+    make_image(tmp_path, "a.jpg")
+    c = TestClient(create_app(tmp_path))
+    _refuse_writes_under(monkeypatch, tmp_path)
+    assert os.access(tmp_path, os.W_OK)
+    r = c.post("/api/index", json={"faces": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is False and body["blocked"]["reason"] == "readonly"
+    assert "cannot be written to" in body["blocked"]["message"] and body["blocked"]["dir"] == str(tmp_path)
+    assert c.get("/api/progress").json()["running"] is False
+    assert c.get("/api/stats").json()["photos"] == 0                     # nothing was read
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg"]
+
+
+def test_no_space_blocks_the_scan_with_both_numbers(tmp_path, monkeypatch):
+    from conftest import make_image
+    import photosort.server as srv
+    from photosort.bundle import estimate_bytes
+    _fake_models(monkeypatch)
+    for i in range(3):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    c = TestClient(create_app(tmp_path))
+    class Usage: free = 50 * 1000 * 1000           # 50 MB: under the 100 MB headroom floor alone
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    body = c.post("/api/index", json={"faces": False}).json()
+    b = body["blocked"]
+    assert body["started"] is False and b["reason"] == "space"
+    assert b["need_bytes"] == estimate_bytes(3, 0) + 100 * 1000 * 1000 and b["free_bytes"] == Usage.free
+    assert "101 MB" in b["message"] and "50 MB" in b["message"] and "100 MB kept free" in b["message"]
+    assert c.get("/api/progress").json()["running"] is False
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", "p2.jpg"]
+    # the same shoot with room: the scan starts
+    Usage.free = 10 * (1 << 30)
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is True
+    _wait_scan(c)
+
+
+def test_the_picked_place_gets_a_skeleton_first_then_the_scan_then_the_file(tmp_path, tmp_path_factory, monkeypatch):
+    """The ask's other half: /api/index/at (what the picker hands over) writes a skeleton project file there
+    before a photo is read, remembers the place, runs the scan, and the finished scan replaces the skeleton.
+    The shoot folder gains nothing."""
+    from conftest import make_image
+    from photosort import bundle
+    import photosort.server as srv
+    _fake_models(monkeypatch)
+    for i in range(2):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    c = TestClient(create_app(tmp_path))
+    _refuse_writes_under(monkeypatch, tmp_path)
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is False
+    picked = tmp_path_factory.mktemp("picked")
+    order = []
+    real_export = bundle.export_bundle
+    def spy(root, out_dir, progress=None, thumbs=True):
+        order.append(("skeleton" if not thumbs else "full", c.app.state.photosort["running"]))
+        return real_export(root, out_dir, progress=progress, thumbs=thumbs)
+    monkeypatch.setattr(bundle, "export_bundle", spy)
+    r = c.post("/api/index/at", json={"path": str(picked), "faces": False})
+    assert r.status_code == 200, r.text
+    z = picked.resolve() / f"sorted_{tmp_path.resolve().name}.sorted"
+    assert r.json() == {"started": True, "faces": False, "project": str(z)}
+    assert order[0] == ("skeleton", False)                            # written before the scan was running
+    early = c.get("/api/project").json()
+    assert early["skeleton"] is True and early["dir"] == str(picked.resolve()) and early["saved_at"] is None
+    p = _wait_scan(c)
+    assert order[-1] == ("full", True) and p["project"]["path"] == str(z) and p["project"]["error"] is None
+    assert bundle.inspect_bundle(z)["photos"] == 2 and "skeleton" not in bundle.inspect_bundle(z)
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+    done = c.get("/api/project").json()
+    assert done["dir"] == str(picked.resolve()) and done["skeleton"] is False and done["saved_at"]
+    # the next scan of this shoot goes straight to the remembered place: no second ask
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is True
+    assert _wait_scan(c)["project"]["path"] == str(z)
+
+
+def test_index_at_refuses_bad_places_and_starts_nothing(tmp_path, tmp_path_factory, monkeypatch):
+    from conftest import make_image
+    import photosort.server as srv
+    _fake_models(monkeypatch)
+    make_image(tmp_path, "a.jpg")
+    (tmp_path / "inner").mkdir()
+    c = TestClient(create_app(tmp_path))
+    r = c.post("/api/index/at", json={"path": str(tmp_path / "inner"), "faces": False})
+    assert r.status_code == 400 and "inside the source folder" in r.json()["detail"]
+    r = c.post("/api/index/at", json={"path": str(tmp_path_factory.mktemp("x") / "missing"), "faces": False})
+    assert r.status_code == 400 and "not a directory" in r.json()["detail"]
+    small = tmp_path_factory.mktemp("small")
+    class Usage: free = 10
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    r = c.post("/api/index/at", json={"path": str(small), "faces": False})
+    assert r.status_code == 400 and "needs about" in r.json()["detail"] and "kept free" in r.json()["detail"]
+    assert os.listdir(small) == []                                     # no skeleton on a refused place
+    assert c.get("/api/progress").json()["running"] is False
+    assert c.get("/api/project").json()["path"] is None               # and nothing remembered
+    assert sorted(os.listdir(tmp_path)) == ["a.jpg", "inner"] and os.listdir(tmp_path / "inner") == []
+
+
+def test_index_choose_runs_the_picker_and_cancel_starts_nothing(tmp_path, tmp_path_factory, monkeypatch):
+    import subprocess as sp
+    from conftest import make_image
+    _fake_models(monkeypatch)
+    make_image(tmp_path, "a.jpg")
+    c = TestClient(create_app(tmp_path))
+    scripts = []
+    def cancel(cmd, *a, **k):
+        scripts.append(cmd[-1])
+        return sp.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+    monkeypatch.setattr("photosort.server.subprocess.run", cancel)
+    assert c.post("/api/index/choose", json={"faces": False}).status_code == 204
+    assert "Where should the project file for this shoot go?" in scripts[-1]
+    assert c.get("/api/progress").json()["running"] is False
+    picked = tmp_path_factory.mktemp("picked_by_hand")
+    monkeypatch.setattr("photosort.server.subprocess.run",
+                        lambda cmd, *a, **k: sp.CompletedProcess(cmd, returncode=0, stdout=str(picked) + "\n", stderr=""))
+    r = c.post("/api/index/choose", json={"faces": False})
+    assert r.status_code == 200 and r.json()["started"] is True
+    assert _wait_scan(c)["project"]["dir"] == str(picked.resolve())
+
+
+def test_a_failed_autosave_is_reported_and_the_index_is_kept(tmp_path, monkeypatch):
+    """The disk filled during the scan: the save at the end fails, the progress says so (the UI offers the
+    picker), the scan itself counts as done, and the index in app_home is whole."""
+    from conftest import make_image
+    from photosort import bundle
+    _fake_models(monkeypatch)
+    for i in range(2):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    c = TestClient(create_app(tmp_path))
+    import errno
+    def full(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(bundle, "export_bundle", full)
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is True
+    p = _wait_scan(c)
+    assert p["stage"] == "done" and p["project"]["error"] == "No space left on device"
+    assert p["project"]["dir"] == str(tmp_path)
+    assert c.get("/api/stats").json()["photos"] == 2
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg"]
+    assert c.get("/api/project").json()["path"] is None
+
+
+def test_a_project_file_sitting_in_the_shoot_folder_opens(tmp_path, tmp_path_factory, monkeypatch):
+    """The disk comes back from the other Mac with sorted_<shoot>.sorted in the shoot folder: Open project on it
+    installs the index, remembers the file where it is, and the next scan saves back over it."""
+    from conftest import make_image
+    from photosort.bundle import export_bundle, inspect_bundle
+    _fake_models(monkeypatch)
+    for i in range(2):
+        make_image(tmp_path, f"p{i}.jpg", seed=i)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    z = export_bundle(tmp_path, tmp_path)
+    assert inspect_bundle(z)["photos"] == 2
+    home = tmp_path_factory.mktemp("other_mac"); monkeypatch.setenv("PHOTOSORT_HOME", str(home))
+    c = TestClient(create_app(None))
+    r = c.post("/api/bundle/import", json={"zip": str(z)})
+    assert r.status_code == 200, r.text
+    info = c.get("/api/project").json()
+    assert info["path"] == str(z.resolve()) and info["exists"] is True and info["dir"] == str(tmp_path.resolve())
+    assert c.post("/api/index", json={"faces": False}).json()["started"] is True
+    assert _wait_scan(c)["project"]["path"] == str(z.resolve())
+    assert sorted(os.listdir(tmp_path)) == ["p0.jpg", "p1.jpg", z.name]
+# ===== end the project file follows the scan =====
+
+
+def test_save_project_on_a_read_only_shoot_asks_instead_of_saving_to_documents(tmp_path, monkeypatch):
+    """Save project before any place was picked, on a shoot folder that refuses writes: nothing is written,
+    nothing is remembered, ~/Documents/sorted is not created, and the reply is the same blocked shape a scan
+    gets, so the UI shows the same ask. The card names the shoot folder, the place the button would try."""
+    from photosort import db as db_mod
+    home = tmp_path / "home"; home.mkdir()
+    shoot = tmp_path / "shoot"; shoot.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    c = _shoot_client(shoot, n=2)
+    before = sorted(os.listdir(shoot))
+    _refuse_writes_under(monkeypatch, shoot)
+    info = c.get("/api/project").json()
+    assert info["dir"] == str(shoot.resolve())
+    r = c.post("/api/project/save")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is False and body["blocked"]["reason"] == "readonly"
+    assert "cannot be written to" in body["blocked"]["message"]
+    assert not (home / "Documents").exists()
+    assert db_mod.get_meta(db_mod.connect(shoot), "project_path") is None
+    assert sorted(os.listdir(shoot)) == before
+    assert c.get("/api/export/progress").json()["running"] is False
+
+
+def test_save_project_on_a_full_disk_is_blocked_too(tmp_path, monkeypatch):
+    import photosort.server as srv
+    c = _shoot_client(tmp_path, n=2)
+    class Usage: free = 10 * 1000 * 1000             # 10 MB: under the 100 MB floor
+    real = srv.shutil.disk_usage
+    monkeypatch.setattr(srv.shutil, "disk_usage", lambda p: Usage)
+    b = c.post("/api/project/save").json()["blocked"]
+    assert b["reason"] == "space" and "10 MB" in b["message"] and b["free_bytes"] == Usage.free
+    monkeypatch.setattr(srv.shutil, "disk_usage", real)
+    assert c.post("/api/project/save").json()["started"] is True     # room again: Save writes
+    _wait_export(c)

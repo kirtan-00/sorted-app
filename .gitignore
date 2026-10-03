@@ -15,3 +15,8 @@ docs/site-screens/
 install.log
 BUILD
 .claude/
+
+# credentials, keys, anything pasted into chat
+credentials.md
+*.key
+.install-id

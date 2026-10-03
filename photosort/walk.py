@@ -27,6 +27,11 @@ def _prune_mac(dirpath: Path, dirnames: list[str]) -> list[str]:
     return [d for d in dirnames if dirpath / d != home]
 # ===== end whole Mac =====
 
+# The project file sits in the scanned folder (bundle.py), written through a .part; an older one may be named
+# .photosort-index.zip. None of them has a photo or video extension, so the extension check below already
+# passes them by; the explicit list keeps it that way if a future extension ever overlaps.
+PROJECT_SUFFIXES = (".sorted", ".photosort-index.zip", ".part")
+
 TS_PACKET = 188          # MPEG transport stream packet; an AVCHD .m2ts writes 4 extra bytes in front
 TS_SYNC = 0x47
 
@@ -68,7 +73,7 @@ def find_images(root: Path) -> list[ImageFile]:
                        and not (on_card and d in SONY_CARD_DIRS)]
         dirnames[:] = _prune_mac(Path(dirpath), dirnames)
         for fn in filenames:
-            if fn.startswith("."):
+            if fn.startswith(".") or fn.lower().endswith(PROJECT_SUFFIXES):
                 continue
             p = Path(dirpath) / fn
             ext = p.suffix.lower()

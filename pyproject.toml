@@ -1,12 +1,15 @@
 [project]
 name = "photosort"
-version = "0.3.2"
+version = "0.5.0"
 requires-python = ">=3.11"
 dependencies = [
   "torch", "torchvision", "open_clip_torch", "timm", "opencv-python",
   "pillow", "pillow-heif", "imagehash", "rawpy", "numpy", "scikit-learn",
-  "fastapi", "uvicorn[standard]", "pyexiv2",
+  "fastapi", "uvicorn[standard]", "exifread",
   "google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2",
+  # SigLIP's tokenizer loads through transformers.AutoTokenizer, not open_clip's own tokenizer path, so
+  # open_clip.get_tokenizer("ViT-B-16-SigLIP") needs both. Both are Apache-2.0.
+  "transformers", "sentencepiece",
 ]
 [project.optional-dependencies]
 dev = ["pytest"]
