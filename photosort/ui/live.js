@@ -3,7 +3,10 @@
 
    GET  /api/live/state              the whole session, drawn settled: what happened before you looked does not replay
    GET  /api/live/events?after=seq   long poll: shot, shot_update, product_created, product_renamed, status
-   GET  /api/live/volumes, /api/live/original/{id}
+   GET  /api/live/volumes?last=      the disks, and which one to pick without being asked
+   GET  /api/live/ready?folder=      what the start screen says about this folder before Start is pressed
+   GET  /api/live/recent?last=       folders an image just landed in: the test frame that finds the folder
+   GET  /api/live/original/{id}
    POST /api/live/start /stop /active /rename-product /export-store /pick /hide
    GET  /api/export/destination      the app's export folder
 
@@ -13,7 +16,7 @@
    ?client=1 is the client's window: the frame just taken, nothing else. Each window keeps its own seq on the long poll.
    ?demo=1 opens on the start screen and plays a scripted shoot with no camera and no server (&step=1 waits for
    __live.next(), &skip=N opens that far in, as a page opened mid-shoot does; __live.demo.drive(state) and .hide(id, on)
-   reach the states a script cannot). */
+   reach the states a script cannot; &photos=N, &found=1 and &busy=1 set what the start screen is told). */
 "use strict";
 (function () {
   const Q = new URLSearchParams(location.search);
@@ -32,7 +35,7 @@
   const UNSORTED = "Unsorted"; // live.py's one pile when Find products is off
   const SOFT = "soft";
   const MODEL = "model:";      // a model's pile is keyed by name; products are keyed by id
-  const PANEL_KEY = "sorted.live.panel", TAB_KEY = "sorted.live.tab", FOLDER_KEY = "sorted.live.folder", SHOOT_KEY = "sorted.live.shoot", FIND_KEY = "sorted.live.find";
+  const PANEL_KEY = "sorted.live.panel", TAB_KEY = "sorted.live.tab", FOLDER_KEY = "sorted.live.folder", SHOOT_KEY = "sorted.live.shoot", FIND_KEY = "sorted.live.find", DRIVE_KEY = "sorted.live.drive";
   /* per viewer conveniences: storage can throw or come back empty, and the page works the same without it */
   const remember = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* nothing kept */ } };
   const recall = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
@@ -40,12 +43,12 @@
   /* ---------- the session ---------- */
   const S = {
     seq: 0, phase: "stopped", running: false, folder: "", active: { product: "", model: "" }, behind: 0,
-    resync: false, exporting: null, shoot: recall(SHOOT_KEY) || "", drive: null, driveWarned: "", setup: false, prev: null,
+    resync: false, exporting: null, shoot: recall(SHOOT_KEY) || "", drive: null, driveWarned: "", setup: false, prev: null, project: null,
     holds: { pause: false, zoom: false, compare: false },
     find: readFind(), tab: recall(TAB_KEY) === "models" ? "models" : "products", panel: recall(PANEL_KEY) !== "hidden",
     counts: { shots: 0, sharp: 0, soft: 0, flash: 0 },
     shots: new Map(), groups: new Map(), piles: new Map(),
-    current: null, queue: [], paused: false, online: false, connected: false, view: "picture",
+    current: null, queue: [], paused: false, online: false, connected: false,
   };
   const flights = [];          // every flight, for the headless checks
   let pumpTimer = 0;
@@ -136,6 +139,7 @@
     }
     return r.status === 204 ? {} : r.json();
   }
+  const query = (k, v) => (v ? "?" + k + "=" + encodeURIComponent(v) : "");
   const http = {
     state: () => json("/api/live/state", { cache: "no-store" }),
     events: (after) => {
@@ -144,7 +148,16 @@
     },
     post: (path, body) => json("/api/live/" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) }),
     pick: (purpose) => http.post("pick", { purpose: purpose }),
-    volumes: () => json("/api/live/volumes", { cache: "no-store" }),
+    volumes: (last) => json("/api/live/volumes" + query("last", last), { cache: "no-store" }),
+    ready: (folder) => json("/api/live/ready" + query("folder", folder), { cache: "no-store" }),
+    recent: (last) => json("/api/live/recent" + query("last", last), { cache: "no-store" }),
+    /* the main window, on this shoot: the index is already on this Mac, so opening the folder is all it takes */
+    openMain: async (folder) => {
+      const open = await json("/api/folder", { cache: "no-store" });
+      if (open.root !== folder) await json("/api/folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: folder }) });
+      const main = window.opener;
+      if (main && !main.closed) { main.location.href = "/"; main.focus(); } else window.open("/", "sorted-main");
+    },
     original: async (id) => "/api/live/original/" + id,
     exportDest: () => json("/api/export/destination", { cache: "no-store" }),
   };
@@ -202,7 +215,7 @@
     if (last && !(keep && keep.key === last.key)) { S.current = last; last.shownAt = performance.now(); showHero(last, false); }
     else if (!last) { S.current = null; clearHero(); }
     else { S.current = last; last.shownAt = performance.now(); }
-    paintStrip(); paint(); feedScene(true);
+    paintStrip(); paint();
   }
   function rebuildPiles(st, rows) {
     const named = new Map((st.products || []).map((p) => [p.id, p]));
@@ -227,6 +240,7 @@
     if (st.folder !== undefined && st.folder !== null) S.folder = st.folder;
     if (st.shoot !== undefined && st.shoot !== null) S.shoot = st.shoot;
     if (st.drive !== undefined) S.drive = st.drive;
+    if (st.project !== undefined) S.project = st.project;
     if (st.faces !== undefined) S.find.faces = st.faces !== false;
     if (st.products_on !== undefined) S.find.products = st.products_on !== false;
     if (st.active) S.active = { product: st.active.product || "", model: st.active.model || "" };
@@ -239,7 +253,7 @@
     S.exporting = x.running ? x : null;
     if (!was || x.running) return;
     if (x.error) say(x.error, true);
-    else say("Exported " + shotWord(x.done || 0) + " to " + x.path + (x.failed ? ". " + shotWord(x.failed) + " could not be written" : ""), !!x.failed);
+    else say("Saved " + shotWord(x.done || 0) + " to " + x.path + (x.failed ? ". " + shotWord(x.failed) + " could not be written" : ""), !!x.failed);
   }
   const shotWord = (n) => n + (n === 1 ? " shot" : " shots");
 
@@ -250,7 +264,7 @@
       onShot(e);
     }
     else if (type === "shot_update") { const u = e.shot || e; if (S.shots.has(u.id)) onShot(u); }
-    else if (type === "product_created") { if (!CLIENT) { ensurePile(body.id, body.name, true); feedScene(); } }
+    else if (type === "product_created") { if (!CLIENT) ensurePile(body.id, body.name, true); }
     else if (type === "product_renamed") { renamePile(body.id, body.name); }
     else if (type === "status") {
       const was = S.running;
@@ -288,7 +302,7 @@
     if (fresh && !onStage && g !== S.current) S.queue.push(g);
     if (g === S.current) { showHero(g, false, true); paintStrip(); }
     if (g.flown && shot.verdict && !shot.landed) landShot(shot, true);   // its verdict came after the group left the stage
-    pump(); paint(); feedScene();
+    pump(); paint();
   }
   /* a landed shot the server reassigned: it changes piles with no flight */
   function movePile(s, from) {
@@ -379,6 +393,7 @@
     img.src = s.thumb;
   }
 
+  const SOFT_WORDS = { "on the eyes": "Eyes are soft", "on the product": "Product is soft" };
   function verdictChip(g) {
     const v = groupVerdict(g), box = $("verdict"), was = box.dataset.v || "";
     const id = g.key + ":" + (v || "");
@@ -392,7 +407,7 @@
     else {
       const r = g.frames.map((s) => s.reason).filter(Boolean).pop() || "";
       const b = document.createElement("b");
-      b.textContent = r ? "Soft " + r : "Soft";
+      b.textContent = SOFT_WORDS[r] || "Soft";
       const again = document.createElement("span"); again.textContent = "Shoot it again";
       chip.append(b, again);
     }
@@ -424,13 +439,13 @@
   function destOf(g) {
     const v = groupVerdict(g);
     if (!v) return "";
-    if (v === "soft") return "Goes to Soft";
-    const id = pileIdOf(g.frames.find((f) => f.verdict === "sharp")), pile = S.piles.get(id);
-    return pile ? "Goes to " + (isModelPile(id) ? "Models, " : "Products, ") + pile.name : "";
+    if (v === "soft") return "Going to Soft";
+    const pile = S.piles.get(pileIdOf(g.frames.find((f) => f.verdict === "sharp")));
+    return pile ? "Going to " + pile.name : "";
   }
   function paintStrip() {
     const g = S.current, note = $("group-note"), box = $("verdict");
-    $("side").hidden = !g || S.view !== "picture";
+    $("side").hidden = !g || finished();
     if (!g) { box.textContent = ""; box.dataset.id = ""; box.dataset.v = ""; note.textContent = ""; $("caption").textContent = ""; return; }
     verdictChip(g);
     paintAlerts(g);
@@ -458,10 +473,6 @@
     const state = $("side-state");
     state.textContent = cmp.on ? "Showing the previous shot" : Z.loading ? "Loading the full size file" : hidden ? "Hidden from the client" : "";
     state.hidden = !state.textContent;
-    const zoom = $("zoom");
-    zoom.textContent = Z.open ? "Back to fit" : "Zoom to 100%";
-    zoom.disabled = !Z.open && !heroImg;
-    $("compare").disabled = !S.prev || Z.open;
   }
   function evText(v) { const n = Math.round(Number(v) * 10) / 10; return n > 0 ? "+" + n : n < 0 ? "−" + Math.abs(n) : "0"; }
 
@@ -471,7 +482,7 @@
     const s = lead(g), v = groupVerdict(g);
     const pile = S.piles.get(v === "sharp" ? pileIdOf(g.frames.find((f) => f.verdict === "sharp")) : SOFT);
     const img = heroImg, target = pile && flightTarget(pile);
-    if (instant || reduced() || document.hidden || !img || !target || !v || heroShot !== s || S.view !== "picture") { landGroup(g); return; }
+    if (instant || reduced() || document.hidden || !img || !target || !v || heroShot !== s) { landGroup(g); return; }
     if (target === pile.stack) { pile.row.hidden = false; pile.incoming = true; pile.row.scrollIntoView({ block: "nearest" }); }
     if (pile.enter) pile.enter.finish();
     const a = img.getBoundingClientRect(), b = target.getBoundingClientRect();
@@ -592,7 +603,7 @@
     if (CLIENT) return;
     const open = p.labelEl.querySelector("input");
     if (!open) paintLabel(p);
-    paintStrip(); feedScene();
+    paintStrip();
   }
   const pileTab = (id) => (id === SOFT ? null : isModelPile(id) ? "models" : "products");
   /* A pile with nothing in it only shows while it is the one being shot, so a product opened for a shot that went to a
@@ -634,7 +645,7 @@
     document.body.classList.toggle("no-panel", !on);
     $("rail").hidden = !on;
     const b = $("panel-toggle");
-    b.textContent = on ? "Hide panel" : "Show panel";
+    b.textContent = on ? "Hide sorted shots" : "Show sorted shots";
     b.setAttribute("aria-expanded", String(on));
     if (on && animate && !reduced()) $("rail").animate([{ opacity: 0, transform: "translateX(12px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: "cubic-bezier(0.2, 0, 0, 1)" });
   }
@@ -665,60 +676,62 @@
     if (CLIENT) return;
     const c = S.counts;
     $("n-shots").textContent = c.shots; $("w-shots").textContent = c.shots === 1 ? "shot" : "shots";
-    $("n-sharp").textContent = c.sharp; $("n-soft").textContent = c.soft; $("n-flash").textContent = c.flash;
+    $("n-soft").textContent = c.soft;
 
     let waiting = S.behind;
     S.shots.forEach((s) => { if (!s.verdict) waiting++; });
-    const q = $("queue"), line = waiting ? shotWord(waiting) + " being checked" : "";
-    if (q.textContent !== line) q.textContent = line;
-    q.hidden = !line;
 
     const held = S.queue.reduce((n, g) => n + g.frames.length, 0), heldBox = $("held");
     heldBox.hidden = !(S.holds.zoom || S.holds.pause);
     if (!heldBox.hidden) {
       const b = document.createElement("b"), hint = document.createElement("span");
       b.style.fontWeight = "inherit"; b.textContent = held + " held";
-      hint.textContent = S.holds.zoom ? "Click the picture to carry on. The client window keeps updating." : "Space carries on. The client window keeps updating.";
+      hint.textContent = S.holds.zoom ? "Click the picture to go back to live. The TV keeps updating." : "Space goes back to live. The TV keeps updating.";
       heldBox.replaceChildren(b, hint);
     }
 
-    const dot = $("state-dot"), text = $("state-text");
-    dot.className = "dot" + (!S.online ? " lost" : S.running ? " on" : "");
     const saving = S.phase === "stopping" || S.phase === "saving";
-    text.textContent = !S.online ? (S.connected ? "Lost the Mac, trying again" : "Connecting to the Mac") : saving ? "Saving the shoot" : S.phase === "starting" ? "Starting" : S.running ? "Watching the folder" : "Stopped";
+    $("state-dot").className = "dot" + (!S.online ? " lost" : S.running ? " on" : "");
+    const word = !S.online ? (S.connected ? "Reconnecting" : "Connecting to the Mac") : saving ? "Saving the shoot" : S.phase === "starting" ? "Starting" : S.running ? "Ready for shots" : "Stopped";
+    const drive = paintDrive();
+    $("state-text").textContent = [word, waiting ? shotWord(waiting) + " being checked" : "", drive].filter(Boolean).join(", ");
+    $("status-line").title = S.drive && S.drive.path || "";
     $("title").textContent = S.shoot || (S.folder ? folderName() : "Live shoot");
 
     $("stop").hidden = !S.running; $("stop").disabled = !S.online;
-    $("new-shoot").hidden = S.running || saving || !S.online;
-    const x = S.exporting, exp = $("export");
-    exp.disabled = !S.counts.sharp || !S.online || !!x;
-    exp.textContent = x ? "Exporting " + (x.done || 0) + " of " + (x.total || 0) : "Export for store";
     syncScan("product", S.active.product); syncScan("model", S.active.model);
-    paintTabs(); paintDrive(); paintSetup(saving);
+    paintFieldHint();
+    paintTabs(); paintSetup(saving); paintFinish(saving);
 
-    const empty = !S.current && S.view === "picture";
+    const empty = !S.current;
     $("empty").hidden = !empty;
     if (empty) {
       $("empty-lead").textContent = !S.online ? "Connecting to the Mac" : S.running ? "Waiting for the first shot" : "No shots in this shoot";
       $("empty-sub").textContent = S.online && S.running ? "Each new file in the folder appears here and gets checked for focus." : "";
     }
   }
-  /* The drive line, and the alarm when the drive stops taking files. Both only read what the server says */
+  /* The drive's part of the status line, and the alarm when the drive stops taking files. Both only read what the server says */
   function paintDrive() {
-    const d = S.drive, line = $("drive-line"), alarm = $("drive-alarm");
-    if (!d) { line.hidden = true; alarm.hidden = true; return; }
+    const d = S.drive, line = $("status-line"), alarm = $("drive-alarm");
+    if (!d) { line.classList.remove("bad"); alarm.hidden = true; return ""; }
     const name = d.name || "The drive", n = Number(d.pending) || 0, failed = Number(d.failed) || 0;
     const gone = d.state === "paused_gone", full = d.state === "paused_full";
-    let text = "This Mac only";
-    if (d.state === "ok") text = "Saving to " + name + (n ? ", " + n + " waiting" : "") + (failed ? ", " + failed + " failed" : "");
+    let text = "this Mac only";
+    if (d.state === "ok") text = !S.running && !n && !failed ? "" : "saving to " + name + (n ? ", " + n + " waiting" : "") + (failed ? ", " + failed + " failed" : "");
     if (gone) text = name + " is disconnected, " + n + " waiting";
     if (full) text = name + " is full, " + n + " waiting";
-    line.textContent = text; line.hidden = false; line.title = d.path || "";
     line.classList.toggle("bad", gone || full);
     alarm.hidden = !gone && !full;
     if (gone) alarm.textContent = name + " is disconnected. Shooting continues on this Mac" + (n ? ", and " + shotWord(n) + " will copy when it is back." : ".");
     if (full) alarm.textContent = name + " is full. Shooting continues on this Mac" + (n ? ", with " + shotWord(n) + " waiting to copy. Free up space on it to carry on." : ". Free up space on it to carry on.");
     if (d.warning && d.warning !== S.driveWarned) { S.driveWarned = d.warning; say(d.warning); }
+    return text;
+  }
+  /* The model wins: _folder in live.py drops the product from the path when a shot has a model name, so say so while it is true */
+  function paintFieldHint() {
+    const p = $("product").value.trim(), m = $("model").value.trim(), hint = $("field-hint");
+    hint.hidden = !p || !m;
+    if (p && m) hint.textContent = "Shots go in the " + m + " folder. " + p + " stays out of the folder path, only the manifest keeps it.";
   }
   function syncScan(id, value) {
     const box = $(id);
@@ -728,14 +741,14 @@
 
   let noteTimer = 0;
   function say(text, bad) {
-    const n = $("note");
+    const n = $($("finish").hidden ? "note" : "finish-note");
     n.textContent = text; n.hidden = false; n.classList.toggle("bad", !!bad);
     clearTimeout(noteTimer);
     noteTimer = setTimeout(() => { n.hidden = true; }, bad ? 9000 : 6000);
   }
 
-  /* ---------- the start screen: where the camera saves, where the sorted photos go, what the shoot is called ---------- */
-  const setup = { volumes: [], volumesKey: "", drive: null, custom: null, touched: false, flash: "unknown", timer: 0, shown: false };
+  /* ---------- the start screen: where the shots land, where the sorted photos go, what the shoot is called ---------- */
+  const setup = { volumes: [], volumesKey: "", drive: null, custom: null, touched: false, flash: "unknown", timer: 0, typing: 0, shown: false, ready: null, readyFor: null, found: null, here: false };
   const MAC = "mac";
   const freeText = (n) => {
     if (n === null || n === undefined) return "";
@@ -743,10 +756,9 @@
     return v >= 1e12 ? (v / 1e12).toFixed(1) + " TB free" : Math.round(v / 1e9) + " GB free";
   };
   function setupError(text) { const e = $("setup-error"); e.textContent = text || ""; e.hidden = !text; }
-  function driveRow(value, name, sub, free, onPick) {
+  function driveRow(value, on, name, sub, free, onPick) {
     const b = document.createElement("button"), mark = document.createElement("i"), t = document.createElement("span"), l = document.createElement("span"), f = document.createElement("span");
     b.type = "button"; b.className = "drive"; b.setAttribute("role", "radio"); b.dataset.value = value;
-    const on = setup.drive === value;
     b.setAttribute("aria-checked", String(on));
     l.className = "drive-name"; l.textContent = name; t.append(l);
     if (sub) { const s = document.createElement("span"); s.className = "drive-sub"; s.textContent = sub; t.append(s); }
@@ -755,17 +767,33 @@
     b.addEventListener("click", onPick);
     return b;
   }
+  /* Everything that is not a plugged in disk is one row. Open, it offers a folder of your own or no copy at all */
+  function elseRows() {
+    const on = setup.drive === MAC || (!!setup.custom && setup.drive === setup.custom);
+    const sub = !on ? "Another folder, or this Mac only" : setup.drive === MAC ? "This Mac only, no second copy" : setup.custom;
+    const row = driveRow("else", on, "Somewhere else", sub, "", () => chooseDrive(setup.custom || MAC));
+    if (!on) return [row];
+    const box = document.createElement("div"), pick = document.createElement("button"), mac = document.createElement("button");
+    box.className = "else-box";
+    pick.type = "button"; pick.className = "btn"; pick.textContent = "Choose a folder"; pick.addEventListener("click", pickDrive);
+    mac.type = "button"; mac.className = "btn"; mac.textContent = "This Mac only"; mac.addEventListener("click", () => chooseDrive(MAC));
+    box.append(pick, mac);
+    return [row, box];
+  }
   function renderDrives() {
     const box = $("drives"), focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.value : null;
-    const rows = setup.volumes.map((v) => driveRow(v.path, v.name, fsText(v.fs), freeText(v.free), () => chooseDrive(v.path)));
+    const rows = setup.volumes.map((v) => {
+      const note = v.writable === false ? "Cannot be written to" : v.card ? "Camera card" : fsText(v.fs);
+      const row = driveRow(v.path, setup.drive === v.path, v.name, note, freeText(v.free), () => chooseDrive(v.path));
+      row.disabled = v.writable === false;
+      return row;
+    });
     if (!rows.length) { const p = document.createElement("p"); p.className = "drive-none"; p.textContent = "No drive connected. Plug one in and it shows up here."; rows.push(p); }
-    if (setup.custom) rows.push(driveRow(setup.custom, setup.custom.replace(/\/+$/, "").split("/").pop() || setup.custom, setup.custom, "", () => chooseDrive(setup.custom)));
-    rows.push(driveRow("choose", "Choose folder", "", "", pickDrive));
-    rows.push(driveRow(MAC, "This Mac only", "Plug in a drive to keep a second copy off this Mac", "", () => chooseDrive(MAC)));
+    rows.push(...elseRows());
     box.replaceChildren(...rows);
     const radios = [...box.querySelectorAll(".drive")];
-    if (!radios.some((r) => r.getAttribute("aria-checked") === "true")) radios[0].tabIndex = 0;
     radios.forEach((r) => { r.tabIndex = r.getAttribute("aria-checked") === "true" ? 0 : -1; });
+    if (!radios.some((r) => r.tabIndex === 0)) radios[0].tabIndex = 0;
     if (focused) { const again = radios.find((r) => r.dataset.value === focused); if (again) again.focus(); }
     const v = setup.volumes.find((x) => x.path === setup.drive);
     const warn = $("drive-warn");
@@ -773,7 +801,7 @@
     warn.textContent = "exFAT can lose photos if unplugged while copying. Eject it before you pull the cable.";
   }
   const fsText = (fs) => (/apfs/i.test(fs || "") ? "APFS" : /exfat/i.test(fs || "") ? "exFAT" : /hfs/i.test(fs || "") ? "Mac OS Extended" : /ntfs/i.test(fs || "") ? "NTFS" : /msdos/i.test(fs || "") ? "FAT32" : fs || "");
-  function chooseDrive(value) { setup.touched = true; setup.drive = value; renderDrives(); }
+  function chooseDrive(value) { setup.touched = true; setup.drive = value; renderDrives(); paint(); }
   async function pickDrive() {
     setupError("");
     try {
@@ -781,24 +809,58 @@
       if (r.path) { setup.custom = r.path; chooseDrive(r.path); }
     } catch (e) { setupError("Could not open the folder picker. " + e.message); }
   }
+  /* The server picks: the last place used while it is here, else the roomiest disk that can take it, never a camera card */
   async function loadVolumes() {
-    let list;
-    try { const r = await api.volumes(); list = Array.isArray(r) ? r : r.volumes || []; }
-    catch (e) { list = setup.volumes; }
+    let list = setup.volumes, best = null;
+    try { const r = await api.volumes(recall(DRIVE_KEY)); list = r.volumes || []; best = r.best || null; }
+    catch (e) { /* the list stays as it was */ }
     const key = JSON.stringify(list.map((v) => [v.path, v.fs, Math.round(v.free / 1e9)]));
     const gone = setup.drive && setup.drive !== MAC && setup.drive !== setup.custom && !list.some((v) => v.path === setup.drive);
     if (key === setup.volumesKey && !gone && setup.drive) return;
     setup.volumes = list; setup.volumesKey = key;
     if (gone) { setup.drive = null; setup.touched = false; }
-    if (!setup.touched) setup.drive = list.length ? list[0].path : MAC;
-    renderDrives();
+    if (!setup.touched) {
+      setup.drive = best || MAC;
+      if (best && !list.some((v) => v.path === best)) setup.custom = best;
+    }
+    renderDrives(); paint();
   }
+  /* What the folder holds, whether a scan is in the way, and whether the last shoot left anything undone */
+  async function loadReady() {
+    const folder = $("folder").value.trim();
+    let r = null;
+    try { r = await api.ready(folder); } catch (e) { /* asked again in a moment */ }
+    if ($("folder").value.trim() !== folder) return;
+    setup.ready = r; setup.readyFor = folder;
+    paint();
+  }
+  async function loadFound() {
+    const folder = $("folder").value.trim();
+    let list = [];
+    try { list = (await api.recent(folder || recall(FOLDER_KEY))).folders || []; } catch (e) { /* no suggestion, then */ }
+    setup.found = list.find((f) => f.path !== folder) || null;
+    setup.here = list.some((f) => f.path === folder);
+    paint();
+  }
+  function setupTick() { loadVolumes(); loadReady(); loadFound(); }
   function setFlash(v) {
     setup.flash = v;
     [["flash-unknown", "unknown"], ["flash-strobe", "strobe"], ["flash-none", "none"]].forEach(([id, k]) => $(id).setAttribute("aria-pressed", String(k === v)));
   }
   function defaultShootName() {
     return "Shoot " + new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  }
+  const photoWord = (n) => n.toLocaleString("en-GB") + (n === 1 ? " photo" : " photos");
+  /* Why Start cannot be pressed, in words, or nothing when it can */
+  function startBlock() {
+    const folder = $("folder").value.trim(), r = setup.readyFor === folder ? setup.ready : null;
+    if (r && r.busy) return r.busy;
+    if (!folder) return "Pick the folder your shots land in, or take a test frame.";
+    if (!r) return "Looking at the folder.";
+    if (!r.exists) return "That folder is not there. Plug its disk in, or pick another.";
+    if (!$("shoot").value.trim()) return "Give the shoot a name.";
+    if (!setup.drive) return "Pick where to copy the sorted photos.";
+    return "";
   }
   /* The start screen shows until a session is running, unless there is a finished shoot on screen to look at */
   function paintSetup(saving) {
@@ -807,70 +869,157 @@
     if (show && !setup.shown) {
       setup.shown = true;
       if (!$("folder").value) $("folder").value = S.folder || recall(FOLDER_KEY) || "";
-      if (!$("shoot").value) $("shoot").value = defaultShootName();
+      $("shoot").value = defaultShootName();
+      $("find-people").checked = S.find.faces; $("find-products").checked = S.find.products;
       setupError("");
-      loadVolumes();
-      setup.timer = setInterval(loadVolumes, 5000);   // a drive plugged in now just appears
+      setupTick();
+      setup.timer = setInterval(setupTick, 5000);     // a drive plugged in, or a test frame taken, now just appears
     }
     if (!show && setup.shown) { setup.shown = false; clearInterval(setup.timer); }
-    $("start").disabled = !$("folder").value.trim() || !$("shoot").value.trim();
-    $("setup-back").hidden = !S.shots.size;
+    if (!show) return;
+    const folder = $("folder").value.trim(), typing = !$("folder").hidden, r = setup.readyFor === folder ? setup.ready : null;
+    const shown = $("folder-show");
+    shown.hidden = typing; shown.textContent = folder || "No folder yet"; shown.title = folder; shown.classList.toggle("none", !folder);
+    $("pick").textContent = folder ? "Change" : "Choose";
+    $("found").hidden = !setup.found;
+    if (setup.found) $("found-text").textContent = "A new photo just landed in " + setup.found.name;
+    $("folder-help").hidden = !!setup.found;
+    $("folder-help").textContent = setup.here ? "A new photo just landed here, so this is the folder" : "Take one test frame and sorted finds the folder";
+
+    const why = startBlock(), n = !why && r ? r.photos : 0, wait = r ? r.waiting : 0;
+    $("start").disabled = !!why;
+    $("start-why").hidden = !why; $("start-why").textContent = why;
+    $("ask").hidden = !n;
+    if (n) $("ask").textContent = "This folder already has " + (r.whole ? "" : "more than ") + photoWord(n) + ". Only new shots?";
+    $("start").textContent = n ? "Start, only new shots" : "Start";
+    $("start-all").hidden = !n;
+    if (n) $("start-all").textContent = n === 1 ? "Take that one too" : r.whole ? "Take all " + n.toLocaleString("en-GB") + " too" : "Take them all too";
+    $("setup-warn").hidden = !wait;
+    if (wait) $("setup-warn").textContent = shotWord(wait) + " from the last shoot still have to reach the drive. Back to the last shoot finishes them; a new shoot leaves them here on this Mac.";
+    $("setup-back").hidden = !S.shots.size && !(r && r.last);
+  }
+  function setFolder(path) {
+    $("folder").value = path;
+    setup.found = null; setup.here = false;
+    paint(); loadReady(); loadFound();
   }
   async function pickFolder() {
     setupError("");
     try {
       const r = await api.pick("watch");
-      if (r.path) { $("folder").value = r.path; paint(); }
+      if (r.path) setFolder(r.path.replace(/\/+$/, ""));
     } catch (e) {
+      $("folder").hidden = false;
+      paint();
       $("folder").focus();
       setupError("Could not open the folder picker. Type the path instead. " + e.message);
     }
   }
-  async function start() {
+  async function begin(body) {
+    setupError("");
+    $("start").disabled = true;
+    try {
+      await api.post("start", body);
+      resetSession(body.folder);
+      S.running = true; S.phase = "starting"; S.setup = false;
+      applySnapshot(await api.state());
+      return true;
+    } catch (e) { setupError("Could not start. " + e.message); say("Could not start. " + e.message, true); paint(); return false; }
+  }
+  /* mode new_only or everything: a real new shoot, even in a folder used before. The old shoot stays where it is */
+  async function start(mode) {
     const folder = $("folder").value.trim(), shoot = $("shoot").value.trim();
-    if (!folder || !shoot || S.running) return;
-    const want = { product: $("product").value.trim(), model: $("model").value.trim() };
+    if (startBlock() || S.running) return;
     const find = { faces: $("find-people").checked, products: $("find-products").checked };
     const drive = setup.drive && setup.drive !== MAC ? setup.drive : null;
-    $("start").disabled = true;
-    setupError("");
-    try {
-      await api.post("start", { folder: folder, strobe: setup.flash === "strobe", no_flash: setup.flash === "none", drive: drive, shoot: shoot, faces: find.faces, products: find.products });
-      remember(FOLDER_KEY, folder); remember(SHOOT_KEY, shoot);
-      remember(FIND_KEY, JSON.stringify(find));
-      S.find = find; S.setup = false; S.shoot = shoot;
-      resetSession();
-      S.running = true; S.phase = "starting"; S.folder = folder;
-      applySnapshot(await api.state());
-      if (want.product || want.model) { await api.post("active", want); S.active = want; }
-    } catch (e) { setupError("Could not start. " + e.message); }
+    S.find = find;
+    if (!await begin({ folder: folder, strobe: setup.flash === "strobe", no_flash: setup.flash === "none", drive: drive, shoot: shoot, faces: find.faces, products: find.products, mode: mode })) return;
+    remember(FOLDER_KEY, folder); remember(SHOOT_KEY, shoot);
+    remember(FIND_KEY, JSON.stringify(find));
+    if (drive) remember(DRIVE_KEY, drive);
     paint();
+  }
+  /* The last shoot again. No drive in the body: the server goes back to the one this shoot used, with its name and switches */
+  async function resume(folder) {
+    if (await begin({ folder: folder, mode: "resume" })) paint();
+  }
+  function backToLast() {
+    const folder = $("folder").value.trim();
+    if (S.shots.size && (!folder || folder === S.folder)) { S.setup = false; paint(); }
+    else resume(folder);
+  }
+  const finished = () => !S.running && S.shots.size > 0 && !S.setup;
+  /* After Finish shoot. Copying can go on for a while after the stop, so this keeps reading the drive's state */
+  function paintFinish(saving) {
+    const show = finished();
+    $("finish").hidden = !show; $("bar").hidden = show;
+    $("side").hidden = show || !S.current;
+    if (!show) return;
+    S.groups.forEach((g) => { if (!g.flown) landGroup(g); });      // the shot on stage, and any held: nothing is coming to move them on
+    S.queue = [];
+    $("finish-title").textContent = saving ? "Saving the shoot" : "Shoot finished";
+    const piles = [...S.piles.values()].filter((p) => p.count);
+    const words = [[S.counts.shots, "shot", "shots"], [S.counts.sharp, "sharp", "sharp"], [S.counts.soft, "soft", "soft"],
+      [piles.filter((p) => pileTab(p.id) === "products").length, "product", "products"], [piles.filter((p) => pileTab(p.id) === "models").length, "model", "models"]];
+    const box = $("finish-counts"), id = words.map((w) => w[0]).join();
+    if (box.dataset.id !== id) {
+      box.dataset.id = id;
+      box.replaceChildren(...words.filter((w, i) => i < 3 || w[0]).map((w) => {
+        const d = document.createElement("div"), n = document.createElement("dd"), t = document.createElement("dt");
+        n.textContent = w[0]; t.textContent = w[0] === 1 ? w[1] : w[2];
+        d.append(n, t);
+        return d;
+      }));
+    }
+    const d = S.drive, where = $("finish-where"), n = d ? Number(d.pending) || 0 : 0, failed = d ? Number(d.failed) || 0 : 0;
+    const name = d && (d.dest || d.path), stuck = d && (d.state === "paused_gone" || d.state === "paused_full");
+    where.textContent = !d || d.state === "off" ? "Nothing was copied. Your shots are all in " + S.folder
+      : stuck ? shotWord(n) + " still have to copy to " + name + ". They go when the drive is back."
+      : n ? "Copying " + shotWord(n) + " to " + name + ". Leave the drive plugged in."
+      : "Copied to " + name + (failed ? ". " + shotWord(failed) + " could not be copied" : "");
+    where.classList.toggle("bad", !!stuck || failed > 0);
+    $("finish-source").textContent = d && d.state !== "off" ? "The originals stay in " + S.folder : "";
+    $("finish-project").textContent = S.project ? "Project file: " + S.project : "";
+    const x = S.exporting, exp = $("export");
+    exp.disabled = !S.counts.sharp || !S.online || !!x || saving;
+    exp.textContent = x ? "Saving " + (x.done || 0) + " of " + (x.total || 0) : "Save store copies";
+    $("new-shoot").hidden = saving; $("carry-on").hidden = saving;
+    $("open-sorted").disabled = saving; $("new-shoot").disabled = !S.online; $("carry-on").disabled = !S.online;
   }
   async function stop() {
     $("stop").disabled = true;
+    if (S.holds.pause) setPaused(false);
+    if (Z.open) zoomOut();
     try { readStatus(await api.post("stop")); }
     catch (e) { say("Could not stop. " + e.message, true); }
     paint();
   }
-  function resetSession() {
+  function resetSession(folder) {
     if (Z.open) zoomOut();
-    S.shots = new Map(); S.groups = new Map(); S.queue = []; S.current = null; S.prev = null; S.seq = 0; S.behind = 0; S.drive = null;
+    S.shots = new Map(); S.groups = new Map(); S.queue = []; S.current = null; S.prev = null; S.seq = 0; S.behind = 0; S.drive = null; S.project = null;
+    S.folder = folder; S.active = { product: "", model: "" };
     S.counts = { shots: 0, sharp: 0, soft: 0, flash: 0 };
     S.piles.forEach((p) => p.el.remove()); S.piles = new Map();
+    $("product").value = ""; $("model").value = ""; clean();
     clearHero(); ensurePile(SOFT, "Soft", false);
     if (!S.find.products) ensurePile(NO_PRODUCT, null, false);
-    feedScene(true);
   }
-  async function commitActive() {
+  /* A field left blank by accident must not wipe the product: spaces are nothing typed, and a field emptied and left is
+     put back. Enter on an emptied field is the one way to clear it, and hands the next shots back to the auto sort. */
+  async function commitActive(enter) {
+    ["product", "model"].forEach((id) => {
+      const v = $(id).value;
+      if (v ? !v.trim() : !enter) $(id).value = S.active[id];
+    });
     const product = $("product").value.trim(), model = $("model").value.trim();
     const before = S.active;
-    if (product === before.product && model === before.model) { clean(); return; }
+    if (product === before.product && model === before.model) { clean(); paint(); return; }
     S.active = { product: product, model: model };
     clean(); paint();
-    if (!S.running) { say("Saved for when you press Start"); return; }
+    if (!S.running) return;
     try {
       await api.post("active", S.active);
-      say("Next shots go to " + (product || "no product") + (model ? ", " + model : ""));
+      say(model ? "Next shots go to " + model + (product ? ". " + product + " stays out of the folder path" : "") : product ? "Next shots go to " + product : "sorted sorts the next shots by itself");
     } catch (e) { S.active = before; paint(); say("Could not set that. " + e.message, true); }
   }
   function clean() { $("product").classList.remove("dirty"); $("model").classList.remove("dirty"); }
@@ -880,15 +1029,15 @@
     try {
       const d = await api.exportDest();
       const base = String(d.path || "").replace(/\/+$/, "");
-      if (!base) throw new Error("Set an export folder in sorted first.");
-      const r = await api.post("export-store", { dest: base + "/" + folderName() + " for store" });
-      if (!r.total) say("No sharp shots to export yet.");
+      if (!base) throw new Error("Set an export folder in the main window first.");
+      const r = await api.post("export-store", { dest: base + "/" + (S.shoot || folderName()) + " for store" });
+      if (!r.total) say("No sharp shots to save.");
       else if (!S.exporting) S.exporting = { running: true, done: 0, total: r.total, path: r.path };
-    } catch (e) { say("Could not export. " + e.message, true); }
+    } catch (e) { say("Could not save them. " + e.message, true); }
     paint();
   }
   function setPaused(on) {
-    $("pause").textContent = on ? "Carry on" : "Pause";
+    $("pause").textContent = on ? "Back to live" : "Hold this shot";
     $("pause").classList.toggle("on", on);
     hold("pause", on);
   }
@@ -902,7 +1051,7 @@
     Z.pic.style.transform = "translate3d(" + Z.x + "px," + Z.y + "px,0)";
   }
   async function zoomIn(e) {
-    if (Z.open || !heroImg || S.view !== "picture" || cmp.on) return;
+    if (Z.open || !heroImg || cmp.on) return;
     const s = heroShot, r = heroImg.getBoundingClientRect(), inside = (v) => Math.min(1, Math.max(0, v));
     const fx = e ? inside((e.clientX - r.left) / r.width) : 0.5, fy = e ? inside((e.clientY - r.top) / r.height) : 0.5;
     const box = document.createElement("div"), pic = new Image();
@@ -964,12 +1113,12 @@
     hold("zoom", false);
   }
 
-  /* ---------- compare: the last shot, for as long as the key or the button is down ---------- */
+  /* ---------- compare: the last shot, for as long as C is down ---------- */
   const cmp = { on: false, el: null };
   function compareShow(on) {
     if (on === cmp.on) return;
     if (on) {
-      if (!S.prev || Z.open || S.view !== "picture") return;
+      if (!S.prev || Z.open) return;
       const f = $("frame"), cs = getComputedStyle(f), img = new Image();
       const l = parseFloat(cs.paddingLeft), t = parseFloat(cs.paddingTop);
       img.className = "compare-pic"; img.alt = ""; img.src = lead(S.prev).thumb;
@@ -1017,7 +1166,7 @@
     const other = d ? d.screens.find((s) => s !== d.currentScreen) : null;
     const place = other ? "left=" + other.availLeft + ",top=" + other.availTop + ",width=" + other.availWidth + ",height=" + other.availHeight : "width=1280,height=720";
     const w = window.open(clientUrl(), "sorted-client", "popup," + place);
-    if (!w) { say("The browser blocked the window. Press Open client window again.", true); return; }
+    if (!w) { say("The browser blocked the window. Press Show on TV again.", true); return; }
     clientWin = w;
     clientOn = other ? { left: other.left, top: other.top } : null;
     $("client-back").hidden = true;
@@ -1048,10 +1197,18 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target;
     if (t.tagName === "INPUT") {
-      if (e.key === "Enter" && (t.id === "product" || t.id === "model")) { e.preventDefault(); commitActive(); t.select(); }
+      const field = t.id === "product" || t.id === "model";
+      if (e.key === "Enter" && field) { e.preventDefault(); commitActive(true); t.select(); }
+      /* Enter leaves the name selected for the next scan, and Space would type over it. A name that is in and not being
+         edited has no use for a space, so Space is the hold, here as everywhere else */
+      if (e.key === " " && field && S.running && !t.classList.contains("dirty") && t.selectionStart === 0 && t.selectionEnd === t.value.length) {
+        e.preventDefault();
+        if (!e.repeat) setPaused(!S.holds.pause);
+      }
       return;
     }
-    if (!$("setup").hidden) return;
+    if (e.key === "Escape") viewMenu(false);
+    if (!$("setup").hidden || !$("finish").hidden) return;
     if (e.repeat) return;
     if (Z.open && e.key === "Escape") { zoomOut(); return; }
     if (Z.pic && e.key.startsWith("Arrow")) {
@@ -1065,7 +1222,7 @@
     const now = performance.now(), fast = now - scanLast < SCAN_GAP_MS;
     if (e.key === "Enter" && fast && scanBuf.length >= 3 && !CLIENT) {
       e.preventDefault(); clearTimeout(scanTimer);
-      $("product").value = scanBuf; scanBuf = ""; commitActive();
+      $("product").value = scanBuf; scanBuf = ""; commitActive(true);
       return;
     }
     if (e.key.length !== 1) return;
@@ -1089,40 +1246,10 @@
     if (e.key === "c" || e.key === "C") { compareKey = false; compareShow(false); }
   }
 
-  /* ---------- the Desktop view: the same scene the Scan tab draws, fed from this session ---------- */
-  let fedTo = new Set(), feedQueued = false;
-  function feedScene(reset) {
-    if (reset) fedTo = new Set();
-    if (CLIENT || S.view !== "desktop" || !window.ScanScene || !ScanScene.feed || feedQueued) return;
-    feedQueued = true;
-    setTimeout(() => {
-      feedQueued = false;
-      if (S.view !== "desktop") return;
-      const rows = [], updates = [];
-      const row = (s) => ({ id: s.id, name: s.file, video: false, thumb: s.small, qhash: "live" + s.id, looked: true, error: false, category: null, product: s.verdict ? pileIdOf(s) : null });
-      S.shots.forEach((s) => { (fedTo.has(s.id) ? updates : rows).push(row(s)); fedTo.add(s.id); });
-      const products = [];
-      const sorted = new Map();                          // the shot on stage counts here: its card is already flying
-      S.shots.forEach((s) => { if (s.verdict) sorted.set(pileIdOf(s), (sorted.get(pileIdOf(s)) || 0) + 1); });
-      S.piles.forEach((p) => { const n = Math.max(p.count, sorted.get(p.id) || 0); if (n || p.id !== SOFT) products.push({ id: p.id, name: p.name, count: n }); });
-      ScanScene.feed({ key: "live:" + S.folder, shoot: S.shoot || folderName(), disk: null, total: S.counts.shots, photos: S.counts.shots, videos: 0,
-        rows: rows, updates: updates, folders: [], products: products, bare: true,
-        pill: [S.running ? "Watching the folder" : "Stopped", shotWord(S.counts.shots)] }, { stage: "live", running: S.running });
-    }, 120);
-  }
   const folderName = () => (S.folder || "").replace(/\/+$/, "").split("/").pop() || "Live shoot";
-  function setView(v) {
-    if (v === S.view) return;
-    S.view = v;
-    $("view-picture").setAttribute("aria-pressed", String(v === "picture"));
-    $("view-desktop").setAttribute("aria-pressed", String(v === "desktop"));
-    $("scene-view").hidden = v !== "desktop";
-    if (Z.open) zoomOut();
-    compareShow(false);
-    paintStrip();
-    feedScene(true);
-    paint();
-    if (v === "picture") fitHero();
+  function viewMenu(on) {
+    $("view-list").hidden = !on;
+    $("view-btn").setAttribute("aria-expanded", String(on));
   }
 
   /* ---------- the client's TV ---------- */
@@ -1234,10 +1361,10 @@
     const VOLUMES = [{ name: "T7 Shield", path: "/Volumes/T7 Shield", free: 812e9, fs: "apfs" }, { name: "SHOOT_B", path: "/Volumes/SHOOT_B", free: 1.6e12, fs: "exfat" }];
     /* the start screen first, as on a real shoot; a client window, or a test that asked for a place in the script, goes straight in */
     const straight = CLIENT || STEP || Q.has("skip");
-    const folder = "/Users/you/Pictures/Tether";
+    const folder = "/Users/you/Pictures/Tether", project = "/Users/you/Pictures/sorted exports/sorted_Summer lookbook.sorted";
     let pointer = 0, phase = straight ? "live" : "stopped", strobe = true, down = 0, active = { product: null, model: null };
     let shoot = straight ? "Summer lookbook" : "", find = { faces: true, products: true }, wake = null, log = [], timer = 0, seq = 0;
-    let drive = straight ? { path: VOLUMES[0].path, name: VOLUMES[0].name, fs: "apfs", state: "ok", pending: 0, copied: 0, failed: 0, free_bytes: 812e9, warning: null } : null;
+    let drive = straight ? { path: VOLUMES[0].path, dest: VOLUMES[0].path + "/Summer lookbook", name: VOLUMES[0].name, fs: "apfs", state: "ok", pending: 0, copied: 0, failed: 0, free_bytes: 812e9, warning: null } : null;
     const held = [], made = new Set();                   // shots with no copy yet; products opened with Find products off
     const ping = () => { if (wake) { const w = wake; wake = null; w(); } };
     const emit = (e) => { log.push(Object.assign({}, e, { seq: ++seq })); ping(); };
@@ -1296,7 +1423,7 @@
       });
       const models = new Map();
       shots.forEach((s) => { if (s.category === "model" && s.model) models.set(s.model, (models.get(s.model) || 0) + 1); });
-      return { seq: seq, state: phase, running: phase === "live", folder: folder, shoot: shoot, strobe: strobe, active: active, queue: 0, drive: drive && Object.assign({}, drive), faces: find.faces, products_on: find.products,
+      return { seq: seq, state: phase, running: phase === "live", folder: folder, shoot: shoot, strobe: strobe, active: active, queue: 0, drive: drive && Object.assign({}, drive), faces: find.faces, products_on: find.products, project: phase === "live" ? null : project,
         products: [...products.values()], models: [...models].map(([name, n]) => ({ name: name, n: n })), shots: [...shots.values()] };
     }
     tick();
@@ -1329,13 +1456,14 @@
       async post(path, body) {
         const no = refuse(); if (no) return no;
         await sleep(120);
-        if (path === "stop") { phase = "stopped"; clearTimeout(timer); emit({ type: "status", state: phase, queue: 0 }); return snapshot(); }
+        if (path === "stop") { phase = "stopped"; clearTimeout(timer); emit({ type: "status", state: phase, queue: 0, project: project }); return snapshot(); }
         if (path === "start") {
+          if (body.mode === "resume") { phase = "live"; tick(); return {}; }
           phase = "live"; strobe = body.strobe; shoot = body.shoot; pointer = 0; log = []; held.length = 0;
           find = { faces: body.faces !== false, products: body.products !== false };
           const v = VOLUMES.find((x) => x.path === body.drive);
-          drive = body.drive ? { path: body.drive, name: v ? v.name : body.drive.split("/").pop(), fs: v ? v.fs : "apfs", state: "ok", pending: 0, copied: 0, failed: 0, free_bytes: v ? v.free : 5e11,
-            warning: v && v.fs === "exfat" ? "SHOOT_B is exFAT. Eject it before you pull the cable." : null } : { path: null, name: null, fs: null, state: "off", pending: 0, copied: 0, failed: 0, free_bytes: 0, warning: null };
+          drive = body.drive ? { path: body.drive, dest: body.drive + "/" + body.shoot, name: v ? v.name : body.drive.split("/").pop(), fs: v ? v.fs : "apfs", state: "ok", pending: 0, copied: 0, failed: 0, free_bytes: v ? v.free : 5e11,
+            warning: v && v.fs === "exfat" ? "SHOOT_B is exFAT. Eject it before you pull the cable." : null } : { path: null, dest: null, name: null, fs: null, state: "off", pending: 0, copied: 0, failed: 0, free_bytes: 0, warning: null };
           tick();
           return {};
         }
@@ -1351,7 +1479,10 @@
         return {};
       },
       pick: (purpose) => api.post("pick", { purpose: purpose }),
-      volumes: async () => VOLUMES,
+      volumes: async (last) => ({ volumes: VOLUMES, best: VOLUMES.some((v) => v.path === last) ? last : VOLUMES.slice().sort((a, b) => b.free - a.free)[0].path }),
+      ready: async (at) => ({ busy: Q.get("busy") === "1" ? "sorted is scanning a folder. Start works again when the scan ends." : null, exists: !!at, photos: Number(Q.get("photos")) || 0, whole: true, last: null, waiting: 0 }),
+      recent: async () => ({ folders: Q.get("found") === "1" ? [{ path: folder, name: "Tether", photos: 1, newest: Date.now() / 1000 }] : [] }),
+      openMain: async () => { say("In the app this opens the main window on this shoot."); },
       original: original,
       exportDest: async () => ({ path: "/Users/you/Pictures/sorted exports" }),
       next(n) { for (let i = n || 1; i > 0; i--) step(); return pointer; },
@@ -1380,8 +1511,11 @@
       ensurePile(SOFT, "Soft", false);
       setPanel(S.panel, false); setTab(S.tab);
       $("pick").addEventListener("click", pickFolder);
-      $("setup-form").addEventListener("submit", (e) => { e.preventDefault(); start(); });
-      ["folder", "shoot"].forEach((id) => $(id).addEventListener("input", paint));
+      $("found-use").addEventListener("click", () => { if (setup.found) setFolder(setup.found.path); });
+      $("setup-form").addEventListener("submit", (e) => { e.preventDefault(); start("new_only"); });
+      $("start-all").addEventListener("click", () => start("everything"));
+      $("shoot").addEventListener("input", paint);
+      $("folder").addEventListener("input", () => { paint(); clearTimeout(setup.typing); setup.typing = setTimeout(loadReady, 400); });
       [["flash-unknown", "unknown"], ["flash-strobe", "strobe"], ["flash-none", "none"]].forEach(([id, v]) => $(id).addEventListener("click", () => setFlash(v)));
       $("drives").addEventListener("keydown", (e) => {
         if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -1390,30 +1524,26 @@
         list[(at + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length].focus();
       });
       $("new-shoot").addEventListener("click", () => { S.setup = true; paint(); });
-      $("setup-back").addEventListener("click", () => { S.setup = false; paint(); });
+      $("setup-back").addEventListener("click", backToLast);
+      $("carry-on").addEventListener("click", () => resume(S.folder));
+      $("open-sorted").addEventListener("click", () => { api.openMain(S.folder).catch((e) => say("Could not open it. " + e.message, true)); });
+      $("view-btn").addEventListener("click", () => viewMenu($("view-list").hidden));
+      document.addEventListener("click", (e) => { if (e.target !== $("view-btn")) viewMenu(false); });
       $("panel-toggle").addEventListener("click", () => { setPanel(!S.panel, true); });
       ["products", "models"].forEach((t) => $("tab-" + t).addEventListener("click", () => setTab(t)));
       document.querySelector(".tabs").addEventListener("keydown", (e) => {
         if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !$("tab-models").hidden) setTab(S.tab === "products" ? "models" : "products", true);
       });
       $("frame").addEventListener("click", (e) => { if (e.target === heroImg) zoomIn(e); });
-      $("zoom").addEventListener("click", () => { if (Z.open) zoomOut(); else zoomIn(); });
       $("hide").addEventListener("click", toggleHide);
-      const cb = $("compare");
-      cb.addEventListener("pointerdown", (e) => { cb.setPointerCapture(e.pointerId); compareShow(true); });
-      ["pointerup", "pointercancel"].forEach((n) => cb.addEventListener(n, () => compareShow(false)));
-      cb.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); e.stopPropagation(); compareShow(true); } });
-      cb.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") compareShow(false); });
       $("client-open").addEventListener("click", openClient);
       $("client-back-btn").addEventListener("click", putClientBack);
       $("stop").addEventListener("click", stop);
       $("export").addEventListener("click", exportStore);
       $("pause").addEventListener("click", () => setPaused(!S.holds.pause));
       $("full").addEventListener("click", toggleFull);
-      $("view-picture").addEventListener("click", () => setView("picture"));
-      $("view-desktop").addEventListener("click", () => setView("desktop"));
       ["product", "model"].forEach((id) => {
-        $(id).addEventListener("input", () => $(id).classList.add("dirty"));
+        $(id).addEventListener("input", () => { $(id).classList.add("dirty"); paintFieldHint(); });
         $(id).addEventListener("blur", () => { if ($(id).classList.contains("dirty")) commitActive(); });
       });
       /* a pointer click must not leave focus on a button, or the next Space would press it instead of pausing */
@@ -1429,7 +1559,7 @@
   window.__live = {
     state: () => ({ seq: S.seq, counts: { ...S.counts }, online: S.online, paused: S.paused, queue: S.queue.length, current: S.current && lead(S.current).id,
       piles: [...S.piles.values()].map((p) => ({ id: p.id, name: p.name, count: p.count })), flights: flights.slice(),
-      prev: S.prev && lead(S.prev).id, zoom: Z.open, tab: S.tab, panel: S.panel, shown: client.shown, find: { ...S.find } }),
+      prev: S.prev && lead(S.prev).id, zoom: Z.open, tab: S.tab, panel: S.panel, shown: client.shown, find: { ...S.find }, active: { ...S.active }, project: S.project }),
     next: (n) => api.next && api.next(n),
     demo: api,
   };

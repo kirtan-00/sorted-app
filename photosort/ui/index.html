@@ -17,9 +17,9 @@
   <div class="toolbar">
     <h1>sorted</h1>
     <!-- the shoots menu: the open shoot's name is the button, and it drops the list of every shoot this Mac
-         knows, each with what is indexed and whether a project file was saved, then the ways in to another one -->
+         knows, each with what is indexed and whether a shoot file was saved, then the ways in to another one -->
     <div id="shootbar">
-      <button type="button" id="shoot-menu-btn" class="shoot-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="shoot-menu" title="the open shoot: switch to another, open a folder or a project file, or scan another folder">
+      <button type="button" id="shoot-menu-btn" class="shoot-trigger" aria-haspopup="true" aria-expanded="false" aria-controls="shoot-menu" title="the open shoot: switch to another, open a folder or a shoot file, or scan another folder">
         <svg class="shoot-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.2a1.2 1.2 0 0 1 1.2-1.2h3L7.2 4.5h6.1a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2H2.7a1.2 1.2 0 0 1-1.2-1.2z"/></svg>
         <span class="tb-title">
           <span id="folder-name" title=""></span>
@@ -35,9 +35,9 @@
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.2a1.2 1.2 0 0 1 1.2-1.2h3L7.2 4.5h6.1a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2H2.7a1.2 1.2 0 0 1-1.2-1.2z"/></svg>
             <span class="sm-action-t">Open a folder…<span class="sm-action-s">a folder this Mac has scanned before</span></span>
           </button>
-          <button type="button" class="sm-action" id="sm-open-project" title="open a sorted project file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
+          <button type="button" class="sm-action" id="sm-open-project" title="open a sorted shoot file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 1.5h6L13 5v9a.8.8 0 0 1-.8.8H3.5a.8.8 0 0 1-.8-.8V2.3a.8.8 0 0 1 .8-.8z"/><path d="M9.5 1.5V5H13"/></svg>
-            <span class="sm-action-t">Open a project file…<span class="sm-action-s">a sorted_&lt;shoot&gt;.sorted from any Mac</span></span>
+            <span class="sm-action-t">Open a shoot file…<span class="sm-action-s">a sorted_&lt;shoot&gt;.sorted from any Mac</span></span>
           </button>
           <button type="button" class="sm-action" id="sm-scan-another" title="pick another folder and start scanning it now">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg>
@@ -55,7 +55,7 @@
     <button type="button" id="help-toggle" class="tb-icon tb-help" title="how sorted works, section by section" aria-expanded="false" aria-controls="help">
       <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.3a2 2 0 1 1 2.8 1.8c-.6.3-.8.7-.8 1.3"/><circle cx="8" cy="11.6" r=".5" fill="currentColor" stroke="none"/></svg><span>How it works</span>
     </button>
-    <button type="button" id="inspector-toggle" class="tb-icon" title="show or hide the inspector" aria-pressed="false" aria-label="inspector">
+    <button type="button" id="inspector-toggle" class="tb-icon" title="show or hide details" aria-pressed="false" aria-label="details">
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg>
     </button>
     <!-- the mark, far right: site/brand/mark.svg, the lifting tile. Three tiles take currentColor rather
@@ -69,132 +69,132 @@
     </svg>
   </div>
   <nav>
-    <button type="button" data-view="search" class="on" title="search the shoot">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><span>Search</span>
-    </button>
-    <button type="button" data-view="people" title="people in the shoot">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/><path d="M11 3.5a2.3 2.3 0 0 1 0 4.4M12 9.2c1.6.5 2.5 1.8 2.5 3.8"/></svg><span>People</span>
-    </button>
-    <button type="button" data-view="categories" title="categories found in the shoot">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
-    </button>
-    <button type="button" data-view="places" title="where the shoot was shot">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M1.7 8h12.6"/><path d="M8 1.7c1.8 2 2.7 4 2.7 6.3s-.9 4.3-2.7 6.3c-1.8-2-2.7-4-2.7-6.3S6.2 3.7 8 1.7z"/></svg><span>Places</span><span id="nav-place-count" class="nav-count"></span>
-    </button>
-    <button type="button" id="nav-live" title="open the live view: shots land here as the camera takes them, for you and a TV">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="9" rx="1.5"/><path d="M5.5 14.5h5"/><circle cx="8" cy="7.5" r="2"/></svg><span>Live</span>
-    </button>
-    <button type="button" data-view="products" title="a product shoot: each product, its colours and its angles">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l5.8 3.1v6.8L8 14.5l-5.8-3.1V4.6z"/><path d="M2.2 4.6L8 7.7l5.8-3.1M8 7.7v6.8"/></svg><span>Products</span><span id="nav-product-count" class="nav-count"></span>
-    </button>
-    <button type="button" data-view="index" title="scan this folder, save or open the project file">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Scan</span>
-    </button>
-    <div class="nav-group">Filters</div>
-    <label class="check nav-row" title="only aerial shots"><input type="checkbox" id="aerial-only" name="aerial" value="1" form="q"> Drone shots</label>
-    <label class="check nav-row" id="slowmo-row" hidden title="only clips shot at 100 fps or more"><input type="checkbox" id="slowmo-only" name="slowmo" value="1" form="q"> Slow motion <span id="slowmo-count" class="nav-sub"></span></label>
-    <div class="focus-line nav-row" id="fps-line" hidden>
-      <span id="fps-status" title="clips whose frame rate, camera or picture profile the index does not know yet">clip details not read</span>
-      <button type="button" id="fps-read" class="link small" title="read the frame rate, camera and picture profile from each clip's header and sidecar; needs the disk, decodes nothing">Read clip details</button>
+    <div class="nav-views">
+      <button type="button" data-view="index" title="how far the shoot has got, what is left to finish, the shoot file and recent exports">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Shoot</span>
+      </button>
+      <button type="button" data-view="search" class="on" title="search the shoot">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><span>Search</span>
+      </button>
+      <button type="button" data-view="people" title="people in the shoot">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/><path d="M11 3.5a2.3 2.3 0 0 1 0 4.4M12 9.2c1.6.5 2.5 1.8 2.5 3.8"/></svg><span>People</span>
+      </button>
+      <button type="button" data-view="categories" title="categories found in the shoot">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2"/><rect x="9" y="9" width="5.5" height="5.5" rx="1.2"/></svg><span>Categories</span><span id="nav-cat-count" class="nav-count"></span>
+      </button>
+      <button type="button" data-view="places" id="nav-places" hidden title="where the shoot was shot">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M1.7 8h12.6"/><path d="M8 1.7c1.8 2 2.7 4 2.7 6.3s-.9 4.3-2.7 6.3c-1.8-2-2.7-4-2.7-6.3S6.2 3.7 8 1.7z"/></svg><span>Places</span><span id="nav-place-count" class="nav-count"></span>
+      </button>
+      <button type="button" data-view="products" title="a product shoot: each product, its colours and its angles">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l5.8 3.1v6.8L8 14.5l-5.8-3.1V4.6z"/><path d="M2.2 4.6L8 7.7l5.8-3.1M8 7.7v6.8"/></svg><span>Products</span><span id="nav-product-count" class="nav-count"></span>
+      </button>
     </div>
-    <fieldset id="kind-select" class="seg nav-row" title="photos, videos or both">
-      <label><input type="radio" name="kind" value="" form="q" checked><span>All</span></label>
-      <label><input type="radio" name="kind" value="photos" form="q"><span>Photos</span></label>
-      <label><input type="radio" name="kind" value="videos" form="q"><span>Videos</span></label>
-    </fieldset>
-    <div class="pick-group" id="shot-group" hidden>
-      <div class="nav-label" title="how much of the frame the subject fills, read off the picture; rows it could not call are left out">Framing</div>
-      <label class="check nav-row" title="only close ups: a face or a detail filling the frame"><input type="checkbox" name="shot_size" value="close" form="q" data-pick="shot"> Close <span class="nav-sub" data-count="close"></span></label>
-      <label class="check nav-row" title="only medium shots: a person from the waist or chest up"><input type="checkbox" name="shot_size" value="medium" form="q" data-pick="shot"> Medium <span class="nav-sub" data-count="medium"></span></label>
-      <label class="check nav-row" title="only wide shots: a whole room, a street, a landscape"><input type="checkbox" name="shot_size" value="wide" form="q" data-pick="shot"> Wide <span class="nav-sub" data-count="wide"></span></label>
-    </div>
-    <div class="pick-group" id="dur-group" hidden>
-      <div class="nav-label" title="how long the clip runs; photos are left out">Clip length</div>
-      <label class="check nav-row" title="only clips under 10 seconds"><input type="checkbox" name="duration" value="lt10" form="q" data-pick="dur"> Under 10 s <span class="nav-sub" data-count="lt10"></span></label>
-      <label class="check nav-row" title="only clips from 10 to 30 seconds"><input type="checkbox" name="duration" value="10to30" form="q" data-pick="dur"> 10 to 30 s <span class="nav-sub" data-count="10to30"></span></label>
-      <label class="check nav-row" title="only clips from 30 seconds to 2 minutes"><input type="checkbox" name="duration" value="30to120" form="q" data-pick="dur"> 30 s to 2 min <span class="nav-sub" data-count="30to120"></span></label>
-      <label class="check nav-row" title="only clips over 2 minutes"><input type="checkbox" name="duration" value="gt120" form="q" data-pick="dur"> Over 2 min <span class="nav-sub" data-count="gt120"></span></label>
-    </div>
-    <div class="pick-group" id="look-group" hidden>
-      <div class="nav-label" title="the picture profile the camera wrote beside the clip; only Sony writes it, so phone and drone clips are in neither row">Picture profile</div>
-      <label class="check nav-row" title="only clips shot in S-Log: flat on purpose, they need grading before anyone sees them"><input type="checkbox" name="look" value="log" form="q" data-pick="look"> Log, needs grading <span class="nav-sub" data-count="log"></span></label>
-      <label class="check nav-row" title="only clips the camera says were shot in Rec.709 or another ready to watch profile"><input type="checkbox" name="look" value="standard" form="q" data-pick="look"> Rec.709 and others <span class="nav-sub" data-count="standard"></span></label>
-    </div>
-    <div class="pick-group" id="flicker-group" hidden>
-      <div class="nav-label" title="light flicker from LED or tube lights on mains power, measured from a few seconds of each clip">Light flicker</div>
-      <label class="check nav-row" title="only clips where the brightness pulses from frame to frame"><input type="checkbox" name="flicker" value="pulsing" form="q" data-pick="flicker"> Pulsing <span class="nav-sub" data-count="pulsing"></span></label>
-      <label class="check nav-row" title="only clips with bands rolling through the picture"><input type="checkbox" name="flicker" value="banding" form="q" data-pick="flicker"> Banding <span class="nav-sub" data-count="banding"></span></label>
-      <label class="check nav-row" title="only clips checked and found clean"><input type="checkbox" name="flicker" value="none" form="q" data-pick="flicker"> Clean <span class="nav-sub" data-count="none"></span></label>
-    </div>
-    <div class="focus-line nav-row" id="flicker-line" hidden>
-      <span id="flicker-status">clips not checked for flicker</span>
-      <button type="button" id="flicker-read" class="link small" title="decode a few seconds of each clip; needs the disk">Check for flicker</button>
-    </div>
-    <div class="pick-group" id="camera-group" hidden>
-      <div class="nav-label">Camera</div>
-      <select id="camera-select" name="camera" form="q" class="nav-row" data-pick="camera" title="only what one camera body shot, photos and clips">
-        <option value="">Any camera</option>
-      </select>
-    </div>
-    <!-- ===== shoot modes: sequences (bursts, brackets, copies) and the camera's own settings ===== -->
-    <div class="pick-group" id="grp-group" hidden>
-      <div class="nav-label" title="frames the camera shot as one set: a burst holds its exposure, a bracket steps it">Sequences</div>
-      <label class="check nav-row" title="only frames shot as a burst: consecutive frames, a second or less apart, the same view"><input type="checkbox" name="group" value="burst" form="q" data-pick="grp"> Bursts <span class="nav-sub" data-count="burst"></span></label>
-      <label class="check nav-row" title="only exposure brackets: the same view shot at stepped exposures"><input type="checkbox" name="group" value="bracket" form="q" data-pick="grp"> Brackets <span class="nav-sub" data-count="bracket"></span></label>
-      <label class="check nav-row" title="only files that are on the disk more than once"><input type="checkbox" name="group" value="copies" form="q" data-pick="grp"> Copies <span class="nav-sub" data-count="copies"></span></label>
-      <div class="keep-best nav-row">
-        <button type="button" id="keep-burst" class="link small" title="put the sharpest frame of every burst the filters show into the pile; when every frame has a face, the sharpest eyes win">Keep the best of each burst</button>
-        <button type="button" id="keep-bracket" class="link small" title="put the middle exposure of every bracket the filters show into the pile">Keep the middle of each bracket</button>
+    <!-- the filters: Search only, so the rail is just the tabs anywhere else. Ratings, Days and Type stay on top, the rest
+         folds under More filters; everything here is a form="q" field, so hiding a row never takes its value out of the search -->
+    <div id="filters" class="filters">
+      <!-- ===== marks: filter by flag, minimum stars and colour label (keys P X U, 0 to 5, 6 to 9 set them) ===== -->
+      <div class="nav-group marks-head">Ratings <span id="marks-count" class="nav-sub"></span><button type="button" id="marks-clear" class="link small" hidden title="show every item again, whatever its flag, stars or label">Any</button></div>
+      <div id="marks-filter" class="marks-filter nav-row">
+        <fieldset id="marks-flag" class="seg" title="picked, rejected or not rated yet (P, X, U set them)">
+          <label><input type="radio" name="marks-flag" value="" checked><span>All</span></label>
+          <label><input type="radio" name="marks-flag" value="pick"><span>Picks</span></label>
+          <label><input type="radio" name="marks-flag" value="reject"><span>Rejects</span></label>
+          <label><input type="radio" name="marks-flag" value="none"><span>Not rated</span></label>
+        </fieldset>
+        <div class="marks-line">
+          <div id="marks-stars" class="marks-stars" role="group" aria-label="at least this many stars"></div>
+          <div id="marks-labels" class="marks-labels" role="group" aria-label="colour label"></div>
+        </div>
+        <p class="marks-keys" title="P and X work on the tile under the pointer; stars on what is picked, or else on that tile">P pick, X reject, 1 to 5 stars</p>
+        <button type="button" id="marks-xmp" class="link small" hidden title="an .xmp sidecar for every flagged, rated or labelled item, in the export folder in the shoot's own folder layout; nothing is written to the shoot">Save ratings for Lightroom</button>
+        <input type="hidden" name="flag" id="flag-filter" value="" form="q">
+        <input type="hidden" name="stars" id="stars-filter" value="" form="q">
+        <input type="hidden" name="label" id="label-filter" value="" form="q">
       </div>
-    </div>
-    <div class="pick-group" id="exif-group" hidden>
-      <div class="nav-label" title="what the camera wrote into each photo; unknown is a photo that says nothing">Camera settings</div>
-      <select id="lens-select" name="lens" form="q" class="nav-row" data-pick="lens" title="only what one lens shot"><option value="">Any lens</option></select>
-      <select id="focal-select" name="focal" form="q" class="nav-row" data-pick="focal" title="focal length, as on a full frame body"><option value="">Any focal length</option></select>
-      <select id="shutter-select" name="shutter" form="q" class="nav-row" data-pick="shutter" title="shutter speed"><option value="">Any shutter</option></select>
-      <select id="aperture-select" name="aperture" form="q" class="nav-row" data-pick="aperture" title="aperture"><option value="">Any aperture</option></select>
-      <select id="flash-select" name="flash" form="q" class="nav-row" data-pick="flash" title="what the camera recorded; a radio trigger can light a frame the camera calls no flash"><option value="">Flash or not</option></select>
-      <select id="iso-select" name="iso" form="q" class="nav-row" data-pick="iso" title="ISO"><option value="">Any ISO</option></select>
-    </div>
-    <div class="focus-line nav-row" id="camread-line" hidden>
-      <span id="camread-status" title="photos scanned before sorted kept the camera settings">camera settings not read</span>
-      <button type="button" id="camread" class="link small" title="read shutter, aperture, ISO, focal length, lens and flash from each photo's header; needs the disk, decodes nothing">Read camera settings</button>
-    </div>
-    <!-- ===== end shoot modes ===== -->
-    <div class="focus-line nav-row" id="clipfaces-line" hidden>
-      <span id="clipfaces-status" title="clips whose frames have not been checked for faces yet">clips not checked for faces</span>
-      <button type="button" id="clipfaces-find" class="link small" title="look for faces in the frames already saved on this Mac; the disk can stay unplugged">Find faces</button>
-    </div>
-    <label class="check nav-row" title="drop the photos and clips the focus check marked bad"><input type="checkbox" id="hide-bad" name="hide_bad" value="1" form="q"> Hide out of focus</label>
-    <label class="check nav-row" title="also drop the soft ones, the bottom 15 percent"><input type="checkbox" id="hide-soft" name="hide_soft" value="1" form="q"> Hide soft</label>
-    <label class="check nav-row" title="a file that is on the disk twice, and every frame of a burst, gets its own tile again"><input type="checkbox" id="show-copies"> Show every copy</label>
-    <div class="focus-line nav-row">
-      <span id="focus-status" title="how much of the shoot has been through the focus check">focus not checked</span>
-      <button type="button" id="check-focus" class="link small" title="score every photo and clip once; photos are free, clips take seconds">Check focus</button>
-    </div>
-    <!-- ===== marks: filter by flag, minimum stars and colour label (keys P X U, 0 to 5, 6 to 9 set them) ===== -->
-    <div class="nav-group marks-head">Ratings <span id="marks-count" class="nav-sub"></span><button type="button" id="marks-clear" class="link small" hidden title="show every item again, whatever its flag, stars or label">Any</button></div>
-    <div id="marks-filter" class="marks-filter nav-row">
-      <fieldset id="marks-flag" class="seg" title="picked, rejected or neither (P, X, U set them)">
-        <label><input type="radio" name="marks-flag" value="" checked><span>All</span></label>
-        <label><input type="radio" name="marks-flag" value="pick"><span>Picks</span></label>
-        <label><input type="radio" name="marks-flag" value="reject"><span>Rejects</span></label>
-        <label><input type="radio" name="marks-flag" value="none"><span>Neither</span></label>
+      <!-- ===== end marks ===== -->
+      <div class="nav-group" id="days-group" hidden>Days <span id="days-count" class="nav-sub"></span></div>
+      <div id="days-list" class="days-list nav-row" hidden></div>
+      <div class="nav-group" id="type-group" hidden>Type</div>
+      <fieldset id="kind-select" class="seg nav-row" hidden title="photos, videos or both">
+        <label><input type="radio" name="kind" value="" form="q" checked><span>All</span></label>
+        <label><input type="radio" name="kind" value="photos" form="q"><span>Photos</span></label>
+        <label><input type="radio" name="kind" value="videos" form="q"><span>Videos</span></label>
       </fieldset>
-      <div class="marks-line">
-        <div id="marks-stars" class="marks-stars" role="group" aria-label="at least this many stars"></div>
-        <div id="marks-labels" class="marks-labels" role="group" aria-label="colour label"></div>
+      <label class="check nav-row" id="aerial-row" hidden title="only aerial shots"><input type="checkbox" id="aerial-only" name="aerial" value="1" form="q"> Drone shots</label>
+      <label class="check nav-row" id="slowmo-row" hidden title="only clips shot at 100 fps or more"><input type="checkbox" id="slowmo-only" name="slowmo" value="1" form="q"> Slow motion <span id="slowmo-count" class="nav-sub"></span></label>
+      <!-- one Focus control: the menu writes the two hidden boxes, which are what the chips and the search read -->
+      <div class="focus-row nav-row" id="focus-row">
+        <span class="focus-word">Focus</span>
+        <select id="focus-select" title="hide what the focus check found soft" hidden>
+          <option value="">Any</option>
+          <option value="bad">Hide blurry</option>
+          <option value="soft">Sharpest only</option>
+        </select>
+        <button type="button" id="focus-offer" class="link small" title="score every photo and clip once; photos are free, clips take seconds">Check focus</button>
       </div>
-      <button type="button" id="marks-xmp" class="link small" title="an .xmp sidecar for every flagged, rated or labelled item, in the export folder in the shoot's own folder layout; nothing is written to the shoot">Write XMP sidecars</button>
-      <input type="hidden" name="flag" id="flag-filter" value="" form="q">
-      <input type="hidden" name="stars" id="stars-filter" value="" form="q">
-      <input type="hidden" name="label" id="label-filter" value="" form="q">
+      <input type="checkbox" id="hide-bad" name="hide_bad" value="1" form="q" hidden>
+      <input type="checkbox" id="hide-soft" name="hide_soft" value="1" form="q" hidden>
+      <input type="hidden" name="sharp" id="sharp-filter" value="" form="q">
+      <button type="button" id="more-toggle" class="more-toggle" aria-expanded="false" aria-controls="more-filters" hidden><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>More filters <span id="more-count" class="nav-sub"></span></button>
+      <div id="more-filters" hidden>
+      <div class="pick-group" id="shot-group" hidden>
+        <div class="nav-label" title="how much of the frame the subject fills, read off the picture; rows it could not call are left out">Shot size</div>
+        <label class="check nav-row" title="only close ups: a face or a detail filling the frame"><input type="checkbox" name="shot_size" value="close" form="q" data-pick="shot"> Close <span class="nav-sub" data-count="close"></span></label>
+        <label class="check nav-row" title="only medium shots: a person from the waist or chest up"><input type="checkbox" name="shot_size" value="medium" form="q" data-pick="shot"> Medium <span class="nav-sub" data-count="medium"></span></label>
+        <label class="check nav-row" title="only wide shots: a whole room, a street, a landscape"><input type="checkbox" name="shot_size" value="wide" form="q" data-pick="shot"> Wide <span class="nav-sub" data-count="wide"></span></label>
+      </div>
+      <div class="pick-group" id="dur-group" hidden>
+        <div class="nav-label" title="how long the clip runs; photos are left out">Clip length</div>
+        <label class="check nav-row" title="only clips under 10 seconds"><input type="checkbox" name="duration" value="lt10" form="q" data-pick="dur"> Under 10 s <span class="nav-sub" data-count="lt10"></span></label>
+        <label class="check nav-row" title="only clips from 10 to 30 seconds"><input type="checkbox" name="duration" value="10to30" form="q" data-pick="dur"> 10 to 30 s <span class="nav-sub" data-count="10to30"></span></label>
+        <label class="check nav-row" title="only clips from 30 seconds to 2 minutes"><input type="checkbox" name="duration" value="30to120" form="q" data-pick="dur"> 30 s to 2 min <span class="nav-sub" data-count="30to120"></span></label>
+        <label class="check nav-row" title="only clips over 2 minutes"><input type="checkbox" name="duration" value="gt120" form="q" data-pick="dur"> Over 2 min <span class="nav-sub" data-count="gt120"></span></label>
+      </div>
+      <div class="pick-group" id="look-group" hidden>
+        <div class="nav-label" title="the picture profile the camera wrote beside the clip; only Sony writes it, so phone and drone clips are in neither row">Picture profile</div>
+        <label class="check nav-row" title="only clips shot in S-Log: flat on purpose, they need grading before anyone sees them"><input type="checkbox" name="look" value="log" form="q" data-pick="look"> Flat, needs grading <span class="nav-sub" data-count="log"></span></label>
+        <label class="check nav-row" title="only clips the camera says were shot in Rec.709 or another ready to watch profile"><input type="checkbox" name="look" value="standard" form="q" data-pick="look"> Ready to use <span class="nav-sub" data-count="standard"></span></label>
+      </div>
+      <div class="pick-group" id="flicker-group" hidden>
+        <div class="nav-label" title="light flicker from LED or tube lights on mains power, measured from a few seconds of each clip">Flicker</div>
+        <label class="check nav-row" title="only clips where the brightness pulses from frame to frame"><input type="checkbox" name="flicker" value="pulsing" form="q" data-pick="flicker"> Flickering <span class="nav-sub" data-count="pulsing"></span></label>
+        <label class="check nav-row" title="only clips with bands rolling through the picture"><input type="checkbox" name="flicker" value="banding" form="q" data-pick="flicker"> Bands <span class="nav-sub" data-count="banding"></span></label>
+        <label class="check nav-row" title="only clips checked and found clean"><input type="checkbox" name="flicker" value="none" form="q" data-pick="flicker"> No flicker <span class="nav-sub" data-count="none"></span></label>
+      </div>
+      <div class="pick-group" id="camera-group" hidden>
+        <div class="nav-label">Camera</div>
+        <select id="camera-select" name="camera" form="q" class="nav-row" data-pick="camera" title="only what one camera body shot, photos and clips">
+          <option value="">Any camera</option>
+        </select>
+      </div>
+      <!-- ===== shoot modes: sequences (bursts, brackets, copies) and the camera's own settings ===== -->
+      <div class="pick-group" id="grp-group" hidden>
+        <div class="nav-label" title="frames the camera shot as one set: a burst holds its exposure, a bracket steps it">Bursts and brackets</div>
+        <label class="check nav-row" title="only frames shot as a burst: consecutive frames, a second or less apart, the same view"><input type="checkbox" name="group" value="burst" form="q" data-pick="grp"> Bursts <span class="nav-sub" data-count="burst"></span></label>
+        <label class="check nav-row" title="only exposure brackets: the same view shot at stepped exposures"><input type="checkbox" name="group" value="bracket" form="q" data-pick="grp"> Brackets <span class="nav-sub" data-count="bracket"></span></label>
+        <label class="check nav-row" title="only files that are on the disk more than once"><input type="checkbox" name="group" value="copies" form="q" data-pick="grp"> Copies <span class="nav-sub" data-count="copies"></span></label>
+        <div class="keep-best nav-row">
+          <button type="button" id="keep-burst" class="link small" title="pick the sharpest frame of every burst the filters show; when every frame has a face, the sharpest eyes win">Keep the best of each burst</button>
+          <button type="button" id="keep-bracket" class="link small" title="pick the middle exposure of every bracket the filters show">Keep the middle of each bracket</button>
+        </div>
+        <label class="check nav-row" id="copies-row" title="a file that is on the disk twice, and every frame of a burst, gets its own tile again"><input type="checkbox" id="show-copies"> Show every copy</label>
+      </div>
+      <div class="pick-group" id="exif-group" hidden>
+        <div class="nav-label" title="what the camera wrote into each photo; unknown is a photo that says nothing">Camera settings</div>
+        <select id="lens-select" name="lens" form="q" class="nav-row" data-pick="lens" title="only what one lens shot"><option value="">Any lens</option></select>
+        <select id="focal-select" name="focal" form="q" class="nav-row" data-pick="focal" title="focal length, as on a full frame body"><option value="">Any focal length</option></select>
+        <select id="shutter-select" name="shutter" form="q" class="nav-row" data-pick="shutter" title="shutter speed"><option value="">Any shutter</option></select>
+        <select id="aperture-select" name="aperture" form="q" class="nav-row" data-pick="aperture" title="aperture"><option value="">Any aperture</option></select>
+        <select id="flash-select" name="flash" form="q" class="nav-row" data-pick="flash" title="what the camera recorded; a radio trigger can light a frame the camera calls no flash"><option value="">Flash or not</option></select>
+        <select id="iso-select" name="iso" form="q" class="nav-row" data-pick="iso" title="ISO"><option value="">Any ISO</option></select>
+      </div>
+      </div>
     </div>
-    <!-- ===== end marks ===== -->
-    <div class="nav-group" id="days-group" hidden>Days <span id="days-count" class="nav-sub"></span></div>
-    <div id="days-list" class="days-list nav-row" hidden></div>
-    <div class="nav-group" id="saved-group" hidden>Saved searches</div>
-    <div id="saved-searches" class="saved-searches nav-row" hidden></div>
+    <div class="nav-slot">
+      <button type="button" id="nav-live" title="opens the live view in its own window: shots land there as the camera takes them, for you and a TV">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="9" rx="1.5"/><path d="M5.5 14.5h5"/><circle cx="8" cy="7.5" r="2"/></svg><span>Live</span>
+      </button>
+    </div>
   </nav>
 </header>
 
@@ -206,20 +206,23 @@
         <span class="wordmark">sorted</span>
       </div>
       <p class="welcome-lede">sorted scans every photo and clip on a shoot disk and keeps what it learns on this Mac. Search the shoot in plain words, pull every frame of one person, sort it into categories, export what you pick. Nothing leaves the Mac.</p>
-      <p class="welcome-ask">Connect the shoot disk, then:</p>
-      <p id="welcome-unmounted" class="welcome-unmounted" hidden>Connect <span id="welcome-disk"></span> or scan another folder.</p>
-      <p id="welcome-scanleft" class="welcome-scanleft" hidden><span id="welcome-scanleft-text"></span> The scan continues from where it stopped once the disk is back.</p>
       <div class="welcome-actions">
+        <div class="welcome-lines">
+          <p class="welcome-ask">Connect the shoot disk, then:</p>
+          <p id="welcome-unmounted" class="welcome-unmounted" hidden>Connect <span id="welcome-disk"></span> or scan another folder.</p>
+          <p id="welcome-scanleft" class="welcome-scanleft" hidden><span id="welcome-scanleft-text"></span> The scan continues from where it stopped once the disk is back.</p>
+        </div>
         <button type="button" id="welcome-scan" class="btn welcome-btn" title="pick a disk or folder; a folder not scanned yet starts scanning straight away">
           <svg class="glyph glyph-disk" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 13.5h18"/><circle cx="17" cy="16.5" r="1" fill="currentColor" stroke="none"/><path d="M7 9h5"/></svg>
           <span class="t"><span class="l">Scan a disk or folder</span>
           <span class="s">Pick the folder. A new one starts scanning at once; a scanned one opens.</span></span>
         </button>
-        <button type="button" id="welcome-load" class="btn welcome-btn" title="open a sorted project file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
+        <button type="button" id="welcome-load" class="btn welcome-btn" title="open a sorted shoot file (sorted_&lt;shoot&gt;.sorted) made on this or another Mac">
           <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
-          <span class="t"><span class="l">Open a project file</span>
+          <span class="t"><span class="l">Open a shoot file</span>
           <span class="s">A sorted_&lt;shoot&gt;.sorted from any Mac. The shoot opens in seconds, already sorted.</span></span>
         </button>
+        <p class="welcome-ask welcome-ask-live">Camera in hand:</p>
         <button type="button" id="welcome-live" class="btn welcome-btn" title="tether a camera and sort each shot as it lands">
           <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h3.2L8.8 5h6.4l1.6 2.5H20a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9A1.5 1.5 0 0 1 4 7.5z"/><circle cx="12" cy="13" r="3.6"/></svg>
           <span class="t"><span class="l">Start a live shoot</span>
@@ -227,8 +230,8 @@
         </button>
       </div>
       <div class="welcome-under">
-        <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="welcome-faces" checked> Detect faces on photos</label>
-        <p class="welcome-note">Faces can be added later from the People tab.</p>
+        <label class="check" title="find people while scanning; untick to scan faster and find them later"><input type="checkbox" id="welcome-faces" checked> Find people</label>
+        <p class="welcome-note">People can be found later from the People tab.</p>
         <label class="check" title="find products while scanning; leave it off to scan faster and find them later"><input type="checkbox" id="welcome-products"> Find products</label>
         <p class="welcome-note">Products can be found later from the Products tab.</p>
       </div>
@@ -241,24 +244,19 @@
     <div class="search-head">
     <form id="q" class="subbar">
       <span class="q-wrap"><input type="search" name="q" placeholder="Search" title="describe the shot: balcony, dining table, couple laughing; arrow down lists recent searches" autofocus autocomplete="off" aria-expanded="false" aria-controls="q-history"><div id="q-history" class="q-history" role="listbox" aria-label="recent searches" hidden></div></span>
-      <label class="slider" title="hide anything softer than this">Sharp <input type="range" name="sharp" min="0" max="90" step="5" value="0"><input type="number" id="sharp-out" class="val" min="0" max="90" step="5" value="0" title="minimum sharpness, percent"></label>
-      <select name="faces" title="how many faces in the frame">
+      <!-- one People menu over the two real selects: a row writes the select and fires its change, so how many and who still combine -->
+      <div class="pick">
+        <button type="button" id="people-btn" class="btn pick-btn" aria-haspopup="true" aria-expanded="false" aria-controls="people-menu" title="how many people in the frame, or one person">People<svg class="shoot-chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4L5 7l3-3"/></svg></button>
+        <div id="people-menu" class="pick-menu" hidden></div>
+      </div>
+      <select name="faces" hidden>
         <option value="">Any faces</option>
         <option value="none">No people</option>
         <option value="one">One person</option>
         <option value="two">Two people</option>
         <option value="group">Group of 3+</option>
       </select>
-      <select name="person" id="person-select" title="only a particular person"><option value="">anyone</option></select>
-      <select name="sort" id="sort-select" title="the order of the grid; a search always comes back best match first">
-        <option value="">Oldest first</option>
-        <option value="newest">Newest first</option>
-        <option value="biggest">Biggest files</option>
-        <option value="smallest">Smallest files</option>
-        <option value="name">File name</option>
-        <option value="longest">Longest clip</option>
-      </select>
-      <button type="submit" class="btn primary" title="run the search (Enter)">Find</button>
+      <select name="person" id="person-select" hidden><option value="">anyone</option></select>
       <input type="hidden" name="category" id="category-filter" value="">
       <input type="hidden" name="cluster" id="cluster-filter" value="">
       <input type="hidden" name="day" id="day-filter" value="">
@@ -266,8 +264,6 @@
       <input type="hidden" name="pile" id="pile-filter" value="">
       <input type="hidden" name="product" id="product-filter" value="">
       <input type="hidden" name="variant" id="variant-filter" value="">
-      <span class="spring"></span>
-      <button type="button" id="selectall-top" class="link" hidden title="select every card shown (command-A)">Select all shown</button>
     </form>
     <div id="ctxbar" class="ctxbar" hidden>
       <button type="button" id="ctx-back" class="ctx-back" title="remove the last filter (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M6.5 1.5L3 5l3.5 3.5"/></svg><span id="ctx-back-label">Back</span></button>
@@ -282,22 +278,34 @@
       <span id="scanbar-awake" class="scanbar-awake" hidden title="caffeinate holds the Mac awake until the scan ends">keeping the Mac awake</span>
       <span class="spring"></span>
       <button type="button" id="scanbar-continue" class="btn small primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
-      <button type="button" id="scanbar-tab" class="link" title="the Scan tab (command-5)">Scan tab</button>
+      <button type="button" id="scanbar-tab" class="link" title="the Shoot tab (command-1)">Shoot tab</button>
+    </div>
+    <div id="grid-head" class="grid-head" hidden>
+      <span id="grid-count"></span>
+      <span class="spring"></span>
+      <select name="sort" id="sort-select" form="q" title="the order of the grid; a search always comes back best match first">
+        <option value="">Oldest first</option>
+        <option value="newest">Newest first</option>
+        <option value="biggest">Biggest files</option>
+        <option value="smallest">Smallest files</option>
+        <option value="name">File name</option>
+        <option value="longest">Longest clip</option>
+      </select>
+      <button type="button" id="selectall-top" class="link" hidden title="pick every tile shown (command-A)">Pick all shown</button>
     </div>
     </div>
     <div id="grid" class="grid" role="grid" aria-label="results"></div>
     <div id="more-row" class="row more" hidden>
       <span id="shown-count"></span>
       <button type="button" id="show-more" class="btn" title="load the next 200">Show more</button>
-      <button type="button" id="select-matching" class="link" title="select every match, shown or not">Select all matching</button>
+      <button type="button" id="select-matching" class="link" title="pick every match, shown or not">Pick all matching</button>
     </div>
     <footer id="selbar" class="actionbar" hidden>
       <span id="selcount"></span>
-      <button type="button" id="selectall" class="link" title="select every card shown (command-A)">Select all shown</button>
-      <button type="button" id="pile-show" class="link" hidden title="only what is in the pile, in the grid on its own">Show the pile</button>
-      <button type="button" id="clearsel" class="link" title="empty the pile">Clear</button>
-      <button type="button" id="reveal-sel" class="link" title="open the selected files in the Finder, highlighted (command shift R)">Show in Finder</button>
-      <button type="button" id="xmp-sel" class="link" title="an .xmp sidecar for each selected item that has a flag, stars or a label, in the export folder; nothing is written to the shoot">Write XMP</button>
+      <button type="button" id="pile-show" class="link" hidden title="only what is picked, in the grid on its own">Show picked</button>
+      <button type="button" id="clearsel" class="link" title="take everything off the list; Undo in the status line puts it back">Clear</button>
+      <button type="button" id="reveal-sel" class="link" title="open the picked files in the Finder, highlighted (command shift R)">Show in Finder</button>
+      <button type="button" id="xmp-sel" class="link" title="an .xmp sidecar for each picked item that has a flag, stars or a label, in the export folder; nothing is written to the shoot">Save ratings for Lightroom</button>
       <span class="spring"></span>
       <span id="export-plan" class="export-plan" hidden aria-live="polite"></span>
       <span class="sel-export export-group">
@@ -306,15 +314,15 @@
           <label><input type="radio" name="dest-sel" value="drive"><span>Google Drive</span></label>
         </fieldset>
         <input id="exportname" type="text" placeholder="Folder name" autocomplete="off" title="the export folder's name">
-        <select id="export-preset" title="what the export is for: sets copy or links, the size and the RAW box; remembered for this shoot">
-          <option value="web">Client web set (2048 px JPEG)</option>
-          <option value="links">Editor selects (links)</option>
+        <select id="export-preset" title="what the export is for: sets copy or shortcuts, the size and the RAW box; remembered for this shoot">
+          <option value="web">For the client (web size)</option>
+          <option value="links">For the editor</option>
           <option value="full">Full size copy</option>
           <option value="custom">Custom</option>
         </select>
-        <select id="exportmode" title="copy the files, link to them, or list them">
+        <select id="exportmode" title="copy the files, make shortcuts to them, or list them">
           <option value="copy">Copy</option>
-          <option value="symlink">Links (need the disk plugged in)</option>
+          <option value="symlink">Shortcuts to the originals</option>
           <option value="csv">CSV</option>
         </select>
         <select id="export-size" title="the long edge for photos in a copy; RAW files and clips are never resized">
@@ -324,7 +332,7 @@
           <option value="1600">1600 px</option>
         </select>
         <label class="check" id="export-raw-label" title="also export the RAW next to each JPEG"><input type="checkbox" id="export-raw"> RAW</label>
-        <button type="button" id="export" class="btn" title="export the selection">Export</button>
+        <button type="button" id="export" class="btn" title="export what is picked">Export</button>
       </span>
       <div id="drive-strip" class="drive-strip" hidden>
         <div class="drive-line">
@@ -350,13 +358,16 @@
 
   <section id="view-people" hidden>
     <div class="subbar">
-      <label class="slider" title="how close a face must be to count as a match">Match <input id="find-sim" type="range" min="0.4" max="0.8" step="0.01" value="0.55"><input type="number" id="find-sim-out" class="val" min="0.4" max="0.8" step="0.01" value="0.55" title="match threshold"></label>
-      <span class="spring"></span>
       <button type="button" id="cluster" class="btn" title="sort every detected face into people">Group faces</button>
-      <label class="field" title="lower is stricter; leave it unless groups mix people">Tightness <input id="eps" type="number" step="0.01" min="0.1" max="0.9" value="0.32"></label>
-      <button type="button" id="export-people" class="btn" title="export links for every person, group and solo shot">Export people</button>
+      <button type="button" id="export-people" class="btn" title="export shortcuts for every person, group and solo shot">Export people</button>
+      <span class="spring"></span>
+      <button type="button" id="people-more" class="link" aria-expanded="false" aria-controls="people-tuning" title="how strictly faces are grouped and matched">More</button>
     </div>
-    <p id="faces-pending-row" class="hint faces-pending" hidden><span id="faces-pending-text"></span> <button type="button" id="faces-pending-scan" class="link small" title="find faces in the photos that were scanned without them">find them now</button></p>
+    <div id="people-tuning" class="subbar-more" hidden>
+      <label class="slider" title="how close a face must be to count as a match">How close a match <input id="find-sim" type="range" min="0.4" max="0.8" step="0.01" value="0.55"><input type="number" id="find-sim-out" class="val" min="0.4" max="0.8" step="0.01" value="0.55" title="match threshold"></label>
+      <label class="field" title="lower is stricter; leave it unless groups mix people">Grouping strictness <input id="eps" type="number" step="0.01" min="0.1" max="0.9" value="0.32"></label>
+    </div>
+    <p id="faces-pending-row" class="hint faces-pending" hidden><span id="faces-pending-text"></span> <button type="button" id="faces-pending-scan" class="link small" title="find faces in the photos that were scanned without them">Find people</button></p>
     <div id="merge-block" class="panel" data-panel="merge" hidden>
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Same person? <span class="sub">answers are remembered on every re-grouping</span></button>
       <div class="panel-body">
@@ -391,9 +402,9 @@
           <label><input type="radio" name="dest-people" value="mac" checked><span>This Mac</span></label>
           <label><input type="radio" name="dest-people" value="drive"><span>Google Drive</span></label>
         </fieldset>
-        <select id="people-export-mode" title="copy the files or link to them">
+        <select id="people-export-mode" title="copy the files or make shortcuts to them">
           <option value="copy">Copy</option>
-          <option value="symlink">Links (need the disk plugged in)</option>
+          <option value="symlink">Shortcuts to the originals</option>
         </select>
         <button type="button" id="people-export-refs" class="btn" title="export everyone ticked above">Export ticked people</button>
       </span>
@@ -422,7 +433,7 @@
 
   <section id="view-categories" hidden>
     <div class="subbar">
-      <button type="button" id="categorise" class="btn" title="sort the shoot into categories with the on-device model">Categorise</button>
+      <button type="button" id="categorise" class="btn" title="sort the shoot into categories with the on-device model">Sort into categories</button>
       <span id="cat-progress"></span>
     </div>
     <div class="panel" data-panel="cats">
@@ -430,21 +441,21 @@
       <div class="panel-body"><div id="cat-tiles" class="tiles"></div></div>
     </div>
     <div class="panel" data-panel="disc">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Discovered in this shoot <span class="sub">found by the model on its own; names are its best guess</span></button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Also found <span class="sub">found by the model on its own; names are its best guess</span></button>
       <div class="panel-body"><div id="disc-tiles" class="tiles"></div></div>
     </div>
     <div id="cat-export-row" class="actionbar" hidden>
       <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="cat-include-raw"> Include RAW files</label>
-      <label class="check" title="also export the less sure matches"><input type="checkbox" id="cat-include-unsure"> Include less sure</label>
+      <label class="check" title="also export the possible matches"><input type="checkbox" id="cat-include-unsure"> Include possible matches</label>
       <span class="spring"></span>
       <span class="export-group">
         <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
           <label><input type="radio" name="dest-cat" value="mac" checked><span>This Mac</span></label>
           <label><input type="radio" name="dest-cat" value="drive"><span>Google Drive</span></label>
         </fieldset>
-        <select id="cat-export-mode" title="copy the files or link to them">
+        <select id="cat-export-mode" title="copy the files or make shortcuts to them">
           <option value="copy">Copy</option>
-          <option value="symlink">Links (need the disk plugged in)</option>
+          <option value="symlink">Shortcuts to the originals</option>
         </select>
         <select id="cat-videos" title="whole clips, or only the matching segments">
           <option value="clips">Whole clips</option>
@@ -482,9 +493,9 @@
       <span class="spring"></span>
       <span class="export-group">
         <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="products-raw"> RAW</label>
-        <select id="products-mode" title="copy the files or link to them">
+        <select id="products-mode" title="copy the files or make shortcuts to them">
           <option value="copy">Copy</option>
-          <option value="symlink">Links (need the disk plugged in)</option>
+          <option value="symlink">Shortcuts to the originals</option>
         </select>
         <button type="button" id="products-export" class="btn" title="one folder per product and colour, named like bottle red">Export one folder per colour</button>
       </span>
@@ -512,13 +523,13 @@
       </div>
       <div id="cull-list" class="cull-list"></div>
       <div id="cull-actions" class="actionbar" hidden>
-        <button type="button" id="cull-pile" class="btn" title="put every pick in the pile, to look at them in Search or export them your own way">Send picks to the pile</button>
+        <button type="button" id="cull-pile" class="btn" title="put every frame chosen here on the Picked list, to look at them in Search or export them your own way">Add to Picked</button>
         <span class="spring"></span>
         <span class="export-group">
           <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="cull-raw"> RAW</label>
-          <select id="cull-mode" title="copy the files or link to them">
+          <select id="cull-mode" title="copy the files or make shortcuts to them">
             <option value="copy">Copy</option>
-            <option value="symlink">Links (need the disk plugged in)</option>
+            <option value="symlink">Shortcuts to the originals</option>
           </select>
           <button type="button" id="cull-export" class="btn primary" title="a folder per product with a folder per colour inside, and a spreadsheet of every frame, picked or left out and why">Export for the client</button>
         </span>
@@ -530,37 +541,24 @@
 
   <section id="view-index" hidden>
     <div class="subbar">
-      <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder">Scan this folder</button>
-      <button type="button" id="scan-another" class="link" title="pick another folder and start scanning it now; this shoot stays scanned and can be opened again from the shoots menu">Scan another folder…</button>
-      <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
+      <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder; another folder is in the shoots menu at the top">Scan this folder</button>
+      <label class="check" title="find people while scanning; untick to scan faster and find them later"><input type="checkbox" id="faces" checked> Find people</label>
       <label class="check" title="find products while scanning; leave it off to scan faster and find them later"><input type="checkbox" id="scan-products"> Find products</label>
-      <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
-      <span class="spring"></span>
-      <button type="button" id="bundle-import" class="btn" title="open a sorted project file made on this or another Mac">Open project…</button>
-    </div>
-    <div class="panel" data-panel="project">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Project file <span class="sub">the shoot, sorted, in one file: hand it over with the disk</span></button>
-      <div class="panel-body">
-        <div class="project-card">
-          <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
-          <div class="project-main">
-            <div id="project-name" class="project-name" title="the project file for this shoot"></div>
-            <div class="project-where">Saves to <span id="project-dir" class="filename" title=""></span></div>
-            <div id="project-state" class="project-state">Not saved yet</div>
-          </div>
-          <div class="project-actions">
-            <button type="button" id="project-save" class="btn primary" title="save the project file to the folder above (command S)">Save project</button>
-            <button type="button" id="bundle-export" class="btn" title="move the project file: pick another folder, and every Save from now on writes there">Save to…</button>
-            <button type="button" id="bundle-copy" class="btn" title="write one extra copy somewhere else, to hand over; the folder above and the saved time do not change">Save a copy…</button>
-            <button type="button" id="bundle-reveal" class="btn" hidden title="show the project file in the Finder">Show in Finder</button>
-          </div>
-        </div>
-        <p class="hint">Like a Premiere project: what is in each shot, the thumbnails, the saved people, your searches and exports, all in one file. Nothing from the disk is copied into it. Give it to an editor with the disk and their Mac opens the shoot in seconds instead of scanning again. Every finished scan saves it on its own; save again after naming people, or after anything else you want to keep.</p>
-      </div>
+      <label class="check" id="retry-row" hidden title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
     </div>
     <div class="panel" data-panel="progress">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Progress</button>
       <div class="panel-body">
+        <!-- what is still undone on this shoot, one link each; a link goes when its job is done, and the line goes with the last one -->
+        <div id="finish-line" class="finish-line" hidden>
+          <span class="finish-word">Finish this shoot:</span>
+          <button type="button" id="fps-read" class="link small" hidden>Read clip details</button>
+          <button type="button" id="flicker-read" class="link small" hidden>Check for flicker</button>
+          <button type="button" id="camread" class="link small" hidden>Read camera settings</button>
+          <button type="button" id="clipfaces-find" class="link small" hidden>Find faces</button>
+          <button type="button" id="check-focus" class="link small" hidden>Check focus</button>
+          <button type="button" id="finish-places" class="link small" hidden>Read locations</button>
+        </div>
         <div id="scan-resume" class="scan-resume" hidden>
           <p id="scan-resume-text" class="scan-resume-text"></p>
           <button type="button" id="scan-continue" class="btn primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
@@ -582,6 +580,27 @@
         </div>
       </div>
     </div>
+    <div class="panel collapsed" data-panel="project">
+      <button type="button" class="panel-head" aria-expanded="false"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Shoot file <span class="sub">the shoot, sorted, in one file: hand it over with the disk</span></button>
+      <div class="panel-body">
+        <div class="project-card">
+          <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
+          <div class="project-main">
+            <div id="project-name" class="project-name" title="the shoot file for this shoot"></div>
+            <div class="project-where">Saves to <span id="project-dir" class="filename" title=""></span></div>
+            <div id="project-state" class="project-state">Not saved yet</div>
+          </div>
+          <div class="project-actions">
+            <button type="button" id="project-save" class="btn primary" title="save the shoot file to the folder above (command S)">Save shoot file</button>
+            <button type="button" id="bundle-export" class="btn" title="move the shoot file: pick another folder, and every Save from now on writes there">Save to…</button>
+            <button type="button" id="bundle-copy" class="btn" title="write one extra copy somewhere else, to hand over; the folder above and the saved time do not change">Save a copy…</button>
+            <button type="button" id="bundle-reveal" class="btn" hidden title="show the shoot file in the Finder">Show in Finder</button>
+            <button type="button" id="bundle-import" class="btn" title="open a sorted shoot file made on this or another Mac">Open a shoot file…</button>
+          </div>
+        </div>
+        <p class="hint">Like a Premiere project: what is in each shot, the thumbnails, the saved people, your searches and exports, all in one file. Nothing from the disk is copied into it. Give it to an editor with the disk and their Mac opens the shoot in seconds instead of scanning again. Every finished scan saves it on its own; save again after naming people, or after anything else you want to keep.</p>
+      </div>
+    </div>
     <div class="panel" data-panel="exports">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Recent exports <span class="sub">the last 10 from this shoot: what went where</span></button>
       <div class="panel-body">
@@ -590,7 +609,7 @@
       </div>
     </div>
     <div id="reorg-block" class="panel collapsed" data-panel="reorganise">
-      <button type="button" class="panel-head danger" aria-expanded="false" title="the one thing that writes to the shoot disk"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Reorganise disk</button>
+      <button type="button" class="panel-head danger" aria-expanded="false" title="the one thing that writes to the shoot disk"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Move files into folders</button>
       <div class="panel-body reorg">
         <p class="hint reorg-warn">This moves files on the shoot disk into sorted/. Nothing is deleted or copied.<br>Undo restores every file to where it was.</p>
         <div id="reorg-setup">
@@ -603,10 +622,10 @@
         </div>
         <div id="reorg-plan" hidden>
           <p id="reorg-summary" class="reorg-summary"></p>
-          <div class="reorg-table-wrap"><table id="reorg-sample" class="reorg-table"><thead><tr><th>from</th><th></th><th>to</th></tr></thead><tbody></tbody></table></div>
+          <div class="reorg-table-wrap"><table id="reorg-sample" class="reorg-table"><thead><tr><th>from</th><th>to</th></tr></thead><tbody></tbody></table></div>
           <div class="reorg-row">
             <input type="text" id="reorg-confirm" autocomplete="off" spellcheck="false" placeholder="" title="type the shoot folder's name exactly to arm the button">
-            <button type="button" id="reorg-apply" class="btn danger" disabled title="move the files now; Undo puts them back">Reorganise disk</button>
+            <button type="button" id="reorg-apply" class="btn danger" disabled title="move the files now; Undo puts them back">Move files into folders</button>
           </div>
         </div>
         <div id="reorg-status" class="reorg-row" hidden>
@@ -618,9 +637,9 @@
   </section>
 </main>
 
-<aside id="inspector" aria-label="inspector">
+<aside id="inspector" aria-label="details">
   <div class="insp-inner">
-    <div id="insp-body"><p class="insp-empty">Select a photo or clip</p></div>
+    <div id="insp-body"><p class="insp-empty">Point at a photo or clip, or pick one</p></div>
   </div>
 </aside>
 
@@ -640,53 +659,54 @@
       </div>
     </div>
     <div class="panel" data-panel="help-scan">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, and the project file</button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Scan, and the shoot file</button>
       <div class="panel-body help-lines">
-        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Scan tab shows how far it is. The photos and clips are only ever read. The Mac stays awake until the scan ends.</p>
-        <p>If the disk is unplugged or the Mac dies mid-scan, nothing is lost: the shoot opens with "2,080 of 4,315 scanned" and a Continue scan button that reads only what is missing. The Scan tab's last line says what is on the disk, what is scanned and what is searchable, with one button for the gap.</p>
-        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort, and is packed into one file, sorted_&lt;shoot&gt;.sorted, right in the scanned folder, so it travels with the disk. That file is the one thing the app ever writes there. It is saved when every scan finishes, with no click; "Save project" (command S) saves it again after naming people, and "Save to" moves it anywhere else, and that place is remembered.</p>
+        <p>Connect the shoot disk. "Scan a disk or folder" picks the folder and reads every photo and clip once; a big shoot takes a while, and the Shoot tab shows how far it is. The photos and clips are only ever read. The Mac stays awake until the scan ends.</p>
+        <p>If the disk is unplugged or the Mac dies mid-scan, nothing is lost: the shoot opens with "2,080 of 4,315 scanned" and a Continue scan button that reads only what is missing. The Shoot tab's last line says what is on the disk, what is scanned and what is searchable, with one button for the gap.</p>
+        <p>What the scan learns lives on this Mac, in ~/Library/Application Support/photosort, and is packed into one file, sorted_&lt;shoot&gt;.sorted, right in the scanned folder, so it travels with the disk. That file is the one thing the app ever writes there. It is saved when every scan finishes, with no click; "Save shoot file" (command S) saves it again after naming people, and "Save to" moves it anywhere else, and that place is remembered.</p>
         <p>Before a scan starts the app checks the folder can really be written to and has room for the file. If the disk is read-only or too full, the scan waits and asks you to pick another place for the file first.</p>
-        <p>Hand that file to an editor with the disk and "Open a project file" (or a double-click on it) opens the shoot on their Mac in seconds, already searchable, with the saved people. Older files named .photosort-index.zip open the same way.</p>
+        <p>Hand that file to an editor with the disk and "Open a shoot file" (or a double-click on it) opens the shoot on their Mac in seconds, already searchable, with the saved people. Older files named .photosort-index.zip open the same way.</p>
         <p>Nothing leaves the Mac. The one exception is the version check above, off unless you tick it, and it sends nothing either.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-search">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Search and select</button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Search and pick</button>
       <div class="panel-body help-lines">
         <p>Type what you remember seeing ("woman in a sari", "fishing boats") and press Enter. Photos and clips come back together.</p>
-        <p>Arrow down in the search field lists the last 20 searches on this shoot, with the filters they ran with. The star keeps one as a chip in the sidebar.</p>
-        <p>"Show in Finder" (in the inspector, on the selection bar, or command shift R) opens the file's own folder with it highlighted, the way an editor reveals a clip. Up to 20 at a time.</p>
-        <p>A file that is on the disk twice is one tile marked x2; a burst is one tile marked "burst of 12". The inspector shows the copies, or picks the sharpest frame. Export follows what is shown.</p>
-        <p>An exposure bracket (the same view at stepped exposures, read from what the camera wrote) is one tile marked "bracket -2 0 +2", showing the middle exposure. Sequences in the sidebar filters bursts, brackets and copies, and puts the best frame of each into the pile in one click.</p>
-        <p>Camera settings filters by lens, focal length, shutter, aperture and ISO, as each photo recorded them. A photo that says nothing counts as unknown.</p>
+        <p>Arrow down in the search field lists the last 20 searches on this shoot, with the filters they ran with. The star keeps one at the top of that list. A click in the empty field opens it too.</p>
+        <p>"Show in Finder" (in Details, on the bar at the bottom, or command shift R) opens the file's own folder with it highlighted, the way an editor reveals a clip. Up to 20 at a time.</p>
+        <p>A file that is on the disk twice is one tile marked x2; a burst is one tile marked "burst of 12". Details shows the copies, or picks the sharpest frame. Export follows what is shown.</p>
+        <p>An exposure bracket (the same view at stepped exposures, read from what the camera wrote) is one tile marked "bracket -2 0 +2", showing the middle exposure. Bursts and brackets, under More filters, filters bursts, brackets and copies, and picks the best frame of each in one click.</p>
+        <p>Camera settings, under More filters, filters by lens, focal length, shutter, aperture and ISO, as each photo recorded them. A photo that says nothing counts as unknown.</p>
         <p>Products groups a product shoot by product, then by colour; another angle of the same colour stays with its colour. Click a colour to see it in Search, or export one folder per colour.</p>
-        <p>The Sharp slider hides the soft ones.</p>
-        <p>Sort puts the grid in order: oldest or newest first, biggest or smallest file, by name, longest clip first. The tile shows whatever it is being sorted on. A search always comes back best match first, so the control greys out until you clear it.</p>
+        <p>Focus in the sidebar hides the soft ones, once the focus check has run.</p>
+        <p>Sort puts the grid in order: oldest or newest first, biggest or smallest file, by name, longest clip first. The tile shows whatever it is being sorted on. It sits on the line above the grid. A search always comes back best match first, so the control greys out until you clear it.</p>
         <p>Days in the sidebar breaks the shoot into the days it was shot on. Click one to see just that day. A file with no capture time counts on the day it was written, so nothing falls out of the list.</p>
-        <p>Click selects. Shift-click takes a range, ⌘-click toggles one, ⌘A takes everything on screen.</p>
-        <p>"Select all matching" takes every result, not just the 200 on screen.</p>
-        <p>What you select is the pile. It stays while you search again, and the next time the shoot opens. "Show the pile" puts it in the grid on its own; Clear empties it. The line above Export says how many files, how big, where they go and roughly how long.</p>
+        <p>Click a tile to pick it, click again to take it off. Shift-click takes a range, ⌘A takes everything on screen.</p>
+        <p>"Pick all matching" takes every result, not just the 200 on screen.</p>
+        <p>Everything you pick goes on one list, Picked. It stays while you search again, after an export, and the next time the shoot opens. Export takes what is on it. "Show picked" puts it in the grid on its own. Clear empties it, and Undo in the status line brings it back. The line above Export says how many files, how big, where they go and roughly how long.</p>
         <p>The numbers beside the filters are what each one would leave with the others on, so "wide", then "videos", then a camera narrows the shoot one count at a time.</p>
-        <p>A clip can be in more than one category: an interview that is also people shows under both, the second time in the less sure band.</p>
+        <p>A clip can be in more than one category: an interview that is also people shows under both, the second time with the possible matches.</p>
         <p>Enter or a double-click opens a shot. ← → step through, Esc closes.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-marks">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Flags, stars and XMP</button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Flags, stars and Lightroom</button>
       <div class="panel-body help-lines">
-        <p>The Lightroom keys work on the tile under the pointer, or on the selection: P picks, X rejects, U takes the flag off. 1 to 5 give stars, 0 takes them off. 6 red, 7 yellow, 8 green, 9 blue; the same key again takes the label off. Purple is in the inspector. They work in the full-size view too, so ← → and P is a cull.</p>
-        <p>Ratings in the sidebar shows only the picks, the rejects or the rest, at least so many stars, or one label.</p>
+        <p>P, X and U work on one tile: the one under the pointer, or the last one you clicked. P picks it, or takes it off the list if it is on. X rejects it and takes it off. U takes the flag off. 1 to 5 give stars and 0 takes them off; 6 red, 7 yellow, 8 green, 9 blue, and the same key again takes the label off. Stars and labels go to everything picked, or to the tile under the pointer if nothing is. Purple is in Details. All of them work in the full-size view too, on the shot shown, so ← → and P is a cull.</p>
+        <p>Picking a rejected photo takes the reject off.</p>
+        <p>Ratings in the sidebar shows only what is picked, the rejects or what is not rated, at least so many stars, or one label.</p>
         <p>An export writes a sidecar (IMG_0001.xmp) beside every copy that has a flag, stars or a label, so Lightroom, Bridge and Capture One open with the stars and labels on. A reject goes out as rating -1, which they read as rejected. Lightroom keeps picks in its catalog only, so a pick reaches it as nothing; Bridge and Premiere see it as a good take.</p>
-        <p>"Write XMP sidecars" writes them on their own into the export folder, in the shoot's own folders, to lay over a copy of the cards. Nothing is ever written to the shoot, and an .xmp sorted did not write is never replaced.</p>
+        <p>"Save ratings for Lightroom" writes them on their own into the export folder, in the shoot's own folders, to lay over a copy of the cards. Nothing is ever written to the shoot, and an .xmp sorted did not write is never replaced.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-categories">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Categories</button>
       <div class="panel-body help-lines">
         <p>The fixed set is always there.</p>
-        <p>"Discovered in this shoot" is what the model found on its own. Its names are a best guess.</p>
-        <p>"Unnamed group N" means it saw a group but would not guess. Rename it with the pencil; those names are lost when you Categorise again.</p>
-        <p>Everything under 50 % sits in the "less sure" band. It is not hidden.</p>
+        <p>"Also found" is what the model found on its own. Its names are a best guess.</p>
+        <p>"Unnamed group N" means it saw a group but would not guess. Rename it with the pencil; those names are lost when you sort into categories again.</p>
+        <p>Everything under 50 % sits with the possible matches. It is not hidden.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-people">
@@ -703,35 +723,35 @@
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Places</button>
       <div class="panel-body help-lines">
         <p>The Places tab draws every photo and clip that knows where it was taken, as heat on a world map. Drag to move, scroll to zoom, Fit frames the shoot and World pulls all the way back.</p>
-        <p>Click a pile, or a row in the list under the map, to see exactly those in Search. Shift-drag a box on the map to take an area instead.</p>
+        <p>Click a spot on the map, or a row in the list under it, to see exactly those in Search. Shift-drag a box on the map to take an area instead.</p>
         <p>Phones and drones write the location into every file. Most cameras never do unless they were paired with a phone that day, so a shoot photographed on a body alone will have little on the map and that is the camera, not sorted.</p>
         <p>Place names come from a list of cities that ships with the app. Nothing is ever looked up: sorted makes no network request, here or anywhere else.</p>
-        <p>A shoot indexed before this existed has no locations stored. "Read locations" goes through those files once and reads the metadata out of them. It only reads.</p>
+        <p>The Places tab shows once the shoot has a location to draw. A shoot indexed before this existed has none stored: "Read locations" on the Shoot tab goes through those files once and reads the metadata out of them. It only reads.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-focus">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Focus</button>
       <div class="panel-body help-lines">
-        <p>"Check focus" scores every photo and clip once. Photos are free, clips take seconds.</p>
-        <p>"Hide out of focus" drops the fully bad ones.</p>
-        <p>"Hide soft" also drops the bottom 15 %.</p>
+        <p>"Check focus" scores every photo and clip once. Photos are free, clips take seconds. It is in the sidebar until the first check, and on the Shoot tab while anything is left.</p>
+        <p>"Hide blurry" in the Focus menu drops the fully bad ones.</p>
+        <p>"Sharpest only" also drops the bottom 15 %.</p>
         <p>Nothing is deleted.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-export">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Export</button>
       <div class="panel-body help-lines">
-        <p>Exports COPY or LINK to the destination. Default is ~/Desktop/photosort-out; change it to any disk.</p>
-        <p>The preset next to the selection's export row sets it up in one go: "Client web set" copies 2048 px JPEGs, "Editor selects" writes links, "Full size copy" copies the originals with their RAW files. Change any control and it becomes Custom. The shoot remembers the last one.</p>
-        <p>The Scan tab lists the last 10 exports: what, where, when and how many. "Show in Finder" opens the folder, "Run again" repeats the export as it was, into the destination as it is now.</p>
-        <p>One folder per ticked category, per person, or for the current selection.</p>
+        <p>An export copies the files, or makes shortcuts to them, at the destination. Default is ~/Desktop/photosort-out; change it to any disk.</p>
+        <p>The preset next to the Export button sets it up in one go: "For the client" copies 2048 px JPEGs, "For the editor" writes shortcuts to the originals, which need the disk plugged in, "Full size copy" copies the originals with their RAW files. Change any control and it becomes Custom. The shoot remembers the last one.</p>
+        <p>The Shoot tab lists the last 10 exports: what, where, when and how many. "Show in Finder" opens the folder, "Run again" repeats the export as it was, into the destination as it is now.</p>
+        <p>One folder per ticked category, per person, or for what is picked.</p>
         <p>"Videos: only the matching segments" trims clips at keyframes.</p>
         <p>Google Drive as the destination: paste a folder link and the files go straight from the shoot disk into it; nothing is saved on this Mac on the way. What you upload counts against your own Drive space, unless the folder is on a Shared Drive. Uploads are resumable, and a manifest means a re-run only sends what is missing.</p>
-        <p>The project file is what an editor opens to get the shoot already sorted.</p>
+        <p>The shoot file is what an editor opens to get the shoot already sorted.</p>
       </div>
     </div>
     <div class="panel" data-panel="help-reorganise">
-      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Reorganise disk</button>
+      <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Move files into folders</button>
       <div class="panel-body help-lines">
         <p>The only thing that writes to the shoot disk.</p>
         <p>Moves files into sorted/ by category (and people, drone).</p>
@@ -755,7 +775,7 @@
   </div>
 </aside>
 
-<p id="status" class="status"><span id="status-text" aria-live="polite"></span><span id="save-person-form" hidden><input id="save-person-name" type="text" placeholder="Name this person" autocomplete="off" title="a name for the person you just found"><button type="button" id="save-person" class="btn" title="save this person for later searches">Save</button></span></p>
+<p id="status" class="status"><span id="status-undo" hidden><span id="status-undo-text"></span> <button type="button" id="status-undo-link" class="link small">Undo</button></span><span id="status-text" aria-live="polite"></span><span id="save-person-form" hidden><input id="save-person-name" type="text" placeholder="Name this person" autocomplete="off" title="a name for the person you just found"><button type="button" id="save-person" class="btn" title="save this person for later searches">Save</button></span></p>
 
 <div id="lightbox" hidden>
   <div id="lb-frame">
@@ -773,13 +793,13 @@
   </div>
 </div>
 
-<!-- ===== the project file needs a place: shown before a scan whose shoot folder cannot hold the file (read-only,
+<!-- ===== the shoot file needs a place: shown before a scan whose shoot folder cannot hold the file (read-only,
      too full), and after a scan whose save failed. A modal dialog: nothing else can be clicked until it is answered. ===== -->
 <dialog id="project-ask" class="ask" aria-labelledby="project-ask-title" aria-describedby="project-ask-why">
   <div class="ask-inner">
     <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
     <div class="ask-main">
-      <h2 id="project-ask-title">Where should the project file go?</h2>
+      <h2 id="project-ask-title">Where should the shoot file go?</h2>
       <p id="project-ask-why" class="ask-why"></p>
       <dl id="project-ask-nums" class="ask-nums" hidden>
         <div><dt>Needs about</dt><dd id="project-ask-need"></dd></div>

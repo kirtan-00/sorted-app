@@ -3,6 +3,7 @@ import json, sqlite3
 from pathlib import Path
 import numpy as np
 from .config import DB_NAME, EMBED_DIM, MODEL_TAG, app_home, shoot_slug
+from . import pile
 
 # float16 storage, so a stored blob's byte length names its width unambiguously. A blob whose length is
 # not EMBED_BYTES was written by a different encoder (or is corrupt) and must never be treated as data:
@@ -212,6 +213,11 @@ def connect(root: Path) -> sqlite3.Connection:
                conn.execute("SELECT id, camera FROM photos WHERE camera IS NOT NULL") if "\x00" in c]
         conn.executemany("UPDATE photos SET camera=? WHERE id=?", bad)
         set_meta(conn, CAMERA_SCRUB_KEY, "done")
+    # The pile and the pick flag become one list, once per shoot, so an index or project file from before that catches up here.
+    try:
+        pile.merge_once(conn)
+    except sqlite3.OperationalError:
+        pass                                           # the index is busy: the next connect does it, this one must still open
     # Without statistics the planner takes a (status, ...) index for EVERY status='ok' query, including the
     # wide reads (Index.refresh, load_embeds, the face join) that want the whole table in id order: those
     # went 158 -> 247 ms at 20k rows through the index plus a sort. With ANALYZE run once (14 ms at 20k
@@ -427,6 +433,7 @@ def missing_files(conn) -> dict[str, tuple[int, float, str]]:
 
 def restore_missing(conn, rels: list[str]) -> None:
     conn.executemany("UPDATE photos SET status='ok' WHERE rel=? AND status='missing'", [(r,) for r in rels])
+    pile.settle(conn, [x[0] for r in rels for x in conn.execute("SELECT id FROM photos WHERE rel=?", (r,))])
     conn.commit()
 
 def photos_without_faces(conn) -> set[str]:
@@ -573,7 +580,8 @@ def _check_marks(flag, rating, label) -> None:
 def set_marks(conn, ids, flag=_UNSET, rating=_UNSET, label=_UNSET) -> int:
     """Set any of flag (pick / reject / None), rating (0 to 5) and label (one of LABELS / None) on these rows;
     an argument left out is left alone, so a P keystroke on a selection does not wipe its stars. Every value is
-    checked before anything is written. Returns how many rows exist among ids."""
+    checked before anything is written. A flag keeps the Picked list in step: pick joins it, reject or None leaves it
+    (see pile.py). Returns how many rows exist among ids."""
     _check_marks(flag, rating, label)
     sets, vals = [], []
     for col, v in (("flag", flag), ("rating", rating), ("label", label)):
@@ -586,6 +594,8 @@ def set_marks(conn, ids, flag=_UNSET, rating=_UNSET, label=_UNSET) -> int:
             n += conn.execute(f"UPDATE photos SET {','.join(sets)} WHERE id IN ({q})", vals + chunk).rowcount
         else:
             n += conn.execute(f"SELECT count(*) FROM photos WHERE id IN ({q})", chunk).fetchone()[0]
+    if flag is not _UNSET:
+        (pile.add if flag == "pick" else pile.remove)(conn, ids)
     conn.commit()
     return n
 

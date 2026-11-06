@@ -1,4 +1,4 @@
-"""Exports carry the marks out: a sidecar beside every exported copy of a marked item, the explicit Write XMP action,
+"""Exports carry the marks out: a sidecar beside every exported copy of an item with stars, a label or a reject, the explicit Write XMP action,
 and the CSV columns. The shoot is never written to."""
 import csv, os
 from pathlib import Path

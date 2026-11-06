@@ -281,7 +281,7 @@ header { display: contents; }
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
   white-space: normal;
 }
-.sm-group { padding: 6px 12px 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g500); }
+.sm-group { padding: 6px 12px 4px; font-size: 12px; font-weight: 600; color: var(--g500); }
 /* exactly seven rows of 45px: a row is never cut in half, which reads as a broken panel rather than as
    "there is more". The count next to the heading is what says there is more. */
 .sm-list { max-height: 315px; overflow: hidden auto; }
@@ -365,9 +365,16 @@ nav {
   background: var(--g75);
   border-right: 1px solid var(--g50);
   padding: 8px;
-  overflow: hidden auto;
+  overflow: hidden;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
+/* the tabs stay put, the filters scroll between them and the Live slot, which sits at the very end of the rail because
+   it opens a window of its own rather than a view in this one */
+.nav-views { flex: none; }
+.filters { flex: 1 1 auto; min-height: 0; overflow: hidden auto; margin: 0 -8px; padding: 0 8px 8px; }
+.nav-slot { flex: none; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--g100); }
 nav button {
   display: flex;
   align-items: center;
@@ -395,13 +402,11 @@ nav button.from::after { content: ""; width: 6px; height: 6px; margin-left: auto
 nav button.from .nav-count { margin-left: 0; }
 nav button.from.on::after { display: none; }
 .nav-group {
-  margin: 16px 10px 6px;
-  padding-top: 12px;
+  margin: 12px 10px 6px;
+  padding-top: 10px;
   border-top: 1px solid var(--g100);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--g500);
 }
 .nav-row { margin: 0 2px; }
@@ -413,6 +418,19 @@ fieldset.nav-row { margin: 6px 2px 0; }
 .nav-label { padding: 0 10px; height: 22px; line-height: 22px; font-size: 12px; color: var(--g500); }
 .pick-group label.nav-row { height: 28px; }
 nav select.nav-row { width: calc(100% - 4px); margin: 2px 2px 0; }
+#type-group ~ label.nav-row { height: 28px; }
+/* one Focus control: the word and the menu on one line, or the word and Check focus until something has been checked */
+.focus-row { display: flex; align-items: center; gap: 8px; height: 32px; margin-top: 4px; padding: 0 2px 0 8px; font-size: 14px; color: var(--g700); }
+.focus-word { flex: none; }
+.focus-row select { flex: 1 1 auto; min-width: 0; height: 26px; padding-left: 8px; font-size: 13px; font-weight: 400; }
+.focus-row .link.small { margin-left: auto; }
+nav .focus-row button { width: auto; height: 22px; padding: 0 4px; }
+select.set { border-color: var(--g500); color: var(--g900); }
+/* More filters: a quiet row at the end of the list; the number says how many folded filters are on */
+nav button.more-toggle { height: 30px; margin-top: 6px; padding: 0 8px; gap: 8px; color: var(--g600); font-size: 13px; font-weight: 500; }
+nav button.more-toggle svg.disclosure { width: 10px; height: 10px; color: inherit; transition: transform var(--ease); }
+nav button.more-toggle.open svg.disclosure { transform: rotate(90deg); }
+.more-toggle .nav-sub { margin-left: auto; color: var(--blue); }
 
 main {
   grid-column: 2;
@@ -460,6 +478,8 @@ body:not(.insp) #inspector { border-left-width: 0; }   /* a closed 0 px column m
   position: relative;
 }
 #status.err #status-text { color: var(--red); }
+#status-undo { flex: none; margin-right: 12px; }
+#status-undo[hidden] { display: none; }
 #status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #save-person-form {
   position: absolute;
@@ -488,7 +508,13 @@ body.nofolder #inspector { display: none; }
 .welcome-lede { max-width: 640px; font-size: 15px; line-height: 1.5; color: var(--g700); }
 .welcome-ask { font-size: 14px; font-weight: 500; color: var(--g800); margin-top: 4px; }
 .welcome-unmounted { font-size: 14px; font-weight: 500; color: var(--red); margin-top: 4px; }
-.welcome-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+/* the connect line belongs to the two disk cards and Live has its own over the third, so neither reads as the other's heading */
+.welcome-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 12px; }
+.welcome-lines { grid-column: 1 / 3; grid-row: 1; display: flex; flex-direction: column; gap: 4px; }
+.welcome-ask-live { grid-column: 3; grid-row: 1; align-self: start; }
+#welcome-scan { grid-column: 1; grid-row: 2; }
+#welcome-load { grid-column: 2; grid-row: 2; }
+#welcome-live { grid-column: 3; grid-row: 2; }
 .welcome-btn {
   height: auto;
   min-height: 76px;
@@ -522,7 +548,10 @@ body.nofolder #inspector { display: none; }
 .welcome-recent .link.small { font-size: 13px; }
 .welcome-help { align-self: flex-start; margin-left: -4px; color: var(--blue); }
 .welcome-help:hover { color: var(--blue-h); background: none; text-decoration: underline; text-underline-offset: 2px; }
-@media (max-width: 1000px) { .welcome-actions { grid-template-columns: 1fr; } }
+@media (max-width: 1000px) {
+  .welcome-actions { grid-template-columns: 1fr; }
+  .welcome-lines, .welcome-ask-live, #welcome-scan, #welcome-load, #welcome-live { grid-column: 1; grid-row: auto; }
+}
 
 /* sub-toolbar in every tab */
 .subbar {
@@ -555,10 +584,8 @@ body.nofolder #inspector { display: none; }
   border: 0;
   background: none;
   color: var(--g600);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -567,10 +594,13 @@ body.nofolder #inspector { display: none; }
 .panel-head:hover { color: var(--g800); background: var(--g100); }
 .panel-head .disclosure { width: 10px; height: 10px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transform: rotate(90deg); transition: transform var(--ease); }
 .panel.collapsed .panel-head .disclosure { transform: rotate(0deg); }
-.panel-head .sub { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--g500); margin-left: 4px; overflow: hidden; text-overflow: ellipsis; }
+.panel-head .sub { font-weight: 400; color: var(--g500); margin-left: 4px; overflow: hidden; text-overflow: ellipsis; }
 .panel-body { padding: 0 12px 12px; }
 .panel.collapsed .panel-body { display: none; }
 .empty, .tiles > p, #saved-people > p, #people:empty::after, #grid:empty::after { color: var(--g500); font-size: 14px; }
+
+/* a sub-toolbar's More: the settings most shoots leave alone, on a line of their own under it */
+.subbar-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding: 7px 12px; background: var(--g75); border-bottom: 1px solid var(--g50); }
 
 /* bottom action bars: the selection bar and its mirrors */
 .actionbar {
@@ -741,6 +771,38 @@ body.nofolder #inspector { display: none; }
   background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Ccircle cx='6' cy='6' r='4' fill='none' stroke='%23909090' stroke-width='1.5'/%3E%3Cpath d='M9 9l3.5 3.5' stroke='%23909090' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat center;
 }
 #q input[name="q"] { width: 100%; padding-left: 28px; }
+/* the People menu: a button over the two real selects, with a panel in the shoots menu's dress */
+.pick { position: relative; flex: none; }
+.pick-btn { display: inline-flex; align-items: center; gap: 8px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.pick-btn .shoot-chev { width: 10px; height: 10px; flex: none; fill: none; stroke: var(--g600); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.pick-btn.set { border-color: var(--g500); color: var(--g900); }
+.pick-menu {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  z-index: 20;
+  width: 240px;
+  max-height: 60vh;
+  overflow: hidden auto;
+  padding: 4px 0 6px;
+  background: var(--g100);
+  border: 1px solid var(--g300);
+  border-radius: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  white-space: normal;
+}
+.pick-head { padding: 6px 12px 4px; font-size: 12px; font-weight: 600; color: var(--g500); }
+.pick-row { display: flex; align-items: center; gap: 6px; width: 100%; height: 28px; padding: 0 12px 0 8px; border: 0; background: none; color: var(--g700); font: inherit; font-size: 13px; text-align: left; }
+.pick-row:hover, .pick-row:focus-visible { background: var(--g200); color: var(--g800); outline: none; }
+.pick-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.pick-note { padding: 2px 12px 6px; font-size: 12px; line-height: 1.35; color: var(--g500); }
+/* the line above the grid: how much there is, its order, and Select all */
+.grid-head { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 3px 12px; background: var(--g50); border-bottom: 1px solid var(--g100); font-size: 13px; color: var(--g600); white-space: nowrap; }
+.grid-head .spring { flex: 1; min-width: 4px; }
+.grid-head select { height: 26px; padding-left: 8px; border-color: transparent; font-size: 13px; font-weight: 400; background-color: transparent; }
+.grid-head select:hover { border-color: var(--g300); }
+.grid-head select:disabled { opacity: 0.5; }
+.grid-head .link { height: 26px; font-size: 13px; }
 /* search history: the last 20 queries under the field (arrow down); a star saves one, an x forgets it */
 .q-history {
   position: absolute;
@@ -781,15 +843,8 @@ body.nofolder #inspector { display: none; }
 .qh-star[aria-pressed="true"] svg { fill: currentColor; }
 .qh-star:focus-visible, .qh-del:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 .qh-empty { padding: 6px 10px; font-size: 12px; color: var(--g500); }
+.qh-head { padding: 6px 10px 2px; font-size: 12px; font-weight: 600; color: var(--g500); }
 /* saved searches: chips in the sidebar under Filters; the label runs the search, the x forgets it */
-.saved-searches { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 8px; }
-.ss-chip { display: inline-flex; align-items: center; max-width: 100%; height: 24px; background: var(--g200); border: 1px solid var(--g300); border-radius: 4px; }
-nav .ss-chip button { width: auto; height: 22px; padding: 0 4px 0 8px; gap: 0; border-radius: 3px; font-size: 13px; color: var(--g800); min-width: 0; }
-nav .ss-chip .ss-run { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
-nav .ss-chip .ss-x { padding: 0 4px; color: var(--g500); flex: none; }
-nav .ss-chip .ss-x:hover { color: var(--g800); background: var(--g300); }
-nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inherit; }
-
 /* grid: Lightroom Library cells */
 #grid {
   display: grid;
@@ -891,6 +946,8 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
   color: var(--g500);
 }
 
+/* with nothing selected the bar is one line of words; the export controls come up with the first tile */
+#selbar:not(.has-sel) > :not(#selcount):not(#pile-show) { display: none; }
 #selbar #selcount { font-size: 14px; color: var(--g600); }
 #selbar.has-sel #selcount { color: var(--g800); }
 #selbar .sel-export { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
@@ -1186,6 +1243,9 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 /* the folder in flight, under the bar: quieter than the readout, one line, elided rather than wrapped */
 .scan-current { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--g500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .scan-awake { margin-top: 8px; color: var(--g500); }
+/* Finish this shoot: what is still undone, one link each, the first thing in Progress */
+.finish-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; margin-bottom: 10px; font-size: 13px; color: var(--g700); }
+.finish-line .link.small { font-size: 13px; }
 .scan-health { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--g100); }
 .scan-health-text { font-size: 13px; color: var(--g600); line-height: 1.4; }
 .scan-health-text:empty { display: none; }
@@ -1277,9 +1337,6 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 /* focus filters: the status line under the kind control, a 12 px link beside it */
 .link.small { font-size: 12px; height: 22px; padding: 0 4px; color: var(--blue); }
 .link.small:hover { color: var(--blue-h); background: none; text-decoration: underline; text-underline-offset: 2px; }
-.focus-line { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px 0; font-size: 12px; color: var(--g500); white-space: nowrap; overflow: hidden; }
-.focus-line #focus-status { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.focus-line .link.small { margin-left: -4px; }
 .faces-pending { padding: 10px 12px 0; display: flex; align-items: center; gap: 2px; }
 
 /* reorganise disk: the guarded section at the foot of the Index tab */
@@ -1293,10 +1350,9 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .reorg-summary { margin: 14px 0 8px; color: var(--g800); line-height: 1.4; }
 .reorg-table-wrap { max-width: 760px; max-height: 320px; overflow: auto; background: var(--g100); border: 1px solid var(--g300); border-radius: 4px; }
 .reorg-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-.reorg-table th { position: sticky; top: 0; background: var(--g100); text-align: left; padding: 6px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g500); border-bottom: 1px solid var(--g300); }
+.reorg-table th { position: sticky; top: 0; background: var(--g100); text-align: left; padding: 6px 8px; font-size: 12px; font-weight: 600; color: var(--g500); border-bottom: 1px solid var(--g300); }
 .reorg-table td { padding: 3px 8px; color: var(--g700); white-space: nowrap; }
 .reorg-table th:first-child, .reorg-table td:first-child { width: 1%; }   /* nowrap, so the from column hugs its text and the to column takes the rest */
-.reorg-table th:nth-child(2), .reorg-table td.arrow { width: 1%; color: var(--g500); padding: 3px 6px; }
 .reorg-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
 #reorg-confirm { width: 260px; }
 #reorg-status-text { color: var(--g800); }
@@ -1309,10 +1365,11 @@ nav .ss-chip .ss-x svg { width: 8px; height: 8px; stroke-width: 1.3; color: inhe
 .days-list { display: flex; flex-direction: column; gap: 1px; }
 .day-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 3px 6px;
+  height: 24px;
+  padding: 0 6px;
   border: 0;
   border-radius: 3px;
   background: none;
@@ -1489,15 +1546,16 @@ dialog.ask[open] { animation: ask-in 160ms ease-out; }
 .mk-btn:focus-visible, .mk-star:focus-visible, .mk-swatch:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 /* the sidebar Ratings block: nav button styles must not reach these */
 .marks-head { display: flex; align-items: baseline; gap: 6px; }
-.marks-head .link.small { margin-left: auto; height: 16px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.marks-head .link.small { margin-left: auto; height: 16px; font-weight: 500; }
 .marks-filter { display: flex; flex-direction: column; gap: 4px; padding: 0 6px; }
-.marks-filter .seg span { font-size: 12px; padding: 0 2px; }
+.marks-filter .seg label { flex: 1 1 auto; }
+.marks-filter .seg span { font-size: 12px; padding: 0 4px; white-space: nowrap; }
 nav .marks-filter button { width: 22px; height: 22px; padding: 0; gap: 0; }
 nav .marks-filter button:hover { background: var(--g200); }
 nav .marks-filter button svg { width: 14px; height: 14px; color: inherit; stroke-width: 1.1; }
 nav .marks-filter .mk-star.on svg { fill: currentColor; }
 nav .marks-filter .link.small { width: auto; height: 22px; padding: 0 4px; margin-left: -4px; align-self: flex-start; font-size: 12px; }
-nav .marks-filter .link.small:disabled { color: var(--g400); text-decoration: none; }
+.marks-keys { padding: 2px 3px 0; font-size: 12px; color: var(--g500); }
 .marks-line { display: flex; flex-direction: column; gap: 2px; }
 .marks-stars, .marks-labels { display: flex; gap: 1px; margin-left: -3px; }
 /* the full-size view */

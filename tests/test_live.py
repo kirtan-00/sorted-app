@@ -1107,7 +1107,7 @@ def test_exfat_warns_and_never_blocks(tmp_path, fake_encoder, drive, monkeypatch
     root, hub, c = api_session(tmp_path, drive)
     d = c.get("/api/live/state").json()["drive"]
     assert d["fs"] == "exfat" and "exFAT" in d["warning"] and d["path"] == str(drive) and d["name"] == "SSD"
-    assert set(d) == {"path", "name", "fs", "state", "pending", "copied", "failed", "free_bytes", "warning"}
+    assert set(d) == {"path", "dest", "name", "fs", "state", "pending", "copied", "failed", "free_bytes", "warning"}
     c.post("/api/live/stop"); assert hub.session.wait(30)
 
 
@@ -1495,3 +1495,233 @@ def test_time_a_61mp_jpeg(tmp_path):
     s.stop(); assert s.wait(120)
     ms = [e["ms"] for e in s.log.items if e["type"] == "shot"]
     print("\n61MP", round(sizes[0] / 1e6, 1), "MB", json.dumps(ms))
+
+
+# ===== a new shoot in a folder that has photos =====
+def test_packages_are_never_walked(tmp_path):
+    root = tmp_path / "Pictures"; root.mkdir()
+    write_jpeg(root / "Photos Library.photoslibrary" / "originals" / "a.jpg")
+    write_jpeg(root / "Job.cocatalog" / "Originals" / "b.jpg")
+    write_jpeg(root / "Lightroom" / "Previews.lrdata" / "c.jpg")
+    write_jpeg(root / "2026.11.06" / "Capture" / "good.jpg")     # a dot in a name does not make a package
+    assert list(live.photo_files(root)) == ["2026.11.06/Capture/good.jpg"]
+    assert live.count_photos(root) == (1, True)
+
+
+def test_a_raw_and_its_jpeg_count_as_one_photo(tmp_path):
+    write_jpeg(tmp_path / "A.JPG")
+    (tmp_path / "A.ARW").write_bytes(b"raw" * 100)
+    write_jpeg(tmp_path / "B.JPG")
+    assert live.count_photos(tmp_path) == (2, True)
+
+
+def test_a_count_out_of_time_says_so(tmp_path, monkeypatch):
+    write_jpeg(tmp_path / "a" / "A.JPG"); write_jpeg(tmp_path / "b" / "B.JPG")
+    monkeypatch.setattr(live, "COUNT_MAX_S", -1.0)
+    assert live.count_photos(tmp_path)[1] is False
+
+
+def test_only_new_shots_leaves_what_is_there_alone(tmp_path, fake_encoder, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    landed(root, "OLD1.JPG"); landed(root, "OLD2.JPG", im=product(seed=2))
+    before = tree(root)
+    s = dsession(root, drive, mode=live.NEW_ONLY)
+    s.set_active(product="SKU")
+    time.sleep(0.1)
+    assert shots_of(s) == []
+    landed(root, "NEW1.JPG", im=product(seed=3))
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    settled(s)
+    assert [x["file"] for x in shots_of(s)] == ["NEW1.JPG"] and shots_of(s)[0]["product"] == "SKU"     # the first shot takes the active product
+    assert on_drive(drive) == ["products/SKU/NEW1.JPG"]
+    assert {k: v for k, v in tree(root).items() if k != "NEW1.JPG"} == before
+
+
+def test_a_file_written_over_after_the_start_is_a_new_shot(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    landed(root, "A.JPG")
+    s = session(root, mode=live.NEW_ONLY)
+    time.sleep(0.05)
+    landed(root, "A.JPG", im=product(seed=9))
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    finish(s)
+
+
+def test_a_resume_of_an_only_new_shoot_still_leaves_them_alone(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    landed(root, "OLD.JPG")
+    s = session(root, mode=live.NEW_ONLY)
+    landed(root, "NEW1.JPG", im=product(seed=2))
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    finish(s)
+    landed(root, "NEW2.JPG", im=product(seed=3))       # landed while stopped: a resume takes it
+    s2 = session(root, mode=live.RESUME)
+    assert wait_for(lambda: len(shots_of(s2)) == 2)
+    time.sleep(0.1)
+    finish(s2)
+    assert sorted(x["file"] for x in shots_of(s2)) == ["NEW1.JPG", "NEW2.JPG"]
+
+
+def test_a_new_shoot_in_a_used_folder_starts_clean(tmp_path, fake_encoder, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root, drive=drive, shoot="First", drive_poll_s=0.02, mode=live.NEW_ONLY)
+    s.set_active(product="SKU-OLD")
+    time.sleep(0.05)
+    landed(root, "A.JPG")
+    assert wait_for(lambda: s.snapshot()["drive"]["copied"] == 1)
+    settled(s)
+    s2 = session(root, drive=drive, shoot="Second", drive_poll_s=0.02, mode=live.NEW_ONLY)
+    time.sleep(0.1)
+    snap = s2.snapshot()
+    assert snap["shots"] == [] and snap["products"] == [] and snap["drive"]["pending"] == 0
+    landed(root, "B.JPG", im=product(seed=2))
+    assert wait_for(lambda: len(shots_of(s2)) == 1)
+    settled(s2)
+    assert [x["file"] for x in shots_of(s2)] == ["B.JPG"] and shots_of(s2)[0]["product"] == "product 1"
+    assert not (drive / "Second" / "products" / "SKU-OLD").exists()
+    assert sorted(p.name for p in (drive / "Second").rglob("*.JPG")) == ["B.JPG"]      # nothing old came along under the new name
+    assert (drive / "First" / "products" / "SKU-OLD" / "A.JPG").is_file()              # and the old shoot is as it was
+    conn = db.connect(root)
+    assert conn.execute("SELECT COUNT(*) FROM live_tags_prev").fetchone()[0] == 1
+    assert list(live.store_plan(conn)) == ["product 1"]                                # Save store copies is this shoot's
+    s3 = session(root, mode=live.NEW_ONLY)                                             # a third: the one kept back gives way
+    landed(root, "C.JPG", im=product(seed=3))
+    assert wait_for(lambda: len(shots_of(s3)) == 1)
+    finish(s3)
+    assert [r[0] for r in conn.execute("SELECT p.rel FROM live_tags_prev t JOIN photos p ON p.id=t.photo_id")] == ["B.JPG"]
+    assert conn.execute("SELECT COUNT(*) FROM live_products_prev").fetchone()[0] == 1
+
+
+def test_taking_everything_brings_in_photos_a_scan_or_an_old_shoot_already_read(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root, mode=live.NEW_ONLY)
+    landed(root, "A.JPG")
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    finish(s)
+    s2 = session(root, mode=live.EVERYTHING)
+    assert wait_for(lambda: len(shots_of(s2)) == 1)
+    finish(s2)
+    assert shots_of(s2)[0]["file"] == "A.JPG" and db.connect(root).execute("SELECT COUNT(*) FROM live_tags").fetchone()[0] == 1
+
+
+def test_resume_keeps_the_shoot_and_the_new_shoot_does_not(tmp_path, fake_encoder, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    app = create_app(); hub = app.state.live; c = TestClient(app)
+    assert c.post("/api/live/start", json={"folder": str(root), "mode": "nonsense"}).status_code == 400
+    r = c.post("/api/live/start", json={"folder": str(root), "drive": str(drive), "shoot": "Job", "mode": "new_only", "strobe": True, "faces": False}).json()
+    assert r["shoot"] == "Job"
+    hub.session.copier.poll_s = 0.02
+    landed(root, "A.JPG")
+    assert wait_for(lambda: hub.session.snapshot()["drive"]["copied"] == 1)
+    c.post("/api/live/stop"); assert hub.session.wait(30); hub.session.copier.thread.join(30)
+    r = c.post("/api/live/start", json={"folder": str(root), "mode": "resume"}).json()
+    assert [x["file"] for x in r["shots"]] == ["A.JPG"] and r["shoot"] == "Job" and r["drive"]["path"] == str(drive)
+    assert r["strobe"] is True and r["faces"] is False
+    c.post("/api/live/stop"); assert hub.session.wait(30); hub.session.copier.thread.join(30)
+    r = c.post("/api/live/start", json={"folder": str(root), "drive": str(drive), "shoot": "Job", "mode": "new_only"}).json()
+    assert r["shots"] == [] and r["shoot"] == "Job 2" and r["drive"]["dest"] == str(drive / "Job 2")      # never the old shoot's folder and manifest
+    c.post("/api/live/stop"); assert hub.session.wait(30)
+
+
+def test_each_new_shoot_keeps_its_own_project_file(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    app = create_app(); hub = app.state.live; c = TestClient(app)
+    app.state.photosort["export_base"] = str(tmp_path / "out")
+    made = []
+    for name, mode in (("One", "new_only"), ("Two", "new_only"), ("Two", "resume")):
+        c.post("/api/live/start", json={"folder": str(root), "shoot": name, "mode": mode, "drive": None})
+        c.post("/api/live/stop"); assert hub.session.wait(30)
+        made.append(c.get("/api/live/state").json()["project"])
+    assert [Path(p).name for p in made] == ["sorted_One.sorted", "sorted_Two.sorted", "sorted_Two.sorted"]
+    assert Path(made[0]).is_file() and Path(made[1]).is_file()
+    assert not [p for p in (tmp_path / "out").iterdir() if p.name.startswith(".sorted-save-")]
+
+
+def test_ready_says_what_the_folder_holds_without_making_an_index(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    landed(root, "A.JPG")
+    from photosort.config import app_home, shoot_slug
+    app = create_app(); hub = app.state.live; c = TestClient(app)
+    get = lambda p: c.get("/api/live/ready", params={"folder": str(p)}).json()
+    assert get(tmp_path / "nope")["exists"] is False
+    r = get(root)
+    assert (r["exists"], r["photos"], r["whole"], r["last"], r["busy"]) == (True, 1, True, None, None)
+    assert not (app_home() / shoot_slug(root)).exists()
+    app.state.photosort["running"] = True
+    assert "scanning" in c.get("/api/live/ready").json()["busy"]
+    app.state.photosort["running"] = False
+    c.post("/api/live/start", json={"folder": str(root), "shoot": "Job", "mode": "everything"})
+    assert wait_for(lambda: hub.session.snapshot()["done"] == 1)
+    assert "running" in get(root)["busy"]
+    c.post("/api/live/stop"); assert hub.session.wait(30)
+    assert get(root)["last"] == {"shoot": "Job", "shots": 1, "waiting": 0}
+
+
+def vol(path, free=2 << 30, writable=True, card=False):
+    return {"name": Path(path).name, "path": str(path), "free": free, "fs": "apfs", "writable": writable, "card": card}
+
+
+def test_best_drive_prefers_the_last_then_the_roomiest_and_never_a_card(tmp_path):
+    a, b, c = tmp_path / "A", tmp_path / "B", tmp_path / "Card"
+    for d in (a, b, c):
+        d.mkdir()
+    vols = [vol(a, 5 << 30), vol(b, 9 << 30), vol(c, 90 << 30, card=True)]
+    assert live.best_drive(vols) == str(b)
+    assert live.best_drive(vols, str(a)) == str(a)
+    assert live.best_drive(vols, str(tmp_path / "gone")) == str(b)
+    assert live.best_drive(vols[:2] + [vol(c, 90 << 30, writable=False)], str(c)) == str(b)
+    assert live.best_drive([vol(c, card=True)]) is None
+    assert live.best_drive([vol(a, 1 << 20)]) is None                   # too small to start on
+    other = tmp_path / "Backups"; other.mkdir()
+    assert live.best_drive(vols, str(other)) == str(other)              # a folder chosen by hand counts as the last place
+
+
+def test_volumes_marks_cards_and_read_only_disks(tmp_path, monkeypatch):
+    v = tmp_path / "Volumes"; v.mkdir()
+    (v / "SD" / "DCIM").mkdir(parents=True); (v / "SSD").mkdir(); (v / "Locked").mkdir()
+    monkeypatch.setattr(live, "VOLUMES", v)
+    monkeypatch.setattr(live, "_mounts", lambda: {})
+    monkeypatch.setattr(live, "_mount_text", lambda: f"/dev/disk5s1 on {v / 'Locked'} (exfat, local, read-only)\n/dev/disk4s1 on {v / 'SSD'} (apfs, local)\n")
+    by = {x["name"]: x for x in live.volumes()}
+    assert by["SD"]["card"] is True and by["SSD"]["card"] is False
+    assert by["Locked"]["writable"] is False and by["SSD"]["writable"] is True
+    r = TestClient(create_app()).get("/api/live/volumes", params={"last": str(v / "SSD")}).json()
+    assert r["best"] == str(v / "SSD")
+
+
+def test_the_finder_finds_where_a_test_frame_landed(tmp_path):
+    home = tmp_path / "home"
+    capture = home / "Pictures" / "Job" / "Capture"
+    old = home / "Pictures" / "Old"
+    write_jpeg(capture / "T.JPG"); write_jpeg(old / "O.JPG")
+    write_jpeg(home / "Photos.photoslibrary" / "new.jpg")
+    os.utime(old / "O.JPG", (1, 1)); os.utime(old, (1, 1))
+    got = live.recent_folders(places=[home])
+    assert [f["path"] for f in got] == [str(capture)] and got[0]["photos"] == 1 and got[0]["name"] == "Capture"
+
+
+def test_the_finder_prefers_the_last_folder_and_stays_out_of_a_copy_on_a_drive(tmp_path):
+    a, b, shoot = tmp_path / "a", tmp_path / "b", tmp_path / "SSD" / "Job"
+    write_jpeg(a / "1.JPG"); time.sleep(0.02); write_jpeg(b / "2.JPG")
+    write_jpeg(shoot / "products" / "x" / "3.JPG"); (shoot / live.MARKER).write_text("id")
+    assert [f["path"] for f in live.recent_folders(places=[tmp_path])] == [str(b), str(a)]
+    assert [f["path"] for f in live.recent_folders(str(a), [tmp_path])] == [str(a), str(b)]
+    later = time.time() + live.FIND_WINDOW_S + 5
+    assert live.recent_folders(places=[tmp_path], now=later) == []
+
+
+def test_the_recent_route_answers_with_nothing_to_find(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "_places", lambda: [tmp_path])
+    assert TestClient(create_app()).get("/api/live/recent").json() == {"folders": []}
+
+
+def test_the_slow_shutter_alert_comes_once_per_setting(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    for k, t in enumerate((1 / 30, 1 / 30, 1 / 30, 1 / 15, 1 / 15)):
+        landed(root, f"D{k}.JPG", im=product(seed=1), when=f"2026:11:06 1{k}:00:00", shutter=t, fnumber=8.0, iso=100, focal=50.0)
+        assert wait_for(lambda: len(shots_of(s)) == k + 1)
+    finish(s)
+    said = [any(a["kind"] == "shutter" for a in x["alerts"]) for x in sorted(shots_of(s), key=lambda x: x["n"])]
+    assert said == [True, False, False, True, False]
+    assert live.light_alerts(dict(frame(t=1 / 30), focal_mm=50.0), [dict(frame(t=1 / 30), focal_mm=85.0)]) != []    # a new lens is a new setting

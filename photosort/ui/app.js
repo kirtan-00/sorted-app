@@ -128,7 +128,7 @@
     if (input) return null;                            // its change event is the fact, logged below
     var out = { ev: "click", id: el.id || "" };
     if (!el.id) out.cls = (el.className && typeof el.className === "string" ? el.className.split(" ")[0] : el.tagName.toLowerCase());
-    if (!el.id && el.form && el.form.id) out.form = el.form.id;   // the Find button: a submit in form#q
+    if (!el.id && el.form && el.form.id) out.form = el.form.id;   // a submit in form#q
     if (el.tagName === "A" && el.href) out.href = el.href.split(":")[0];   // the scheme only (mailto)
     if (el.closest("#help")) out.where = "help";
     else if (el.closest("#lightbox")) out.where = "lightbox";
@@ -180,6 +180,7 @@
   // ---------- tabs ----------
   // ===== scroll memory: main is the one scroller and the sections swap inside it, so each list's position is kept per view =====
   var mainEl = $("main");
+  var filtersEl = $("#filters");
   var pendingScroll = null;                            // {view, top}: a restore that a later render (people, categories) reapplies once
   function restoreScroll(name) {
     var top = state.scroll[name] || 0;
@@ -193,12 +194,18 @@
   // The user scrolling on their own ends the pending restore, so a later re-render (a "Same" answer, Group faces) never yanks the list back.
   mainEl.addEventListener("scroll", function () { if (pendingScroll && mainEl.scrollTop !== pendingScroll.top) pendingScroll = null; });
   // ===== end scroll memory =====
+  // The export path in the toolbar only shows where it can be used: not on Shoot, and on Search once something is selected.
+  function syncExportbar() {
+    $("#exportbar").hidden = state.view === "index" || (state.view === "search" && !$("#selbar").classList.contains("has-sel"));
+  }
+
   function showView(name) {
     // ===== scroll memory: leaving a view keeps its position =====
     var switching = name !== state.view;
     if (switching) state.scroll[state.view] = mainEl.scrollTop;
     // ===== end scroll memory =====
     state.view = name;
+    syncExportbar();
     syncSaveForm();                                    // the "name this person" box belongs to two views, not to every tab
     // ===== nav selector: only the five view buttons; the "Check focus" link also lives in <nav> =====
     $$("header nav button[data-view]").forEach(function (b) {
@@ -211,6 +218,11 @@
       s.hidden = !hasFolder || s.id !== "view-" + name;
     });
     setWelcomeFrame(hasFolder);                        // ===== welcome: the sidebar and toolbar groups dim and go inert =====
+    // ===== the filters belong to Search: the rail is just the tabs anywhere else, and nothing in it can be reached on the welcome =====
+    filtersEl.hidden = !hasFolder || name !== "search";
+    filtersEl.inert = !hasFolder;
+    syncPlacesTab();                                   // ===== places: the tab shows with data, or while it is the one open =====
+    // ===== end the filters =====
     if (!hasFolder) return;
     trackTab(name);                                    // ===== usage log: the tab and the time on the one before =====
     // ===== scroll memory: the returned-to list sits where it was =====
@@ -224,7 +236,7 @@
     if (name === "categories") loadCategories();
     if (name === "products") loadProducts();          // ===== shoot modes =====
     if (name === "places") loadPlaces();               // ===== places: the map and the city list load on the first visit =====
-    if (name === "index") loadScanHealth();            // ===== resume: the health line walks the disk when the tab opens =====
+    if (name === "index") { loadFacets(); loadScanHealth(); }   // loadFacets: the Finish line reads what is still undone            // ===== resume: the health line walks the disk when the tab opens =====
     if (name === "index" && window.ScanScene) ScanScene.open();   // ===== the scan desktop (scene.js): the Finder windows and the Stack =====
     mountDriveStrip();                                 // ===== Google Drive: the strip sits under whichever export row is showing =====
   }
@@ -248,7 +260,9 @@
   var ctxCount = $("#ctx-count");
   var ctxClearBtn = $("#ctx-clear");
   var viewSearch = $("#view-search");
-  var VIEWS = ["search", "people", "categories", "places", "index", "products"];   // command-1 to 6; Scan keeps 5
+  var VIEWS = ["index", "search", "people", "categories", "places", "products"];   // the rail's order, top to bottom
+  // Command-1 to 6 count the tabs that are showing, so the keys match the rail when Places is not in it.
+  function railViews() { return $$("header nav button[data-view]").filter(function (b) { return !b.hidden; }).map(function (b) { return b.dataset.view; }); }
   var TAB_NAMES = { people: "People", categories: "Categories", places: "Places", products: "Products" };
   var CHIP_KINDS = ["pile", "person", "saved", "category", "cluster", "day", "place", "drone", "slowmo", "shot", "dur", "look", "flicker", "camera", "faces", "kind", "hide_bad", "hide_soft"];
   // ===== pick-one filters: a sidebar list of check rows that act as one choice (framing). Each kind names the query
@@ -262,10 +276,10 @@
            label: function (k) { return DUR_WORDS[k] || k; },
            title: function (k) { return "only clips " + (DUR_WORDS[k] || k).toLowerCase(); } },
     flicker: { param: "flicker", values: ["pulsing", "banding", "none"],
-               label: function (k) { return k === "none" ? "no flicker" : k + " flicker"; },
-               title: function (k) { return k === "none" ? "only clips checked and found clean" : "only clips with " + k + " light flicker"; } },
+               label: function (k) { return k === "none" ? "no flicker" : k === "pulsing" ? "flickering" : "bands"; },
+               title: function (k) { return k === "none" ? "only clips checked and found clean" : k === "pulsing" ? "only clips where the brightness pulses" : "only clips with bands rolling through the picture"; } },
     look: { param: "look", values: ["log", "standard"],
-            label: function (k) { return k === "log" ? "log, needs grading" : "Rec.709 and others"; },
+            label: function (k) { return k === "log" ? "flat, needs grading" : "ready to use"; },
             title: function (k) { return k === "log" ? "only clips shot in S-Log, which need grading" : "only clips the camera says are Rec.709 or another ready to watch profile"; } },
     // values: null takes any camera string the shoot has; the facet list is what the select offers
     camera: { param: "camera", values: null,
@@ -284,7 +298,11 @@
     flash: { param: "flash", values: null, label: function (k) { return exifWord("flash", k); }, title: function (k) { return "only photos with " + exifWord("flash", k); } },
     iso: { param: "iso", values: null, label: function (k) { return exifWord("iso", k); }, title: function (k) { return "only photos at " + exifWord("iso", k); } },
     // ===== end shoot modes =====
-    // the faces select in the toolbar: a chip like the rest, so "wide + no people" reads as two filters in the bar
+    // a minimum sharpness: only a saved search from before the Focus menu carries one, and it stays a chip so it can be taken off
+    sharp: { param: "sharp", values: null,
+             label: function (k) { return "sharpness " + Math.round(Number(k)) + " or more"; },
+             title: function (k) { return "only what scored " + Math.round(Number(k)) + " or more for sharpness"; } },
+    // the faces select in the People menu: a chip like the rest, so "wide + no people" reads as two filters in the bar
     faces: { param: "faces", values: ["none", "one", "two", "group"],
              label: function (k) { return FACES_WORDS[k] || k; },
              title: function (k) { return "only " + (FACES_WORDS[k] || k) + " in the frame"; } }
@@ -322,6 +340,7 @@
   }
   // ===== end pick-one filters =====
   CHIP_KINDS.push("flag", "stars", "label");          // ===== marks =====
+  CHIP_KINDS.push("sharp");
   CHIP_KINDS.push("product");                         // ===== shoot modes: a product, or one colour of it =====
   try { history.scrollRestoration = "manual"; } catch (e) { /* not supported */ }
 
@@ -417,6 +436,7 @@
     $$('#kind-select input[name="kind"]').forEach(function (r) { r.checked = r.value === k; });
     $("#hide-bad").checked = !!c("hide_bad");
     $("#hide-soft").checked = !!c("hide_soft");
+    syncFocusMenu();
     // ===== marks: the three hidden fields, then the Ratings block redrawn from them =====
     ["flag", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = c(k) ? String(c(k).key) : ""; });
     syncMarksFilter();
@@ -432,35 +452,35 @@
     return list;
   }
   function chipLabel(c) {
-    if (c.kind === "pile") return "the pile";
+    if (c.kind === "pile") return "Picked";
     if (c.kind === "person") return personLabel(personById(c.key), c.key);
-    if (c.kind === "cluster") return "discovered: " + (/^group \d+$/.test(c.key) ? "Unnamed " + c.key : c.key);
+    if (c.kind === "cluster") return "also found: " + (/^group \d+$/.test(c.key) ? "Unnamed " + c.key : c.key);
     if (c.kind === "kind") return c.key;
     if (c.kind === "day") return dayLabel(c.key);
     if (c.kind === "place") return boxLabel(c.key);
     if (c.kind === "slowmo") return "slow motion";
     if (PICKS[c.kind]) return PICKS[c.kind].label(c.key);
-    if (c.kind === "hide_bad") return "no out of focus";
-    if (c.kind === "hide_soft") return "no soft";
+    if (c.kind === "hide_bad") return "hide blurry";
+    if (c.kind === "hide_soft") return "sharpest only";
     if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return marksChipLabel(c);   // ===== marks =====
     if (c.kind === "product") return productChipLabel(c.key);
     return c.key;
   }
   function chipTitle(c) {
-    if (c.kind === "pile") return "only what is in the pile";
+    if (c.kind === "pile") return "only what is picked";
     if (c.kind === "person" || c.kind === "saved") return "only photos of " + chipLabel(c);
     if (c.kind === "category") return "only the " + c.key + " category";
-    if (c.kind === "cluster") return "only the discovered category " + c.key;
+    if (c.kind === "cluster") return "only the category found in this shoot, " + c.key;
     if (c.kind === "drone") return "only drone shots";
     if (c.kind === "slowmo") return "only clips shot at 100 fps or more";
     if (PICKS[c.kind]) return PICKS[c.kind].title(c.key);
     if (c.kind === "day") return "only what was shot on " + dayLabel(c.key);
     if (c.kind === "place") return "only what was shot around " + boxLabel(c.key);
     if (c.kind === "kind") return "only " + c.key;
-    if (c.kind === "hide_bad") return "the focus check's out-of-focus rows are hidden";
+    if (c.kind === "hide_bad") return "what the focus check marked blurry is hidden";
     if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return "only " + marksChipLabel(c);   // ===== marks =====
     if (c.kind === "product") return "only " + productChipLabel(c.key) + ", every angle";
-    return "the focus check's soft rows are hidden too";
+    return "what the focus check marked soft or blurry is hidden";
   }
   // The origin tab of the last chip that came from one: the Back button's label and the sidebar dot.
   function lastOrigin() {
@@ -471,6 +491,9 @@
   function renderCtxBar() {
     var chips = state.chips;
     renderDays();                                      // ===== days: the row for the day in force is lit =====
+    syncFold();                                        // ===== More filters: a folded filter in force opens the fold and counts =====
+    renderGridCount();
+    syncPeopleBtn();                                   // ===== the People menu: the button says what is on =====
     ctxBar.hidden = !chips.length;
     viewSearch.classList.toggle("has-ctx", chips.length > 0);
     $$("header nav button[data-view]").forEach(function (b) {
@@ -499,12 +522,17 @@
       chip.appendChild(x);
       ctxChips.appendChild(chip);
     });
-    // ===== live counts: the bar reads as a sum, "wide · no people · videos = 34 clips" =====
+    // ===== live counts: the bar reads as a sum, "wide, no people, videos = 34 clips" =====
     var n = state.total, m = state.shootTotal;
     ctxCount.textContent = "= " + num(n) + " " + matchNoun(n);
     ctxCount.title = m ? num(n) + " of the shoot's " + num(m) + " photos and clips pass every filter" : "";
   }
 
+  // The line above the grid: how much there is, until a chip takes that job over in the bar above it.
+  function renderGridCount() {
+    var ranked = !!(state.lastParams.q || state.lastParams.image_id);
+    $("#grid-count").textContent = ranked ? "Best match first" : state.chips.length ? "" : num(state.total) + " " + matchNoun(state.total);
+  }
   // What the matches are: the kind chip says so outright; otherwise the live counts know whether any photos or clips are left.
   function matchNoun(n) {
     var k = chipOf("kind"), one = n === 1;
@@ -518,7 +546,7 @@
   var navRestoring = false;
   var HASH_KEYS = { pile: "pile", person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", slowmo: "slowmo", shot: "shot_size", dur: "duration", look: "look", flicker: "flicker", camera: "camera", faces: "faces", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
   HASH_KEYS.flag = "flag"; HASH_KEYS.stars = "stars"; HASH_KEYS.label = "label";   // ===== marks =====
-  ["grp", "lens", "focal", "shutter", "aperture", "iso", "flash"].forEach(function (k) { HASH_KEYS[k] = PICKS[k].param; });   // ===== shoot modes =====
+  ["grp", "lens", "focal", "shutter", "aperture", "iso", "flash", "sharp"].forEach(function (k) { HASH_KEYS[k] = PICKS[k].param; });   // ===== shoot modes =====
   HASH_KEYS.product = "product";
   function hashFor(view, chips) {
     if (view !== "search" || !chips || !chips.length) return "#" + view;
@@ -528,7 +556,7 @@
   }
   // A pasted or typed URL: the chips in the order the hash lists them; a person, category, cluster or drone chip remembers its tab.
   function parseHash(h) {
-    var m = /^#(search|people|categories|index|products)(?:\?(.*))?$/.exec(h || "");
+    var m = /^#(search|people|categories|places|index|products)(?:\?(.*))?$/.exec(h || "");
     if (!m) return null;
     var entry = { view: m[1], chips: [] };
     if (m[1] === "search" && m[2]) {
@@ -545,7 +573,8 @@
         else if (k === "hide_bad" && v) entry.chips.push({ kind: "hide_bad", key: "hide_bad", from: null });
         else if (k === "hide_soft" && v) entry.chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
         // ===== marks =====
-        else if (k === "flag" && /^(pick|reject|none)$/.test(v)) entry.chips.push({ kind: "flag", key: v, from: null });
+        else if (k === "flag" && v === "pick") entry.chips.push({ kind: "pile", key: "pile", from: null });   // an address from before the one list
+        else if (k === "flag" && /^(reject|none)$/.test(v)) entry.chips.push({ kind: "flag", key: v, from: null });
         else if (k === "stars" && /^[1-5]$/.test(v)) entry.chips.push({ kind: "stars", key: v, from: null });
         else if (k === "label" && /^(red|yellow|green|blue|purple|none)$/.test(v)) entry.chips.push({ kind: "label", key: v, from: null });
         else if (k === "product" && /^\d+(:\d+)?$/.test(v)) entry.chips.push({ kind: "product", key: v, from: "products" });   // ===== shoot modes =====
@@ -637,7 +666,7 @@
   function loadStats() {
     return api("/api/stats").then(function (s) {
       setScanning(s.indexing);                         // before noteErrorCount below: the block words itself differently mid-scan
-      // ===== title block: "630 photos · 325 videos · 606 faces", the index time in the tooltip =====
+      // ===== title block: "630 photos, 325 videos, 606 faces", the index time in the tooltip =====
       var bits = [s.photos + " photos"];
       if (s.videos) bits.push(s.videos + " videos");
       bits.push(s.faces + " faces");
@@ -645,11 +674,13 @@
       if (s.indexing) bits.push("scanning…");
       if (s.errors) bits.push(s.errors + " failed");
       if (s.faces_pending) bits.push(s.faces_pending + " need faces");
-      $("#stats").textContent = bits.join(" · ");
+      $("#stats").textContent = bits.join(", ");
       $("#stats").title = s.last_index ? "scanned " + s.last_index : "";
       // ===== end title block =====
       // ===== combined filters: "31 of 777 match" needs the shoot's size =====
       state.shootTotal = (s.photos || 0) + (s.videos || 0);
+      state.shootKinds = { photos: s.photos || 0, videos: s.videos || 0 };
+      gateFilters();                                   // ===== filters with no data: photos and clips together, the longest clip sort =====
       renderCtxBar();
       // ===== end combined filters =====
       // ===== welcome: the shoot disk went away since the folder opened; the welcome comes back with its line =====
@@ -675,6 +706,7 @@
       lastErrorCount = s.errors;
       loadErrors();
     }
+    $("#retry-row").hidden = !(s && s.errors);         // a box with nothing to retry is noise; the errors block names it when there is
   }
 
   // The block used to shout: a red headline plus every failed path, sitting under a bar that was moving
@@ -694,6 +726,7 @@
     if (on === state.scanning) return;
     state.scanning = on;
     if (lastErrorData) renderErrors(lastErrorData);
+    renderFinish();
   }
   function loadErrors() {
     return api("/api/errors").then(renderErrors).catch(function () { /* non-fatal */ });
@@ -810,7 +843,7 @@
   }
   function shootNote(r) {
     if (r.missing) return (r.disk || "the disk") + " not connected";
-    return r.project ? "project saved" : "no project file";
+    return r.project ? "shoot file saved" : "no shoot file";
   }
   function renderShootRows() {
     var counter = $("#sm-count");
@@ -936,7 +969,7 @@
   function settleFolder(info) {
     state.people = []; state.peopleLoaded = false;
     state.results = [];
-    state.selected = pileSet([]); state.pile = null; loadPile();   // ===== the pile: this shoot's, from the index =====
+    state.selected = pileSet([]); state.pile = null; offerUndo(); wasRejected.clear(); loadPile();   // ===== the pile: this shoot's, from the index =====
     state.live = null;                                 // ===== live counts: the previous shoot's numbers mean nothing here =====
     state.categories = { fixed: {}, discovered: {}, drone: 0 };
     state.catTicked = new Set(); state.catSeen = new Set();
@@ -953,6 +986,8 @@
     // ===== per-folder reset: focus boxes and line, faces pending, the reorganise section =====
     renderFocusLine(null);
     renderFacesPending(null);
+    state.shootKinds = null;                           // ===== filters with no data: the new shoot's come with its stats =====
+    $("#retry-row").hidden = true;
     resetReorganise();
     renderScanBar(); renderScanHealth(null);          // ===== resume: state.scan came with the folder reply =====
     loadProject();                                     // ===== project file: the card for this shoot =====
@@ -1088,8 +1123,6 @@
 
   // ---------- search ----------
   var form = $("#q");
-  var sharpInput = form.querySelector('[name="sharp"]');
-  var sharpOut = $("#sharp-out");
   // ===== slider value fields: the number next to a slider is a text field; typing moves the slider =====
   function bindSliderField(range, field, onCommit) {
     function paint() { range.style.setProperty("--p", (range.value - range.min) / (range.max - range.min)); }
@@ -1103,8 +1136,6 @@
     });
     paint();
   }
-  bindSliderField(sharpInput, sharpOut, function () { runSearch(); });
-  sharpInput.addEventListener("change", function () { runSearch(); });
   // ===== end slider value fields =====
 
   function currentFilters() {
@@ -1112,8 +1143,6 @@
     var params = {};
     var q = (fd.get("q") || "").trim();
     if (q) params.q = q;
-    var sharp = fd.get("sharp");
-    if (sharp && Number(sharp) > 0) params.sharp = sharp;
     var faces = fd.get("faces");
     if (faces) params.faces = faces;
     var person = fd.get("person");
@@ -1206,7 +1235,7 @@
     return placeName((p[0] + p[2]) / 2, (p[1] + p[3]) / 2);
   }
   var daysGroup = $("#days-group"), daysList = $("#days-list"), daysCount = $("#days-count");
-  var DAYS_SHOWN = 8;
+  var DAYS_SHOWN = 5;
   var daysAll = false;
   function loadDays() {
     if (!(state.folder && state.folder.root)) { state.days = []; renderDays(); return Promise.resolve(); }
@@ -1274,9 +1303,9 @@
   }
   // The counts alone, for the number next to the tab. The two map assets wait for the first visit.
   function placeCount() {
-    if (!(state.folder && state.folder.root)) { state.places = null; return Promise.resolve(); }
+    if (!(state.folder && state.folder.root)) { state.places = null; renderPlaces(); return Promise.resolve(); }
     return api("/api/places").then(function (d) { state.places = d; renderPlaces(); })
-      .catch(function () { state.places = null; });
+      .catch(function () { state.places = null; renderPlaces(); });
   }
   function loadPlaces() {
     var first = world === null;
@@ -1445,9 +1474,17 @@
     jumpTo({ kind: "place", key: boxOf(c), from: "places" }, function () { runSearch(ctxParams(state.chips)); });
   }
 
+  // The tab shows once the shoot has a location to draw. A shoot that has not been read yet has Read locations on the
+  // Shoot tab's Finish line, and the tab comes in with the first place found.
+  function syncPlacesTab() {
+    var d = state.places;
+    $("#nav-places").hidden = !(d && d.clusters && d.clusters.length) && state.view !== "places";
+  }
   function renderPlaces() {
     var d = state.places;
     var navCount = $("#nav-place-count");
+    syncPlacesTab();
+    renderFinish();
     if (!d) { placesSummary.textContent = ""; navCount.textContent = ""; return; }
     var clusters = d.clusters || [];
     navCount.textContent = clusters.length ? String(clusters.length) : "";
@@ -1596,9 +1633,11 @@
     api("/api/groups/best?" + new URLSearchParams(p).toString(), { method: "POST" }).then(function (d) {
       track("keep_best", { kind: kind, sets: d.sets });
       return loadPile().then(function () {
+        loadMarkCounts();
+        offerUnreject(d.unrejected);
         var what = kind === "burst" ? (d.sets === 1 ? "burst" : "bursts") : (d.sets === 1 ? "bracket" : "brackets");
         setStatus(d.sets ? (kind === "burst" ? "kept the sharpest frame of " : "kept the middle exposure of ") + num(d.sets) + " " + what
-                           + (d.added < d.sets ? ", " + num(d.sets - d.added) + " already in the pile" : "") + "; the pile has " + num(d.n)
+                           + (d.added < d.sets ? ", " + num(d.sets - d.added) + " already picked" : "") + "; " + num(d.n) + " picked now"
                          : "no " + what + " in what the filters show", true);
       });
     }).catch(function (err) { setStatus("could not keep the best frames: " + err.message, true); });
@@ -2029,9 +2068,11 @@
     api("/api/cull/pile", { method: "POST" }).then(function (d) {
       track("cull_pile", { added: d.added });
       return loadPile().then(function () {
-        setStatus(d.added ? "added " + num(d.added) + " picks to the pile; it has " + num(d.n) : "every pick was in the pile already", true);
+        loadMarkCounts();
+        offerUnreject(d.unrejected);
+        setStatus(d.added ? "added " + num(d.added) + " to Picked; " + num(d.n) + " picked now" : "every one was in Picked already", true);
       });
-    }).catch(function (err) { setStatus("could not add to the pile: " + err.message, true); });
+    }).catch(function (err) { setStatus("could not add them to Picked: " + err.message, true); });
   });
   $("#cull-export").addEventListener("click", function () {
     setStatus("exporting the picks…", true);
@@ -2095,8 +2136,19 @@
   Array.prototype.filter.call(form.elements, function (el) { return el.tagName === "SELECT" || el.type === "radio"; }).forEach(function (sel) {
     sel.addEventListener("change", function () { runSearch(); });   // form.elements also sees the kind segments in the sidebar (form="q")
   });
-  // ===== focus filters: a change on either box re-runs the search =====
-  [$("#hide-bad"), $("#hide-soft")].forEach(function (box) { box.addEventListener("change", function () { runSearch(); }); });
+  // ===== focus filters: one menu over the two hidden boxes, which stay what the chips and the search read =====
+  var focusSelect = $("#focus-select");
+  function syncFocusMenu() {
+    focusSelect.value = $("#hide-soft").checked ? "soft" : $("#hide-bad").checked ? "bad" : "";
+    focusSelect.classList.toggle("set", !!focusSelect.value);
+    if (focusSelect.value) { focusSelect.hidden = false; $("#focus-offer").hidden = true; }   // a chip from a link or a saved search keeps its control
+  }
+  focusSelect.addEventListener("change", function () {
+    $("#hide-bad").checked = focusSelect.value === "bad";
+    $("#hide-soft").checked = focusSelect.value === "soft";
+    focusSelect.classList.toggle("set", !!focusSelect.value);
+    runSearch();
+  });
   // ===== end focus filters =====
   var aerialOnly = $("#aerial-only");
   aerialOnly.addEventListener("change", function () { runSearch(); });   // ===== combined filters: the box is the drone chip =====
@@ -2119,14 +2171,13 @@
   }
   // whole: the shoot's own counts (whether a list shows); live: what each value would leave given the other filters
   function renderExif(whole) {
-    var anyKnown = false;
+    var anyShown = false;
     Object.keys(EXIF_SELECTS).forEach(function (axis) {
       var sel = EXIF_SELECTS[axis], cur = sel.value;
       var counts = (whole && whole[axis]) || {};
       var live = state.live && state.live[axis];
       var keys = axis === "lens" ? Object.keys(counts) : EXIF_WORDS[axis].map(function (w) { return w[0]; }).concat(["unknown"]);
       keys = keys.filter(function (k) { return counts[k]; });
-      if (keys.some(function (k) { return k !== "unknown"; })) anyKnown = true;
       while (sel.options.length > 1) sel.remove(1);
       keys.forEach(function (k) {
         var o = document.createElement("option");
@@ -2135,12 +2186,14 @@
       });
       setSelectValue(sel, cur, PICKS[axis].label);
       sel.classList.toggle("set", !!cur);
+      sel.hidden = keys.length < 2 && !cur;            // like the camera select: a list with one choice in it filters nothing
+      if (!sel.hidden) anyShown = true;
     });
-    var anySet = Object.keys(EXIF_SELECTS).some(function (a) { return EXIF_SELECTS[a].value; });
-    $("#exif-group").hidden = !anyKnown && !anySet;
+    $("#exif-group").hidden = !anyShown;
   }
   // ===== end shoot modes =====
   function setPick(kind, value) {
+    if (kind === "sharp") { $("#sharp-filter").value = value || ""; return; }
     if (kind === "camera") { setCameraValue(value); return; }
     if (EXIF_SELECTS[kind]) { setSelectValue(EXIF_SELECTS[kind], value, PICKS[kind].label); return; }
     if (kind === "faces") { form.querySelector('[name="faces"]').value = value || ""; return; }
@@ -2209,7 +2262,7 @@
     state.facets = d;                                  // ===== live counts: kept so a fresh /api/search/facets can repaint the numbers =====
     var sm = (d && d.slowmo) || {}, fr = d && d.fps_read;
     var clips = (sm.slow || 0) + (sm.normal || 0) + (sm.unknown || 0);
-    $("#slowmo-row").hidden = !clips && !slowmoOnly.checked;
+    $("#slowmo-row").hidden = !sm.slow && !slowmoOnly.checked;
     var liveSlow = state.live && state.live.slowmo ? state.live.slowmo.slow || 0 : null;
     $("#slowmo-count").textContent = clips ? num(liveSlow != null ? liveSlow : sm.slow || 0) : "";
     renderPick("shot", "#shot-group", d && d.shot_size);
@@ -2217,8 +2270,7 @@
     renderPick("look", "#look-group", d && d.look);
     renderPick("flicker", "#flicker-group", d && d.flicker);
     var fl = d && d.flicker_read;
-    $("#flicker-line").hidden = !(fl && fl.unchecked > 0);
-    if (fl && fl.unchecked > 0) $("#flicker-status").textContent = num(fl.unchecked) + (fl.unchecked === 1 ? " clip" : " clips") + " not checked for flicker";
+    finishLink("#flicker-read", fl && fl.unchecked, "clip", "not checked for flicker", "decode a few seconds of each clip; needs the disk");
     renderCameras(d && d.cameras);
     // ===== shoot modes: sequences show "frames in sets", the camera settings fill their selects, and a shoot
     // scanned before v0.7 is offered the header read =====
@@ -2235,19 +2287,60 @@
     });
     $("#keep-burst").hidden = !(sh.groups && sh.groups.burst);
     $("#keep-bracket").hidden = !(sh.groups && sh.groups.bracket);
+    // Show every copy lives with the sets: no sets, nothing to unfold
+    if (state.showCopies) $("#grp-group").hidden = false;
     renderExif(sh);
     var cr = d && d.camera_read;
-    var offerCam = !!(cr && cr.unknown > 0 && !cr.read_at);
-    $("#camread-line").hidden = !offerCam;
-    if (offerCam) $("#camread-status").textContent = num(cr.unknown) + (cr.unknown === 1 ? " photo" : " photos") + " without camera settings";
+    finishLink("#camread", cr && !cr.read_at && cr.unknown, "photo", "without camera settings", "read shutter, aperture, ISO, focal length, lens and flash from each photo's header; needs the disk, decodes nothing");
     // ===== end shoot modes =====
     var cf = d && d.clip_faces;
-    $("#clipfaces-line").hidden = !(cf && cf.pending > 0);
-    if (cf && cf.pending > 0) $("#clipfaces-status").textContent = num(cf.pending) + (cf.pending === 1 ? " clip" : " clips") + " not checked for faces";
-    var offer = !!(fr && fr.unknown > 0 && !fr.read_at);
-    $("#fps-line").hidden = !offer;
-    if (offer) $("#fps-status").textContent = num(fr.unknown) + (fr.unknown === 1 ? " clip" : " clips") + " without clip details";
+    finishLink("#clipfaces-find", cf && cf.pending, "clip", "not checked for faces", "look for faces in the frames already saved on this Mac; the disk can stay unplugged");
+    finishLink("#fps-read", fr && !fr.read_at && fr.unknown, "clip", "without clip details", "read the frame rate, camera and picture profile from each clip's header and sidecar; needs the disk, decodes nothing");
+    gateFilters();
+    renderFinish();
   }
+  // ===== filters with no data: a control shows when it has something to filter, and always while it is on, since a
+  // chip the sidebar cannot show would be a filter nobody can untick. Called whenever one of the sources lands. =====
+  var longestOpt = sortSel.querySelector('option[value="longest"]');
+  function gateFilters() {
+    var k = state.shootKinds || { photos: 0, videos: 0 };
+    var kindOn = !!chipOf("kind");
+    $("#kind-select").hidden = !(k.photos && k.videos) && !kindOn;
+    $("#aerial-row").hidden = !state.categories.drone && !aerialOnly.checked;
+    // an option is taken out rather than hidden: a native menu on WebKit shows hidden options anyway
+    var wantLongest = !!k.videos || sortSel.value === "longest";
+    if (wantLongest && !longestOpt.parentNode) sortSel.appendChild(longestOpt);
+    else if (!wantLongest && longestOpt.parentNode) sortSel.removeChild(longestOpt);
+    $("#type-group").hidden = $("#kind-select").hidden && $("#aerial-row").hidden && $("#slowmo-row").hidden;
+    var anyFolded = $$("#more-filters > .pick-group").some(function (g) { return !g.hidden; });
+    moreToggle.hidden = !anyFolded;
+    if (!anyFolded) moreBody.hidden = true;
+    else moreBody.hidden = !moreOpen;
+  }
+  // ===== end filters with no data =====
+  // ===== More filters: closed until asked for, and it opens by itself when a folded filter comes on (a saved search,
+  // a pasted link, a chip from another tab), so a filter in force is never out of sight without saying so =====
+  var moreToggle = $("#more-toggle"), moreBody = $("#more-filters"), moreCount = $("#more-count");
+  var moreOpen = false, foldedOn = 0;
+  var FOLDED_KINDS = ["shot", "dur", "look", "flicker", "camera", "grp", "lens", "focal", "shutter", "aperture", "flash", "iso"];
+  function setMoreOpen(open) {
+    moreOpen = open;
+    moreBody.hidden = !open || moreToggle.hidden;
+    moreToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    moreToggle.classList.toggle("open", open);
+  }
+  function syncFold() {
+    var n = state.chips.filter(function (c) { return FOLDED_KINDS.indexOf(c.kind) >= 0; }).length + (state.showCopies ? 1 : 0);
+    if (n > foldedOn) setMoreOpen(true);
+    foldedOn = n;
+    moreCount.textContent = n ? n + " on" : "";
+  }
+  moreToggle.addEventListener("click", function () {
+    setMoreOpen(!moreOpen);
+    if (moreOpen) moreToggle.scrollIntoView({ block: "start", behavior: "smooth" });
+    track("more_filters", { open: moreOpen });
+  });
+  // ===== end More filters =====
   // ===== live counts: one call per search, the same filters minus what only ranks or pages =====
   var liveSeq = 0;
   function loadLive(params) {
@@ -2267,7 +2360,7 @@
     renderDays();
     renderCtxBar();
   }
-  // The faces select carries its counts in the option text: "No people  12".
+  // The faces field carries its counts in the option text, which is what the People menu prints: "No people  12".
   function renderFacesCounts() {
     var live = state.live && state.live.faces;
     Array.prototype.forEach.call(form.querySelector('[name="faces"]').options, function (o) {
@@ -2275,6 +2368,7 @@
       if (!o.dataset.label) o.dataset.label = o.textContent;
       o.textContent = o.dataset.label + (live ? "  " + num(live[o.value] || 0) : "");
     });
+    if (!peopleMenu.hidden) renderPeopleMenu();
   }
   // ===== end live counts =====
   $("#fps-read").addEventListener("click", function () {
@@ -2322,20 +2416,18 @@
   // filter back and runs it (a history entry like any chip change). The list is per shoot, in the index (table searches). =====
   var qField = form.querySelector('[name="q"]');
   var qHist = $("#q-history");
-  var savedGroup = $("#saved-group");
-  var savedSearchesEl = $("#saved-searches");
   var qhRows = [];                                     // the rows in the dropdown, in order
+  var qhData = [];                                     // the search each of those rows runs
   var qhIndex = -1;                                    // the highlighted row
   var FACES_WORDS = { none: "no people", one: "one person", two: "two people", group: "group of 3+" };
   function loadSearches() {
-    if (!(state.folder && state.folder.root)) { state.searches = { recent: [], saved: [] }; renderSavedSearches(); return Promise.resolve(); }
+    if (!(state.folder && state.folder.root)) { state.searches = { recent: [], saved: [] }; return Promise.resolve(); }
     return api("/api/searches").then(function (d) {
       state.searches = { recent: d.recent || [], saved: d.saved || [] };
-      renderSavedSearches();
       if (!qHist.hidden) renderHistory();
     }).catch(function () { /* the list is a convenience; a failed load leaves the old one */ });
   }
-  // The filters a query ran with, in a few words: "person_01 · beach · drone · photos · sharp 40"
+  // The filters a query ran with, in a few words: "person_01, beach, drone, photos"
   function filterSummary(f) {
     f = f || {};
     var parts = [];
@@ -2346,9 +2438,8 @@
     if (f.slowmo) parts.push("slow motion");
     Object.keys(PICKS).forEach(function (kind) { if (f[PICKS[kind].param]) parts.push(PICKS[kind].label(String(f[PICKS[kind].param]))); });
     if (f.kind) parts.push(f.kind);
-    if (f.sharp) parts.push("sharp " + Math.round(Number(f.sharp)));
-    if (f.hide_soft) parts.push("no soft"); else if (f.hide_bad) parts.push("no out of focus");
-    return parts.join(" · ");
+    if (f.hide_soft) parts.push("sharpest only"); else if (f.hide_bad) parts.push("hide blurry");
+    return parts.join(", ");
   }
   function chipsFromFilters(f) {
     f = f || {};
@@ -2367,14 +2458,12 @@
     if (f.hide_soft) chips.push({ kind: "hide_soft", key: "hide_soft", from: null });
     return chips;
   }
-  // Run a recent or saved search: the text, the toolbar controls (Sharp, faces) and the chips it ran with.
+  // Run a recent or saved search: the text, the faces menu and the chips it ran with.
   function applySearchRow(row) {
     var f = row.filters || {};
     closeHistory();
     if (state.view !== "search") goView("search");
     qField.value = row.q;
-    sharpInput.value = f.sharp ? Number(f.sharp) : 0;
-    sharpInput.dispatchEvent(new Event("input"));    // the number field and the fill follow the slider
     form.querySelector('[name="faces"]').value = f.faces && FACES_WORDS[f.faces] ? f.faces : "";
     writeChipsToForm(chipsFromFilters(f));            // the form only: runSearch reads the chips off it and pushes a history entry
     track("search_again", { saved: !!row.saved, filters: Object.keys(f).length });
@@ -2394,38 +2483,46 @@
   var STAR_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.2l1.5 3.1 3.4.5-2.45 2.4.6 3.4L6 9l-3.05 1.6.6-3.4L1.1 4.8l3.4-.5z"/></svg>';
   function renderHistory() {
     var keep = qhIndex;                                // a re-render after a fresh load keeps the highlight
-    qHist.innerHTML = ""; qhRows = []; qhIndex = -1;
-    var rows = state.searches.recent;
-    if (!rows.length) {
+    qHist.innerHTML = ""; qhRows = []; qhData = []; qhIndex = -1;
+    // saved searches first, the rest of the recent ones under them; a saved one is not listed twice
+    var saved = state.searches.saved;
+    var rows = state.searches.recent.filter(function (row) { return !row.saved; });
+    if (!saved.length && !rows.length) {
       var e = document.createElement("div"); e.className = "qh-empty"; e.textContent = "No searches yet on this shoot"; qHist.appendChild(e);
       return;
     }
-    rows.forEach(function (row) {
-      var r = document.createElement("div"); r.className = "qh-row"; r.setAttribute("role", "option"); r.dataset.id = row.id;
-      var t = document.createElement("span"); t.className = "qh-text"; t.textContent = row.q; t.title = row.q;
-      var f = document.createElement("span"); f.className = "qh-filters"; f.textContent = filterSummary(row.filters); f.title = f.textContent;
-      var star = document.createElement("button");
-      star.type = "button"; star.className = "qh-star"; star.innerHTML = STAR_SVG;
-      star.setAttribute("aria-pressed", row.saved ? "true" : "false");
-      star.title = row.saved ? "forget this saved search" : "save this search as a chip in the sidebar";
-      star.setAttribute("aria-label", (row.saved ? "forget the saved search " : "save the search ") + row.q);
-      star.addEventListener("click", function (ev) { ev.stopPropagation(); setSaved(row, !row.saved); });
-      var del = document.createElement("button");
-      del.type = "button"; del.className = "qh-del"; del.innerHTML = X_SVG;
-      del.title = "remove from the list"; del.setAttribute("aria-label", "remove " + row.q + " from the list");
-      del.addEventListener("click", function (ev) { ev.stopPropagation(); forgetSearch(row); });
-      r.appendChild(t); r.appendChild(f); r.appendChild(star); r.appendChild(del);
-      r.addEventListener("mousedown", function (ev) { ev.preventDefault(); });   // the field keeps its focus
-      r.addEventListener("click", function () { applySearchRow(row); });
-      qHist.appendChild(r); qhRows.push(r);
-    });
+    if (saved.length) { historyHead("Saved"); saved.forEach(historyRow); }
+    if (saved.length && rows.length) historyHead("Recent");
+    rows.forEach(historyRow);
     if (keep >= 0) highlightRow(Math.min(keep, qhRows.length - 1));
   }
-  function openHistory() {
+  function historyHead(text) {
+    var h = document.createElement("div"); h.className = "qh-head"; h.textContent = text; qHist.appendChild(h);
+  }
+  function historyRow(row) {
+    var r = document.createElement("div"); r.className = "qh-row"; r.setAttribute("role", "option"); r.dataset.id = row.id;
+    var t = document.createElement("span"); t.className = "qh-text"; t.textContent = row.q; t.title = row.q;
+    var f = document.createElement("span"); f.className = "qh-filters"; f.textContent = filterSummary(row.filters); f.title = f.textContent;
+    var star = document.createElement("button");
+    star.type = "button"; star.className = "qh-star"; star.innerHTML = STAR_SVG;
+    star.setAttribute("aria-pressed", row.saved ? "true" : "false");
+    star.title = row.saved ? "forget this saved search" : "save this search, to keep it at the top of this list";
+    star.setAttribute("aria-label", (row.saved ? "forget the saved search " : "save the search ") + row.q);
+    star.addEventListener("click", function (ev) { ev.stopPropagation(); setSaved(row, !row.saved); });
+    var del = document.createElement("button");
+    del.type = "button"; del.className = "qh-del"; del.innerHTML = X_SVG;
+    del.title = "remove from the list"; del.setAttribute("aria-label", "remove " + row.q + " from the list");
+    del.addEventListener("click", function (ev) { ev.stopPropagation(); forgetSearch(row); });
+    r.appendChild(t); r.appendChild(f); r.appendChild(star); r.appendChild(del);
+    r.addEventListener("mousedown", function (ev) { ev.preventDefault(); });   // the field keeps its focus
+    r.addEventListener("click", function () { applySearchRow(row); });
+    qHist.appendChild(r); qhRows.push(r); qhData.push(row);
+  }
+  function openHistory(byKey) {
     renderHistory();
     qHist.hidden = false; qField.setAttribute("aria-expanded", "true");
     loadSearches().then(function () {                  // fresh: the last search may have added a row
-      if (!qHist.hidden && qhIndex < 0 && qhRows.length) highlightRow(0);
+      if (byKey && !qHist.hidden && qhIndex < 0 && qhRows.length) highlightRow(0);
     });
   }
   function closeHistory() {
@@ -2440,48 +2537,112 @@
   qField.addEventListener("keydown", function (e) {
     if (e.key === "ArrowDown" && !e.altKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
-      if (qHist.hidden) { openHistory(); highlightRow(qhRows.length ? 0 : -1); }
+      if (qHist.hidden) { openHistory(true); highlightRow(qhRows.length ? 0 : -1); }
       else highlightRow(Math.min(qhIndex + 1, qhRows.length - 1));
       return;
     }
+    // Enter runs the search itself: there is no Find button to stand behind it
+    if (e.key === "Enter" && (qHist.hidden || qhIndex < 0)) { e.preventDefault(); closeHistory(); runSearch(); return; }
     if (qHist.hidden) return;
     if (e.key === "ArrowUp") { e.preventDefault(); if (qhIndex <= 0) closeHistory(); else highlightRow(qhIndex - 1); return; }
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeHistory(); return; }
-    if (e.key === "Enter" && qhIndex >= 0 && state.searches.recent[qhIndex]) { e.preventDefault(); applySearchRow(state.searches.recent[qhIndex]); return; }
+    if (e.key === "Enter" && qhData[qhIndex]) { e.preventDefault(); applySearchRow(qhData[qhIndex]); return; }
     if (e.key === "Tab") closeHistory();
   });
-  qField.addEventListener("input", closeHistory);
+  qField.addEventListener("input", function () {
+    closeHistory();
+    if (!qField.value && state.lastParams.q) runSearch();   // the x in the field, or everything deleted: back to the whole shoot
+  });
+  // A click in the empty field lists them too, so a saved search is one click away and not behind a key.
+  qField.addEventListener("click", function () {
+    if (!qField.value && qHist.hidden && (state.searches.recent.length || state.searches.saved.length)) openHistory();
+  });
   qField.addEventListener("blur", closeHistory);
   form.addEventListener("submit", closeHistory);
-  function renderSavedSearches() {
-    var rows = state.searches.saved;
-    savedGroup.hidden = savedSearchesEl.hidden = !rows.length;
-    savedSearchesEl.innerHTML = "";
-    rows.forEach(function (row) {
-      var chip = document.createElement("span"); chip.className = "ss-chip";
-      var run = document.createElement("button");
-      run.type = "button"; run.className = "ss-run"; run.textContent = row.q;
-      var sum = filterSummary(row.filters);
-      run.title = "run this saved search" + (sum ? ": " + row.q + " · " + sum : "");
-      run.addEventListener("click", function () { applySearchRow(row); });
-      var x = document.createElement("button");
-      x.type = "button"; x.className = "ss-x"; x.innerHTML = X_SVG;
-      x.title = "forget this saved search"; x.setAttribute("aria-label", "forget the saved search " + row.q);
-      x.addEventListener("click", function () { setSaved(row, false); });
-      chip.appendChild(run); chip.appendChild(x);
-      savedSearchesEl.appendChild(chip);
-    });
-  }
   // ===== end search history =====
+
+  // ===== the People menu: one button over the faces and person selects, which stay the real fields. Rows are drawn from
+  // their options each time it opens, so the live counts and the people list need no second copy of themselves. A row
+  // writes its select and fires change, the path a hand on the select would take; clicking the lit row takes it off. =====
+  var peopleBtn = $("#people-btn"), peopleMenu = $("#people-menu");
+  var facesField = form.querySelector('[name="faces"]');
+  function pickRow(sel, value, text) {
+    var b = document.createElement("button");
+    var on = sel.value === value;
+    b.type = "button"; b.className = "pick-row" + (on ? " on" : "");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    var tick = document.createElement("span"); tick.className = "sm-tick"; if (on) tick.innerHTML = TICK_SVG;
+    var label = document.createElement("span"); label.className = "pick-label"; label.textContent = text;
+    b.appendChild(tick); b.appendChild(label);
+    b.addEventListener("click", function () {
+      sel.value = on ? "" : value;
+      closePeopleMenu(true);
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    peopleMenu.appendChild(b);
+  }
+  function pickHead(text) {
+    var h = document.createElement("div"); h.className = "pick-head"; h.textContent = text; peopleMenu.appendChild(h);
+  }
+  function renderPeopleMenu() {
+    peopleMenu.innerHTML = "";
+    pickHead("How many");
+    Array.prototype.forEach.call(facesField.options, function (o) { if (o.value) pickRow(facesField, o.value, o.textContent); });
+    pickHead("Who");
+    var names = Array.prototype.filter.call(personSelect.options, function (o) { return o.value; });
+    names.forEach(function (o) { pickRow(personSelect, o.value, o.textContent); });
+    if (!names.length) {
+      var e = document.createElement("div"); e.className = "pick-note";
+      e.textContent = state.peopleLoaded ? "Group faces on the People tab to name who is here" : "loading people…";
+      peopleMenu.appendChild(e);
+    }
+  }
+  function openPeopleMenu() {
+    renderPeopleMenu();
+    peopleMenu.hidden = false;
+    peopleBtn.setAttribute("aria-expanded", "true");
+    primePersonSelect();
+  }
+  function closePeopleMenu(toButton) {
+    if (peopleMenu.hidden) return;
+    peopleMenu.hidden = true;
+    peopleBtn.setAttribute("aria-expanded", "false");
+    if (toButton) peopleBtn.focus();
+  }
+  function syncPeopleBtn() {
+    if (!peopleBtn) return;                            // renderCtxBar can run before this block is set up
+    var parts = [];
+    var pc = chipOf("person");
+    if (pc) parts.push(personLabel(personById(pc.key), pc.key));
+    if (facesField.value) parts.push(PICKS.faces.label(facesField.value));
+    peopleBtn.firstChild.textContent = parts.length ? parts.join(", ") : "People";
+    peopleBtn.classList.toggle("set", parts.length > 0);
+  }
+  peopleBtn.addEventListener("click", function () { if (peopleMenu.hidden) openPeopleMenu(); else closePeopleMenu(); });
+  peopleMenu.addEventListener("keydown", function (e) {
+    var rows = $$(".pick-row", peopleMenu), i = rows.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); if (rows[i + 1]) rows[i + 1].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); if (i > 0) rows[i - 1].focus(); else closePeopleMenu(true); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePeopleMenu(true); }
+    else if (e.key === "Tab") closePeopleMenu();
+  });
+  peopleBtn.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") { e.preventDefault(); if (peopleMenu.hidden) openPeopleMenu(); var r = $(".pick-row", peopleMenu); if (r) r.focus(); }
+    else if (e.key === "Escape" && !peopleMenu.hidden) { e.preventDefault(); e.stopPropagation(); closePeopleMenu(); }
+  });
+  document.addEventListener("mousedown", function (e) {
+    if (peopleMenu.hidden || peopleBtn.contains(e.target) || peopleMenu.contains(e.target)) return;
+    closePeopleMenu();
+  });
+  // ===== end the People menu =====
   $("#show-more").addEventListener("click", function () { runSearch(state.lastParams, true); });
   $("#select-matching").addEventListener("click", function () {
     var p = Object.assign({}, state.lastParams); delete p.limit; delete p.offset;
     api("/api/search/ids?" + new URLSearchParams(p).toString()).then(function (data) {
       (data.ids || []).forEach(function (id) { state.selected.add(id); });
-      $$(".card", gridEl).forEach(function (c) { if (state.selected.has(Number(c.dataset.id))) c.classList.add("selected"); });
-      updateSelbar();
-      setStatus("selected all " + data.total + " matching photo(s)");
-    }).catch(function (err) { setStatus("could not select: " + err.message); });
+      drawPicks();
+      setStatus("picked all " + data.total + " matching photo(s)");
+    }).catch(function (err) { setStatus("could not pick them: " + err.message); });
   });
 
   // n_faces is null when the photo was indexed with faces off: not "0", just unknown
@@ -2508,8 +2669,7 @@
       var a = indexOfId(lastClickedId), b = indexOfId(r.id);
       if (a >= 0 && b >= 0) {
         for (var i = Math.min(a, b); i <= Math.max(a, b); i++) state.selected.add(state.results[i].id);
-        $$(".card", gridEl).forEach(function (c) { if (state.selected.has(Number(c.dataset.id))) c.classList.add("selected"); });
-        updateSelbar();
+        drawPicks();
         return;
       }
     }
@@ -2544,6 +2704,7 @@
     resultById = new Map();
     hoveredId = null;
     var divided = false;
+    settleFlags();
     state.results.forEach(function (r, idx) {
       resultById.set(r.id, r);
       // Results arrive sure first, then the "less sure" band by confidence: one divider before the first
@@ -2552,15 +2713,14 @@
       if (unsure && !divided) {
         divided = true;
         var div = document.createElement("div");
-        div.className = "grid-divider mono";
+        div.className = "grid-divider";
         // under a category the band also holds what was filed elsewhere and fits here too (a runner-up)
-        div.textContent = state.lastParams.category ? "less sure, or filed under another category too, by confidence" : "less sure, sorted by confidence";
+        div.textContent = state.lastParams.category ? "possible matches, or filed under another category too, by confidence" : "possible matches, sorted by confidence";
         gridEl.appendChild(div);
       }
       var card = document.createElement("div");
       card.className = "card";
       if (unsure) card.classList.add("unsure");
-      if (state.selected.has(r.id)) card.classList.add("selected");
       card.dataset.id = r.id;
 
       var img = document.createElement("img");
@@ -2573,20 +2733,20 @@
       card.tabIndex = idx === 0 ? 0 : -1;
       if (r.kind === "video") {
         var badge = document.createElement("div");
-        badge.className = "badge mono";
+        badge.className = "badge";
         badge.textContent = mmss(r.duration);          // the play triangle is a CSS glyph on .badge
         card.appendChild(badge);
       }
       if (r.aerial) {
         var drone = document.createElement("div");
-        drone.className = "badge drone mono";
+        drone.className = "badge drone";
         drone.textContent = "drone";
         card.appendChild(drone);
       }
       // ===== duplicates and bursts: "x2" for a file that is on the disk twice, "burst of 12" for a burst =====
       if (r.group) {
         var grp = document.createElement("div");
-        grp.className = "badge group mono";
+        grp.className = "badge group";
         grp.textContent = groupBadge(r.group);
         grp.title = r.group.kind === "burst" ? "one tile for " + r.group.n + " frames shot as a burst"
           : r.group.kind === "bracket" ? "one tile for an exposure bracket of " + r.group.n + " frames: " + evSorted(r.group).join(", ") + " stops; this is the middle one"
@@ -2598,12 +2758,12 @@
       var stampText = ranked ? "" : sortStamp(r, state.lastParams.sort);
       if (stampText) {
         var stamp = document.createElement("div");
-        stamp.className = "badge stamp mono";
+        stamp.className = "badge stamp";
         stamp.textContent = stampText;
         card.appendChild(stamp);
       }
       // ===== end sort =====
-      decorateMarks(card, r);                          // ===== marks: flag, stars and label on the tile =====
+      decorateMarks(card, r);                          // ===== marks: picked, flag, stars and label on the tile =====
 
       card.addEventListener("click", function (e) { clickCard(e, r, card); });
       card.addEventListener("dblclick", function () {
@@ -2617,21 +2777,23 @@
     var folded = state.folded ? ", " + num(state.folded) + " " + (state.folded === 1 ? "copy" : "copies") + " folded" : "";
     var ordered = (!ranked && SORT_WORDS[state.lastParams.sort]) ? ", " + SORT_WORDS[state.lastParams.sort] : "";
     $("#shown-count").textContent = (ranked ? state.results.length + " shown" : state.results.length + " of " + state.total + " shown") + folded + ordered;
-    $("#shown-count").title = state.folded ? "duplicates and burst frames are one tile each; tick Show every copy in the sidebar to see them all" : "";
+    $("#shown-count").title = state.folded ? "duplicates and burst frames are one tile each; tick Show every copy under More filters to see them all" : "";
     $("#show-more").hidden = state.results.length >= state.total;
     $("#select-matching").hidden = ranked;
+    $("#grid-head").hidden = state.results.length === 0;
     updateSelbar();
     renderCtxBar();                                    // ===== navigation: the count line follows the results =====
   }
 
   function toggleSelect(id, card) {
     if (state.selected.has(id)) {
+      if (wasRejected.has(id)) { applyMarks([id], { flag: "reject" }); return; }
       state.selected.delete(id);
-      card.classList.remove("selected");
     } else {
       state.selected.add(id);
-      card.classList.add("selected");
     }
+    decorateMarks(card, rowOf(id));
+    renderLbMarks();
     updateSelbar();
   }
 
@@ -2644,42 +2806,59 @@
     var pileOn = !!chipOf("pile");
     selbar.hidden = shown === 0 && n === 0 && !pileOn;
     selbar.classList.toggle("has-sel", n > 0);
+    syncExportbar();
     selectAllTop.hidden = shown === 0;
     // ===== the pile: the count is the selection's, the size is the server's (it knows every picked row, on screen or
     // not), shown only once the server has caught up with the last click so the two numbers never disagree. =====
     var pile = state.pile;
     var weight = pile && !pileTimer && pile.n === n ? pile.bytes : 0;
-    selcount.textContent = n ? num(n) + " in the pile" + (weight ? " · " + bytes(weight) : "") : "Nothing in the pile yet";
-    selcount.title = n ? "what you have picked on this shoot; it stays through new searches and the next time the shoot opens" : "click a tile, or press space on it, to put it in the pile";
+    selcount.textContent = n ? num(n) + " picked" + (weight ? ", " + bytes(weight) : "") : "Nothing picked yet";
+    selcount.title = n ? "what you have picked on this shoot; it stays through new searches and the next time the shoot opens" : "click a tile, or press space or P on it, to pick it";
     pileShowBtn.hidden = !n && !pileOn;
-    pileShowBtn.textContent = pileOn ? "Back to the search" : "Show the pile";
-    pileShowBtn.title = pileOn ? "take the pile filter off" : "only what is in the pile, in the grid on its own";
+    pileShowBtn.textContent = pileOn ? "Back to the search" : "Show picked";
+    pileShowBtn.title = pileOn ? "show the search again" : "only what is picked, in the grid on its own";
     renderInspector();                                 // the inspector follows the selection
     schedulePlan();                                    // ===== export summary: what Export would do now =====
   }
 
   function selectAllShown() {
     state.results.forEach(function (r) { state.selected.add(r.id); });
-    $$(".card", gridEl).forEach(function (c) { c.classList.add("selected"); });
-    updateSelbar();
-    setStatus("selected " + state.results.length + " shown photo(s)");
+    drawPicks();
+    setStatus("picked " + state.results.length + " shown photo(s)");
   }
-  $("#selectall").addEventListener("click", selectAllShown);
   selectAllTop.addEventListener("click", selectAllShown);
 
   // ===== the pile: the selection IS the pile, kept per shoot in the index (/api/pile), so it survives a new search, a
-  // reload and a restart. state.selected is a Set whose add, delete and clear also queue the change; the queue goes
-  // to the server as one call a beat later (a select all is one call, not one per tile), and calls go one after the
-  // other so the server applies them in the order they were made. =====
+  // reload and a restart. Picked is this list; photos.flag='pick' is its mirror, which the server keeps. state.selected
+  // is a Set whose add and delete also queue the change and move r.flag; the queue goes to the server as one call a beat
+  // later (a select all is one call, not one per tile), and calls go one after the other so the server applies them in
+  // the order they were made. Nothing but the Clear button empties the list, and that one can be undone. =====
   var pileShowBtn = $("#pile-show");
-  var pileQueue = { add: new Set(), rem: new Set(), clear: false };
+  var pileQueue = { add: new Set(), rem: new Set() };
   var pileTimer = null, pileRoot = null, pileChain = Promise.resolve();
+  // Rejected tiles picked by a click: a second click (a double-click to open one, say) puts the reject back.
+  var wasRejected = new Set();
+  function rowOf(id) { return resultById.get(id) || (currentLb && currentLb.id === id ? currentLb : null); }
   function pileSet(ids) {
     var s = new Set(ids || []);
-    var add = Set.prototype.add, del = Set.prototype.delete, clr = Set.prototype.clear;
-    s.add = function (id) { if (!this.has(id)) { pileQueue.rem.delete(id); pileQueue.add.add(id); pileSoon(); } return add.call(this, id); };
-    s.delete = function (id) { if (this.has(id)) { pileQueue.add.delete(id); pileQueue.rem.add(id); pileSoon(); } return del.call(this, id); };
-    s.clear = function () { pileQueue = { add: new Set(), rem: new Set(), clear: true }; pileSoon(); return clr.call(this); };
+    var add = Set.prototype.add, del = Set.prototype.delete;
+    s.add = function (id) {
+      if (!this.has(id)) {
+        pileQueue.rem.delete(id); pileQueue.add.add(id); pileSoon();
+        var r = rowOf(id);
+        if (r) { if (r.flag === "reject") wasRejected.add(id); r.flag = "pick"; }
+      }
+      return add.call(this, id);
+    };
+    s.delete = function (id) {
+      if (this.has(id)) {
+        pileQueue.add.delete(id); pileQueue.rem.add(id); pileSoon();
+        var r = rowOf(id);
+        if (r && r.flag === "pick") r.flag = null;
+      }
+      return del.call(this, id);
+    };
+    s.mirror = function (id, on) { return on ? add.call(this, id) : del.call(this, id); };   // the server made this change itself
     return s;
   }
   function pileSoon() {
@@ -2690,28 +2869,70 @@
   function flushPile() {
     pileTimer = null;
     var q = pileQueue, root = pileRoot;
-    pileQueue = { add: new Set(), rem: new Set(), clear: false };
+    pileQueue = { add: new Set(), rem: new Set() };
     if (!root || root !== (state.folder && state.folder.root)) return;   // the shoot changed under the queue: it was that shoot's
     var body = JSON.stringify({ add: Array.from(q.add), remove: Array.from(q.rem) });
-    var post = function () { return api("/api/pile", { method: "POST", headers: { "Content-Type": "application/json" }, body: body }); };
     pileChain = pileChain.catch(function () { /* one failed call does not stop the next */ }).then(function () {
-      return q.clear ? api("/api/pile", { method: "DELETE" }).then(function (d) { return (q.add.size || q.rem.size) ? post() : d; }) : post();
+      return api("/api/pile", { method: "POST", headers: { "Content-Type": "application/json" }, body: body });
     }).then(function (d) {
       if (root !== (state.folder && state.folder.root)) return;
       state.pile = d;
       updateSelbar();
-    }).catch(function (err) { setStatus("could not keep the pile: " + err.message); });
+      loadMarkCounts();
+      if (q.add.size > 1) offerUnreject(d.unrejected);
+    }).catch(function (err) { setStatus("could not keep your picks: " + err.message); });
+  }
+  // Anything else that changes the list (a flag, Clear, Undo, a reload of it) waits its turn behind what is queued.
+  function pileThen(fn) {
+    if (pileTimer) { clearTimeout(pileTimer); flushPile(); }
+    pileChain = pileChain.catch(function () { /* one failed call does not stop the next */ }).then(fn);
+    return pileChain;
+  }
+  // r.flag is 'pick' exactly when the row is on the list; a reject is left alone. Waits for the first answer from the
+  // server, since until then the empty list says nothing.
+  function settleFlags() {
+    if (!state.pile) return;
+    state.results.forEach(function (r) {
+      if (state.selected.has(r.id)) r.flag = "pick";
+      else if (r.flag === "pick") r.flag = null;
+    });
+  }
+  function drawPicks() {
+    $$(".card", gridEl).forEach(function (c) { var r = resultById.get(Number(c.dataset.id)); if (r) decorateMarks(c, r); });
+    renderLbMarks();
+    updateSelbar();
+  }
+  function takePile(d) {
+    state.pile = d;
+    state.selected = pileSet(d.ids || []);
+    settleFlags();
+    drawPicks();
   }
   function loadPile() {
     if (!(state.folder && state.folder.root)) return Promise.resolve();
     var root = state.folder.root;
-    return api("/api/pile").then(function (d) {
+    return pileThen(function () { return api("/api/pile"); }).then(function (d) {
       if (root !== (state.folder && state.folder.root)) return;
-      state.pile = d;
-      state.selected = pileSet(d.ids || []);
-      $$(".card", gridEl).forEach(function (c) { c.classList.toggle("selected", state.selected.has(Number(c.dataset.id))); });
-      updateSelbar();
+      takePile(d);
     }).catch(function () { /* an older server has no pile: the selection simply is not kept */ });
+  }
+  // The Undo link in the status line. It stands apart from the status text, which the next search or key replaces, and
+  // goes when it is used, when the shoot changes, or five minutes on. No arguments takes it away.
+  var undoEl = $("#status-undo");
+  var undoFn = null, undoTimer = null;
+  function offerUndo(text, fn) {
+    if (undoTimer) { clearTimeout(undoTimer); undoTimer = null; }
+    undoFn = fn || null;
+    undoEl.hidden = !fn;
+    $("#status-undo-text").textContent = text || "";
+    if (fn) undoTimer = setTimeout(offerUndo, 300000);
+  }
+  $("#status-undo-link").addEventListener("click", function () { var fn = undoFn; offerUndo(); if (fn) fn(); });
+  // A bulk pick (or Keep best, or Client pick) can land on tiles that were rejected: the pick wins, and this is the way back.
+  function offerUnreject(ids) {
+    if (!ids || !ids.length) return;
+    offerUndo(ids.length === 1 ? "1 rejected item was picked." : num(ids.length) + " rejected items were picked.",
+              function () { applyMarks(ids, { flag: "reject" }); });
   }
   // Show the pile on its own, or go back: on its own means the whole pile, whatever was filtered before, and going back
   // puts those filters back. The pile is a chip like any other, so the history walks it too.
@@ -2814,10 +3035,27 @@
   $("#exportname").addEventListener("input", schedulePlan);
   // ===== end export summary =====
 
+  // Clear takes every pick off, so it answers with an Undo: the server hands back the rows as they were.
   $("#clearsel").addEventListener("click", function () {
-    state.selected.clear();
-    $$(".card.selected", gridEl).forEach(function (c) { c.classList.remove("selected"); });
-    updateSelbar();
+    if (!state.selected.size) return;
+    var root = state.folder && state.folder.root;
+    pileThen(function () { return api("/api/pile", { method: "DELETE" }); }).then(function (d) {
+      if (root !== (state.folder && state.folder.root)) return;
+      var rows = d.cleared || [];
+      wasRejected.clear();
+      takePile(d);
+      loadMarkCounts();
+      offerUndo("Cleared " + num(rows.length) + " picked.", function () {
+        pileThen(function () {
+          return api("/api/pile/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows: rows }) });
+        }).then(function (back) {
+          if (root !== (state.folder && state.folder.root)) return;
+          takePile(back);
+          loadMarkCounts();
+          setStatus("put " + num(rows.length) + " back in Picked");
+        }).catch(function (err) { setStatus("could not put them back: " + err.message, true); });
+      });
+    }).catch(function (err) { setStatus("could not clear Picked: " + err.message, true); });
   });
 
   var exportTimer = null;
@@ -2846,9 +3084,9 @@
         if (p.what === "bundle" || p.what === "copy") {
           var copy = p.what === "copy";                // a copy leaves the card alone; loadProject proves it did
           loadProject();
-          if (p.error) { setStatus((copy ? "could not save a copy: " : "could not save the project: ") + p.error, true); return; }
+          if (p.error) { setStatus((copy ? "could not save a copy: " : "could not save the shoot file: ") + p.error, true); return; }
           var tail = p.failed ? " (" + p.failed + " thumbnails could not be read)" : "";
-          setStatus((copy ? "copy saved: " : "project saved: ") + p.path + tail, true);
+          setStatus((copy ? "copy saved: " : "shoot file saved: ") + p.path + tail, true);
           return;
         }
         // ===== end project file =====
@@ -2878,9 +3116,9 @@
 
   $("#export").addEventListener("click", function () {
     var ids = Array.from(state.selected);
-    if (!ids.length) { setStatus("select some photos first"); return; }
-    if (exportDest() === "drive") {                    // ===== Google Drive: the selection goes up as <name>/ =====
-      startDriveExport({ what: "selection", ids: ids, name: $("#exportname").value.trim() || "selection", include_raw: $("#drive-include-raw").checked },
+    if (!ids.length) { setStatus("pick some photos first"); return; }
+    if (exportDest() === "drive") {                    // ===== Google Drive: Picked goes up as <name>/ =====
+      startDriveExport({ what: "selection", ids: ids, name: $("#exportname").value.trim() || "picked", include_raw: $("#drive-include-raw").checked },
                        "uploading " + ids.length + " photo(s)");
       return;
     }
@@ -2960,7 +3198,7 @@
   // ===== export history: the last 10 exports of this shoot in the Scan tab, with Show in Finder and Run again =====
   var exportsList = $("#exports-list");
   var exportsEmpty = $("#exports-empty");
-  var WHAT_WORDS = { selection: "Selection", categories: "Categories", people: "People" };
+  var WHAT_WORDS = { selection: "Picked", categories: "Categories", people: "People" };
   function loadExports() {
     if (!(state.folder && state.folder.root)) { renderExports([]); return Promise.resolve(); }
     return api("/api/exports").then(function (d) { renderExports(d.exports || []); }).catch(function () { /* the list is a convenience */ });
@@ -3046,7 +3284,7 @@
     var segOpt = $("#cat-videos option[value=segments]");
     segOpt.disabled = drive;
     if (drive && $("#cat-videos").value === "segments") $("#cat-videos").value = "clips";
-    $("#export").title = drive ? "upload the selection to the Drive folder" : "export the selection";
+    $("#export").title = drive ? "upload what is picked to the Drive folder" : "export what is picked";
     $("#people-export-refs").title = drive ? "upload everyone ticked above to the Drive folder" : "export everyone ticked above";
     $("#cat-export-all").title = drive ? "upload every category ticked above to the Drive folder" : "export every category ticked above";
     mountDriveStrip();
@@ -3191,7 +3429,7 @@
       if (info.owner_email) parts.push(info.owner_email);
       if (info.shared_drive) parts.push("Shared Drive");
       else if (info.free_bytes != null) parts.push(gb(info.free_bytes) + " free in your Drive");
-      if (parts.length) driveFolderEl.appendChild(document.createTextNode(" · " + parts.join(" · ")));
+      if (parts.length) driveFolderEl.appendChild(document.createTextNode(", " + parts.join(", ")));
       driveFolderEl.title = info.name + (info.owner_email ? ", owned by " + info.owner_email : "");
       if (info.link && info.link !== link) { driveLink.value = info.link; driveInspected = info.link; }
     }).catch(function (err) {
@@ -3233,7 +3471,7 @@
     driveMsg.innerHTML = "";
     driveMsg.dataset.kind = "progress";
     driveMsg.classList.remove("err");
-    driveMsg.appendChild(document.createTextNode("Uploading " + p.done + " of " + p.total + (p.current ? ", " + p.current : "") + " · " + gb(p.bytes || 0)));
+    driveMsg.appendChild(document.createTextNode("Uploading " + p.done + " of " + p.total + (p.current ? ", " + p.current : "") + ", " + gb(p.bytes || 0)));
     var bar = document.createElement("span");
     bar.className = "drive-bar";
     bar.style.setProperty("--p", p.total ? p.done / p.total : 0);
@@ -3347,7 +3585,7 @@
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
     var bits = [r.rel, r.width + "×" + r.height];
     if (isVideo) bits.push(mmss(r.duration));
-    bits.push("sharp " + sharpPct + "%");
+    bits.push("sharpness " + sharpPct + "%");
     if (!isVideo) bits.push(facesLabel(r.n_faces) + " faces");
     if (r.camera) bits.push(r.camera);
     if (r.taken_at) bits.push(r.taken_at);
@@ -3357,7 +3595,7 @@
     fn.className = "filename";
     fn.textContent = bits[0];
     lbMeta.appendChild(fn);
-    lbMeta.appendChild(document.createTextNode("  ·  " + bits.slice(1).join("  ·  ")));
+    lbMeta.appendChild(document.createTextNode(", " + bits.slice(1).join(", ")));
     // ===== end lightbox strip =====
     renderLbMarks();                                   // ===== marks =====
     lightbox.hidden = false;
@@ -3391,7 +3629,7 @@
     var qField = form.querySelector('[name="q"]');
     var cmd = e.metaKey || e.ctrlKey;
     if (!lightbox.hidden) {
-      if (!cmd && !e.altKey && currentLb && marksKey(e, [currentLb.id])) return;   // ===== marks: P X U 0-9 on the shot shown =====
+      if (!cmd && !e.altKey && currentLb && marksKey(e, [currentLb.id], currentLb.id)) return;   // ===== marks: P X U 0-9 on the shot shown =====
       if (e.key === "Escape") { e.preventDefault(); closeLightbox(); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepLightbox(1); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); stepLightbox(-1); }
@@ -3404,10 +3642,11 @@
       if (qField.value) { qField.value = ""; runSearch(); } else qField.blur();
       return;
     }
-    // ===== navigation keys: command-1 to command-5 switch tabs from anywhere; Esc on a filtered Search goes back =====
+    // ===== navigation keys: command-1 to command-6 switch tabs from anywhere; Esc on a filtered Search goes back =====
     if (cmd && !e.shiftKey && !e.altKey && /^[1-6]$/.test(e.key) && state.folder && state.folder.root) {
       e.preventDefault();
-      goView(VIEWS[Number(e.key) - 1]);
+      var tab = railViews()[Number(e.key) - 1];
+      if (tab) goView(tab);
       return;
     }
     if (e.key === "Escape" && !typing && state.view === "search" && state.chips.length) { e.preventDefault(); navBack(); return; }
@@ -3424,7 +3663,7 @@
     if (cmd && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); revealSelection(); return; }
     // ===== end show in the Finder =====
     if (cmd && e.key.toLowerCase() === "a") { e.preventDefault(); selectAllShown(); return; }
-    if (!cmd && !e.altKey && marksKey(e, marksTargets())) return;   // ===== marks: the Lightroom keys =====
+    if (!cmd && !e.altKey && marksKey(e, marksTargets(), flagTarget())) return;   // ===== marks: the Lightroom keys =====
     if (e.key === " ") {
       var id = hoveredId != null ? hoveredId : (document.activeElement && document.activeElement.classList.contains("card") ? Number(document.activeElement.dataset.id) : null);
       var c = id != null ? cardEl(id) : null;
@@ -3450,8 +3689,10 @@
   });
 
   // ===== marks: flags, stars and colour labels (selling checklist B2), and the XMP sidecars that carry them out (B3).
-  // The Lightroom keys act on the selection, else the tile under the pointer, else the focused tile; in the full-size view on
-  // the shot shown. A change is drawn at once and saved in one POST /api/marks; a failed save puts the old marks back. =====
+  // P X U act on one tile: the one under the pointer, else the one the keyboard is on, else the last clicked, so a key can
+  // never take the whole list off. Stars and labels act on what is picked, else the tile under the pointer, else the focused
+  // tile. In the full-size view all of them act on the shot shown. A change is drawn at once and saved in one POST /api/marks;
+  // a failed save puts the old marks back. A flag moves the Picked list too, which the server does in the same call. =====
   var MARK_LABELS = ["red", "yellow", "green", "blue", "purple"];
   var LABEL_KEYS = { "6": "red", "7": "yellow", "8": "green", "9": "blue" };
   var LABEL_WORDS = { red: "Red", yellow: "Yellow", green: "Green", blue: "Blue", purple: "Purple" };
@@ -3465,25 +3706,28 @@
   function marksOf(r) { return { flag: r.flag || null, rating: Number(r.rating) || 0, label: r.label || null }; }
   function starsText(n) { var s = ""; for (var i = 0; i < n; i++) s += "★"; return s; }
   function marksChipLabel(c) {
-    if (c.kind === "flag") return c.key === "pick" ? "picks" : c.key === "reject" ? "rejects" : "no flag";
+    if (c.kind === "flag") return c.key === "reject" ? "rejects" : "not rated";
     if (c.kind === "stars") return starsText(Number(c.key)) + " or more";
     return c.key === "none" ? "no label" : c.key + " label";
   }
-  // The tile: a dimmed picture for a reject, a badge with the flag and the stars, a coloured edge for the label.
+  // The tile: the check for picked (.selected, its one sign), a dimmed picture and a cross for a reject, a badge with the
+  // stars, a coloured edge for the label.
   function decorateMarks(card, r) {
-    if (!card) return;
+    if (!card || !r) return;
     var old = card.querySelector(".badge.marks");
     if (old) old.remove();
+    card.classList.toggle("selected", state.selected.has(r.id));
     card.classList.toggle("rejected", r.flag === "reject");
     if (r.label) card.dataset.label = r.label; else delete card.dataset.label;
     var n = Number(r.rating) || 0;
-    if (!r.flag && !n) return;
+    var rejected = r.flag === "reject";
+    if (!rejected && !n) return;
     var b = document.createElement("div");
     b.className = "badge marks" + (card.querySelector(".badge.drone") ? " above" : "");
-    if (r.flag) {
+    if (rejected) {
       var f = document.createElement("span");
-      f.className = "mk-flag mk-" + r.flag;
-      f.innerHTML = ICONS[r.flag];
+      f.className = "mk-flag mk-reject";
+      f.innerHTML = ICONS.reject;
       b.appendChild(f);
     }
     if (n) {
@@ -3492,7 +3736,7 @@
       st.textContent = starsText(n);
       b.appendChild(st);
     }
-    b.title = (r.flag === "pick" ? "picked" : r.flag === "reject" ? "rejected" : "") + (r.flag && n ? ", " : "") + (n ? n + (n === 1 ? " star" : " stars") : "");
+    b.title = (rejected ? "rejected" : "") + (rejected && n ? ", " : "") + (n ? n + (n === 1 ? " star" : " stars") : "");
     card.appendChild(b);
   }
   function marksTargets() {
@@ -3502,15 +3746,23 @@
     if (a && a.classList && a.classList.contains("card") && gridEl.contains(a)) return [Number(a.dataset.id)];
     return [];
   }
+  function flagTarget() {
+    if (hoveredId != null) return hoveredId;
+    var a = document.activeElement;
+    if (a && a.classList && a.classList.contains("card") && gridEl.contains(a)) return Number(a.dataset.id);
+    return lastClickedId != null && resultById.has(lastClickedId) ? lastClickedId : null;
+  }
+  // What taking a tile off the list leaves it as: nothing, or the reject a click just replaced.
+  function unpickedFlag(id) { return wasRejected.has(id) ? "reject" : null; }
   function selectedRows() {
     var out = [];
     state.selected.forEach(function (id) { var r = resultById.get(id); if (r) out.push(r); });
     return out;
   }
   // The change a key stands for, or null: P X U, 0 to 5, 6 to 9 (a label already on every target comes off).
-  function marksChange(key, rows) {
+  function marksChange(key, rows, ids) {
     var k = key.toLowerCase();
-    if (k === "p") return { flag: "pick" };
+    if (k === "p") return { flag: state.selected.has(ids[0]) ? unpickedFlag(ids[0]) : "pick" };
     if (k === "x") return { flag: "reject" };
     if (k === "u") return { flag: null };
     if (/^[0-5]$/.test(k)) return { rating: Number(k) };
@@ -3521,19 +3773,21 @@
     }
     return null;
   }
-  function marksKey(e, ids) {
-    if (e.shiftKey && !/^[pxu]$/i.test(e.key)) return false;
-    var rows = ids.map(function (id) { return resultById.get(id) || (currentLb && currentLb.id === id ? currentLb : null); }).filter(Boolean);
-    var change = marksChange(e.key, rows);
+  function marksKey(e, ids, flagId) {
+    var isFlag = /^[pxu]$/i.test(e.key);
+    if (e.shiftKey && !isFlag) return false;
+    if (isFlag) ids = flagId != null ? [flagId] : [];
+    var rows = ids.map(rowOf).filter(Boolean);
+    var change = marksChange(e.key, rows, ids);
     if (!change) return false;
     e.preventDefault();
-    if (!ids.length) { setStatus("point at a tile, or select some, then press the key again"); return true; }
+    if (!ids.length) { setStatus(isFlag ? "point at a tile, then press the key again" : "point at a tile, or pick some, then press the key again"); return true; }
     applyMarks(ids, change);
     return true;
   }
-  function marksWords(change, n) {
+  function marksWords(change, n, unpicked) {
     var what = n === 1 ? "1 item" : num(n) + " items";
-    if ("flag" in change) return change.flag === "pick" ? "picked " + what : change.flag === "reject" ? "rejected " + what : "flag off " + what;
+    if ("flag" in change) return change.flag === "pick" ? "picked " + what : change.flag === "reject" ? "rejected " + what : (unpicked ? "unpicked " : "flag off ") + what;
     if ("rating" in change) return change.rating ? starsText(change.rating) + " on " + what : "stars off " + what;
     return change.label ? LABEL_WORDS[change.label].toLowerCase() + " label on " + what : "label off " + what;
   }
@@ -3543,39 +3797,57 @@
     renderLbMarks();
   }
   function applyMarks(ids, change) {
-    var before = {};
+    var before = {}, wasOn = new Set(), flagged = "flag" in change;
+    var unpicked = flagged && change.flag !== "pick" && ids.some(function (id) { return state.selected.has(id); });
     ids.forEach(function (id) {
-      var r = resultById.get(id) || (currentLb && currentLb.id === id ? currentLb : null);
-      if (!r) return;
-      before[id] = marksOf(r);
-      Object.keys(change).forEach(function (k) { r[k] = change[k]; });
+      var r = rowOf(id);
+      if (r) {
+        before[id] = marksOf(r);
+        Object.keys(change).forEach(function (k) { r[k] = change[k]; });
+      }
+      if (!flagged) return;
+      if (state.selected.has(id)) wasOn.add(id);
+      wasRejected.delete(id);
+      if (change.flag === "pick" && before[id] && before[id].flag === "reject") wasRejected.add(id);
     });
+    // a flag goes behind anything queued, so a tile clicked a moment ago cannot land after its own reject
+    var save = function () {
+      return api("/api/marks", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({ ids: ids }, change))
+      });
+    };
+    var saved = flagged ? pileThen(save) : save();
+    if (flagged) ids.forEach(function (id) { state.selected.mirror(id, change.flag === "pick"); });
     redrawMarks(ids);
-    setStatus(marksWords(change, ids.length));
-    return api("/api/marks", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(Object.assign({ ids: ids }, change))
-    }).then(function (data) {
+    if (flagged) updateSelbar();
+    setStatus(marksWords(change, ids.length, unpicked));
+    return saved.then(function (data) {
       var m = (data && data.marks) || {};
       Object.keys(m).forEach(function (id) {
-        var r = resultById.get(Number(id));
+        var r = rowOf(Number(id));
         if (r) { r.flag = m[id].flag; r.rating = m[id].rating; r.label = m[id].label; }
       });
+      if (data && data.pile) { state.pile = data.pile; updateSelbar(); }
       redrawMarks(ids);
       loadMarkCounts();
     }).catch(function (err) {
       Object.keys(before).forEach(function (id) {
-        var r = resultById.get(Number(id)) || (currentLb && currentLb.id === Number(id) ? currentLb : null);
+        var r = rowOf(Number(id));
         if (r) Object.assign(r, before[id]);
       });
+      if (flagged) { ids.forEach(function (id) { state.selected.mirror(id, wasOn.has(id)); }); updateSelbar(); }
       redrawMarks(ids);
       setStatus("could not save the marks: " + err.message);
     });
   }
-  // The inspector block: Flag, Rating and Label rows of real buttons. rows are the loaded items, ids every one acted on
-  // (a "select all matching" selection holds ids whose rows were never loaded). A control is lit when every row agrees.
-  function marksControls(rows, ids) {
+  // The inspector block: Flag, Rating and Label rows of real buttons. rows are the loaded items, ids every one stars and
+  // labels act on (a "pick all matching" list holds ids whose rows were never loaded). A control is lit when every row
+  // agrees. The flag buttons act on one tile, as P and X do: the one shown, or with many picked flagRow, the last clicked.
+  function marksControls(rows, ids, flagRow) {
+    var many = !!ids;
     ids = ids || rows.map(function (r) { return r.id; });
+    flagRow = many ? flagRow : rows[0];
     var wrap = document.createElement("div");
     wrap.className = "insp-marks";
     var every = function (fn) { return rows.length > 0 && rows.every(fn); };
@@ -3595,12 +3867,12 @@
       parent.appendChild(b);
       return b;
     }
-    var flagRow = row("Flag");
-    ["pick", "reject"].forEach(function (f) {
-      var on = every(function (r) { return r.flag === f; });
-      var b = btn(flagRow, "mk-btn mk-flagbtn mk-" + f, ICONS[f] + "<span>" + (f === "pick" ? "Pick" : "Reject") + "</span>",
-                  (f === "pick" ? "pick (P)" : "reject (X)") + "; click again to take the flag off (U)", on,
-                  function () { applyMarks(ids, { flag: on ? null : f }); });
+    var flagCtl = flagRow ? row(many ? "Last clicked" : "Flag") : null;
+    if (flagRow) ["pick", "reject"].forEach(function (f) {
+      var on = flagRow.flag === f;
+      var b = btn(flagCtl, "mk-btn mk-flagbtn mk-" + f, ICONS[f] + "<span>" + (f === "pick" ? "Pick" : "Reject") + "</span>",
+                  (many ? flagRow.rel.split("/").pop() + ": " : "") + (f === "pick" ? "pick (P)" : "reject (X)") + "; click again to take the flag off (U)", on,
+                  function () { applyMarks([flagRow.id], { flag: !on ? f : f === "pick" ? unpickedFlag(flagRow.id) : null }); });
       b.setAttribute("aria-label", f === "pick" ? "pick" : "reject");
     });
     var starRow = row("Rating");
@@ -3664,14 +3936,19 @@
     marksLabelsEl.appendChild(b);
   });
   $$('#marks-flag input[name="marks-flag"]').forEach(function (r) {
-    r.addEventListener("change", function () { $("#flag-filter").value = r.value; syncMarksFilter(); runSearch(); });
+    // Picks is the Picked list: the one filter Show picked uses too
+    r.addEventListener("change", function () {
+      $("#flag-filter").value = r.value === "pick" ? "" : r.value;
+      $("#pile-filter").value = r.value === "pick" ? "1" : "";
+      syncMarksFilter(); runSearch();
+    });
   });
   $("#marks-clear").addEventListener("click", function () {
-    ["flag", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = ""; });
+    ["flag", "pile", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = ""; });
     syncMarksFilter(); runSearch();
   });
   function syncMarksFilter() {
-    var flag = $("#flag-filter").value, stars = Number($("#stars-filter").value) || 0, label = $("#label-filter").value;
+    var flag = $("#pile-filter").value ? "pick" : $("#flag-filter").value, stars = Number($("#stars-filter").value) || 0, label = $("#label-filter").value;
     $$('#marks-flag input[name="marks-flag"]').forEach(function (r) { r.checked = r.value === flag; });
     $$("#marks-stars .mk-star").forEach(function (b) {
       var n = Number(b.dataset.stars);
@@ -3686,7 +3963,7 @@
     var c = state.markCounts || { flag: {}, stars: {}, label: {}, marked: 0 };
     $("#marks-count").textContent = c.marked ? num(c.marked) + " marked" : "";
     var fl = c.flag || {};
-    var words = { "": "every item", pick: "picked: " + num(fl.pick || 0), reject: "rejected: " + num(fl.reject || 0), none: "neither picked nor rejected: " + num(fl.none || 0) };
+    var words = { "": "every item", pick: "picked: " + num(fl.pick || 0), reject: "rejected: " + num(fl.reject || 0), none: "not rated: " + num(fl.none || 0) };
     $$('#marks-flag input[name="marks-flag"]').forEach(function (r) { r.parentNode.title = words[r.value]; });
     $$("#marks-stars .mk-star").forEach(function (b) {
       var n = Number(b.dataset.stars);
@@ -3696,7 +3973,8 @@
       var lb = b.dataset.label;
       b.title = (lb === "none" ? "no label" : LABEL_WORDS[lb]) + ": " + num((c.label || {})[lb] || 0) + "; click again for any";
     });
-    $("#marks-xmp").disabled = !c.marked;
+    $("#marks-xmp").hidden = !c.marked;
+    $("#xmp-sel").hidden = !c.marked;
   }
   function loadMarkCounts() {
     if (!(state.folder && state.folder.root)) { state.markCounts = null; renderMarkCounts(); return Promise.resolve(); }
@@ -3705,25 +3983,25 @@
   }
   function writeXmp(ids) {
     var body = ids ? { ids: ids } : {};
-    setStatus("writing XMP sidecars…", true);
+    setStatus("saving the ratings for Lightroom…", true);
     return api("/api/xmp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (d) {
       var left = (d.foreign || 0) + (d.clash || 0);
-      var msg = "wrote " + num(d.written) + " XMP sidecar" + (d.written === 1 ? "" : "s") + " to " + elideLeft(d.path, 60);
+      var msg = "saved ratings for " + num(d.written) + (d.written === 1 ? " item" : " items") + " to " + elideLeft(d.path, 60);
       if (left) msg += ", left " + num(left) + " alone (xmp-skipped.txt says why)";
-      if (!d.written && d.unmarked) msg = "nothing to write: none of those has a flag, stars or a label";
+      if (!d.written && d.unmarked) msg = "nothing to save: none of those has a flag, stars or a label";
       setStatus(msg);
-    }).catch(function (err) { setStatus("could not write XMP: " + err.message); });
+    }).catch(function (err) { setStatus("could not save the ratings: " + err.message); });
   }
   $("#marks-xmp").addEventListener("click", function () { writeXmp(null); });
   $("#xmp-sel").addEventListener("click", function () {
-    if (!state.selected.size) { setStatus("select some first"); return; }
+    if (!state.selected.size) { setStatus("pick some first"); return; }
     writeXmp(Array.from(state.selected));
   });
   // The search field has focus when the page opens, so hover-a-tile-and-press-P would type a p into it. An EMPTY field
   // lets go of the focus when the pointer reaches the grid; one with text in it keeps it. / and command F take it back.
   gridEl.addEventListener("mouseenter", function () {
     var qf = form.querySelector('[name="q"]');
-    if (document.activeElement === qf && !qf.value) qf.blur();
+    if (document.activeElement === qf && !qf.value && qHist.hidden) qf.blur();   // an open history list keeps the field
   });
   syncMarksFilter();
   // ===== end marks =====
@@ -3786,22 +4064,22 @@
     var n = state.selected.size;
     var r = hoveredId != null ? resultById.get(hoveredId) : null;
     if (!r && n === 1) r = resultById.get(state.selected.values().next().value);
-    var info = makePanel("insp-info", "Info");
+    var info = makePanel("insp-info", "Details");
     var cats = makePanel("insp-cats", "Categories");
     var faces = makePanel("insp-faces", "Faces");
     inspBody.appendChild(info.el); inspBody.appendChild(cats.el); inspBody.appendChild(faces.el);
     if (!r && n > 1) {
-      var head = document.createElement("div"); head.className = "insp-title"; head.textContent = n + " items selected";
+      var head = document.createElement("div"); head.className = "insp-title"; head.textContent = num(n) + " picked";
       info.body.appendChild(head);
       var mRow = document.createElement("div"); mRow.className = "insp-reveal";
       var mBtn = document.createElement("button");
       mBtn.type = "button"; mBtn.className = "link small";
       mBtn.textContent = "Show in Finder";
-      mBtn.title = "open the selected files in the Finder, highlighted (up to 20; command shift R)";
+      mBtn.title = "open the picked files in the Finder, highlighted (up to 20; command shift R)";
       mBtn.addEventListener("click", revealSelection);
       mRow.appendChild(mBtn);
       info.body.appendChild(mRow);
-      info.body.appendChild(marksControls(selectedRows(), Array.from(state.selected)));   // ===== marks: on the whole selection =====
+      info.body.appendChild(marksControls(selectedRows(), Array.from(state.selected), rowOf(flagTarget())));   // ===== marks: stars and labels on all of them =====
       var byCat = {}, photos = 0, videos = 0, withFaces = 0;
       state.selected.forEach(function (id) {
         var x = resultById.get(id);
@@ -3817,7 +4095,7 @@
       return;
     }
     if (!r) {
-      var p = document.createElement("p"); p.className = "insp-empty"; p.textContent = "Select a photo or clip";
+      var p = document.createElement("p"); p.className = "insp-empty"; p.textContent = "Point at a photo or clip, or pick one";
       info.body.appendChild(p);
       cats.el.hidden = true; faces.el.hidden = true;
       return;
@@ -3869,10 +4147,10 @@
     // ===== every category it fits: the runners-up the classifier kept (classify.SECOND_MIN_PROB) =====
     var alsoKeys = Object.keys(r.also || {});
     if (alsoKeys.length) cats.body.appendChild(inspRow("Also fits", alsoKeys.map(function (k) { return k + "  " + Math.round(r.also[k] * 100) + "%"; }).join(", ")));
-    if (r.cluster) cats.body.appendChild(inspRow("Discovered", /^group \d+$/.test(r.cluster) ? "Unnamed " + r.cluster : r.cluster));
-    if (r.sure === false) cats.body.appendChild(inspRow("Confidence", Math.round((r.confidence || 0) * 100) + "%, less sure"));
+    if (r.cluster) cats.body.appendChild(inspRow("Also found", /^group \d+$/.test(r.cluster) ? "Unnamed " + r.cluster : r.cluster));
+    if (r.sure === false) cats.body.appendChild(inspRow("Confidence", Math.round((r.confidence || 0) * 100) + "%, possible match"));
     cats.body.appendChild(inspRow("Aerial", r.aerial ? "yes" : "no"));
-    if (r.shot_size && r.shot_size !== "unknown") cats.body.appendChild(inspRow("Framing", r.shot_size));
+    if (r.shot_size && r.shot_size !== "unknown") cats.body.appendChild(inspRow("Shot size", r.shot_size));
     if (r.kind === "video" && r.fps) {
       var fast = Math.max(r.fps || 0, r.capture_fps || 0) >= 100;
       var shot = r.capture_fps && r.capture_fps > r.fps + 0.5 ? ", shot at " + (Math.round(r.capture_fps * 100) / 100) : "";
@@ -3906,14 +4184,14 @@
       var pick = document.createElement("button");
       pick.type = "button"; pick.className = "link small";
       pick.textContent = bracket ? "pick the middle exposure" : g.best_by === "eyes" ? "pick the sharpest eyes" : "pick the sharpest";
-      pick.title = (bracket ? "select the frame shot at the middle exposure" : g.best_by === "eyes" ? "select the frame whose eyes are sharpest" : "select the frame with the best sharpness score") + (target === r.id ? " (this one)" : "");
+      pick.title = (bracket ? "pick the frame shot at the middle exposure" : g.best_by === "eyes" ? "pick the frame whose eyes are sharpest" : "pick the frame with the best sharpness score") + (target === r.id ? " (this one)" : "");
       pick.addEventListener("click", function () { pickSharpest(r, target); });
       acts.appendChild(pick);
     }
     var tog = document.createElement("button");
     tog.type = "button"; tog.className = "link small";
     tog.textContent = state.showCopies ? (seq ? "fold the " + (bracket ? "bracket" : "burst") : "fold copies") : (seq ? "show every frame" : "show copies");
-    tog.title = state.showCopies ? "one tile per set again" : "every copy and frame as its own tile, selectable and exportable one by one";
+    tog.title = state.showCopies ? "one tile per set again" : "every copy and frame as its own tile, to pick and export one by one";
     tog.addEventListener("click", function () { setShowCopies(!state.showCopies); });
     acts.appendChild(tog);
     row.appendChild(acts);
@@ -3942,11 +4220,8 @@
     g.members.forEach(function (m) { state.selected.delete(m.id); });
     if (state.showCopies || best.id === r.id) {
       state.selected.add(best.id);
-      $$(".card", gridEl).forEach(function (c) {
-        var id = Number(c.dataset.id);
-        if (g.members.some(function (m) { return m.id === id; })) c.classList.toggle("selected", id === best.id);
-      });
-    } else {                                           // folded: the tile becomes the sharpest frame, selected
+      drawPicks();
+    } else {                                           // folded: the tile becomes the sharpest frame, picked
       var idx = indexOfId(r.id);
       if (idx < 0) return;
       state.results[idx] = Object.assign({}, r, { id: best.id, rel: best.rel, qhash: best.qhash, sharp_pct: best.sharp_pct, group: g });
@@ -4001,19 +4276,14 @@
                              function (err) { peopleFetching = false; throw err; });
   }
 
-  // The person filter in the search bar is the only thing outside the People tab that needs the groups. It asks
-  // for them when the pointer or the keyboard reaches it, not when the shoot opens; the placeholder option keeps
-  // the menu from opening empty on the first try, since a native select does not redraw once its popup is up.
+  // The People menu in the search bar is the only thing outside the People tab that needs the groups. It asks for
+  // them when the pointer or the keyboard reaches it, not when the shoot opens; the menu says so while they load.
   function primePersonSelect() {
     if (state.peopleLoaded || peopleFetching || !(state.folder && state.folder.root)) return;
-    var wait = document.createElement("option");
-    wait.disabled = true;
-    wait.textContent = "loading people…";
-    personSelect.appendChild(wait);
-    ensurePeople().catch(function () { if (wait.parentNode) wait.parentNode.removeChild(wait); });
+    ensurePeople().catch(function () { state.peopleLoaded = true; if (!peopleMenu.hidden) renderPeopleMenu(); });
   }
-  personSelect.addEventListener("pointerenter", primePersonSelect);
-  personSelect.addEventListener("focus", primePersonSelect);
+  peopleBtn.addEventListener("pointerenter", primePersonSelect);
+  peopleBtn.addEventListener("focus", primePersonSelect);
 
   function renderPeople() {
     peopleEl.innerHTML = "";
@@ -4115,6 +4385,7 @@
     var pc = chipOf("person");
     if (pc && !personSelect.value) personSelect.value = String(pc.key);
     renderCtxBar();
+    if (!peopleMenu.hidden) renderPeopleMenu();
     // ===== end navigation =====
   }
 
@@ -4570,6 +4841,7 @@
     return api("/api/categories").then(function (counts) {
       state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {},
                            drone: (counts && counts.drone) || 0, also: (counts && counts.also) || {} };
+      gateFilters();                                   // ===== filters with no data: Drone shots follows this count =====
       renderCategoryTiles();
     }).catch(function (err) {
       setStatus("could not load categories: " + err.message);
@@ -4676,7 +4948,7 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ old: cat, new: val }),
       }).then(function () {
-        setStatus("renamed " + cat + " to " + val + "; names given here are lost when you Categorise again", true);
+        setStatus("renamed " + cat + " to " + val + "; names given here are lost when you sort into categories again", true);
         loadCategories();
       }).catch(function (err) {
         setStatus("could not rename " + cat + ": " + err.message, true);
@@ -4708,12 +4980,12 @@
   }
 
   function renderCategoryTiles() {
-    var nFixed = renderTileRow(catTilesEl, state.categories.fixed, false, "no categories yet, run Categorise");
+    var nFixed = renderTileRow(catTilesEl, state.categories.fixed, false, "no categories yet, run Sort into categories");
     var nDrone = state.categories.drone || 0;
     if (nDrone) {                                   // last tile of the fixed row, hidden when the shoot has none;
       catTilesEl.appendChild(makeTile("drone", nDrone, false, true, nDrone));   // the "run Categorise" hint stays next to it
     }
-    var nDisc = renderTileRow(discTilesEl, state.categories.discovered, true, "no discovered categories yet, run Categorise");
+    var nDisc = renderTileRow(discTilesEl, state.categories.discovered, true, "nothing else found yet, run Sort into categories");
     catExportRow.hidden = !(nFixed || nDisc || nDrone);
     $("#nav-cat-count").textContent = (nFixed + nDisc) || "";                 // the count beside the Categories nav row
     // ===== navigation: counts reach the crumb; a return to the tab lands where it was =====
@@ -4812,7 +5084,7 @@
     }
   }
 
-  // ===== scan wording: "Step 2 of 3 · reading photos and clips · 392 of 644 · 4.1/s, about 3 min left" =====
+  // ===== scan wording: "Step 2 of 3, reading photos and clips, 392 of 644, 4.1/s, about 3 min left" =====
   // Every stage used to lead with "Scanning", which made the stage label read as a subtitle rather than as the
   // thing that changed. Each stage also counts a different population - features counts the files this pass has
   // to read, embed counts everything in the index still missing a vector - so one stage handing over to the next
@@ -4822,12 +5094,12 @@
   // anything else falls through to its own stage name rather than to silence.
   var STAGE_TEXT = { scan: "finding files", features: "reading photos and clips", faces: "finding faces",
                      embed: "learning what is in each shot", categorise: "sorting the shots into categories", products: "finding the products",
-                     focus: "checking what is in focus", save: "saving the project file", clipfaces: "finding faces in clips" };
+                     focus: "checking what is in focus", save: "saving the shoot file", clipfaces: "finding faces in clips" };
   // Embedding is three populations at three speeds per item: a photo is one frame, a clip's vector is the mean of
   // six to thirty sampled frames, and a shot inside a clip mostly reuses a frame its clip already learned. Naming
   // the one in flight is what stops the slower middle looking like a hang.
   var SUBSTAGE_TEXT = { photos: "the photos", clips: "the clips, several frames each", segments: "the shots inside the clips" };
-  var SEP = " · ";
+  var SEP = ", ";
   function formatProgress(p) {
     p = p || {};
     if (p.stage === "error") return "scan failed: " + (p.error || "unknown error");
@@ -4909,11 +5181,11 @@
             setStatus("scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
           } else if (p.project && p.project.error) {
             // the scan is done but its project file could not be written (the disk filled mid-scan): say so and ask
-            setStatus("scan finished, but the project file could not be saved: " + p.project.error, true);
+            setStatus("scan finished, but the shoot file could not be saved: " + p.project.error, true);
             askProjectPlace({ mode: "after", blocked: { reason: "save", dir: p.project.dir,
               message: "Saving it in " + shortDir(p.project.dir) + " failed: " + p.project.error + "." } });
           } else if (p.project && p.project.path) {
-            setStatus("scan finished. Project file saved in " + shortDir(p.project.dir) + ".", true);
+            setStatus("scan finished. Shoot file saved in " + shortDir(p.project.dir) + ".", true);
           } else {
             setStatus("scan finished.", true);
           }
@@ -4984,10 +5256,10 @@
   function askProjectPlace(ctx) {
     askCtx = ctx;
     var b = ctx.blocked || {};
-    var name = (state.project && state.project.name) || "the project file";
-    $("#project-ask-title").textContent = ctx.mode === "after" ? "The project file could not be saved"
-      : ctx.mode === "save" ? "Where should the project file be saved?" : "Where should the project file go?";
-    $("#project-ask-why").textContent = b.message || "";
+    var name = (state.project && state.project.name) || "the shoot file";
+    $("#project-ask-title").textContent = ctx.mode === "after" ? "The shoot file could not be saved"
+      : ctx.mode === "save" ? "Where should the shoot file be saved?" : "Where should the shoot file go?";
+    $("#project-ask-why").textContent = (b.message || "").replace(/project file/g, "shoot file");   // the server's wording, in the name the app uses
     var nums = b.reason === "space" && b.need_bytes != null;
     $("#project-ask-nums").hidden = !nums;
     if (nums) {
@@ -5018,9 +5290,9 @@
     if (askBusy || !askCtx) return;
     var mode = askCtx.mode;
     askClose();
-    if (mode === "after") setStatus("the project file was not saved; the scan is kept on this Mac. Save to… on the Scan tab when you have a place for it", true);
-    else if (mode === "save") setStatus("the project file was not saved", true);
-    else setStatus("scan not started: it needs a place for the project file first", true);
+    if (mode === "after") setStatus("the shoot file was not saved; the scan is kept on this Mac. Save to… on the Shoot tab when you have a place for it", true);
+    else if (mode === "save") setStatus("the shoot file was not saved", true);
+    else setStatus("scan not started: it needs a place for the shoot file first", true);
   }
   askEl.addEventListener("cancel", function (e) { e.preventDefault(); askCancel(); });   // Esc
   $("#project-ask-cancel").addEventListener("click", askCancel);
@@ -5035,10 +5307,10 @@
       if (!res) return;                                // picker cancelled: the question is still open
       askClose();
       if (saving) {
-        setStatus("saving the project…", true);
-        pollExportProgress("saving the project");
+        setStatus("saving the shoot file…", true);
+        pollExportProgress("saving the shoot file");
       } else {
-        scanStarted(ctx.startMsg + " The project file goes in " + shortDir(res.project.replace(/\/[^\/]*$/, "")) + ".");
+        scanStarted(ctx.startMsg + " The shoot file goes in " + shortDir(res.project.replace(/\/[^\/]*$/, "")) + ".");
       }
     }).catch(function (err) {
       askSetBusy(false);
@@ -5133,7 +5405,7 @@
   }
 
   // The health line: items on disk vs scanned vs searchable vs checked for faces, and one button for the gap.
-  var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Detect faces now",
+  var FIX_LABEL = { continue: "Continue scan", rescan: "Scan the new files", faces: "Find people now",
                     focus: "Finish the focus check", places: "Finish reading locations", fps: "Finish reading clip details",
                     clipfaces: "Finish finding faces in clips" };
   var healthFix = null;
@@ -5147,7 +5419,7 @@
     bits.push(fmtN(h.embedded) + " searchable");
     if (h.faces || h.faced) bits.push(fmtN(h.faced) + " checked for faces");
     else if (h.faces_pending) bits.push(fmtN(h.faces_pending) + " not checked for faces");
-    var text = bits.join(" · ");
+    var text = bits.join(", ");
     if (h.new_on_disk) text += ". " + fmtN(h.new_on_disk) + " new " + (h.new_on_disk === 1 ? "file" : "files") + " on the disk the scan has not seen";
     else if (h.errors) text += ". " + fmtN(h.errors) + " could not be read";
     if (!h.fix) text += ". Everything on the disk is scanned and searchable";
@@ -5171,9 +5443,9 @@
     if (healthFix === "rescan") return startIndexJob({ faces: $("#faces").checked, products: $("#scan-products").checked, retry_errors: false }, "scanning the new files…");
     if (healthFix === "faces") return scanFacesNow();
     if (healthFix === "focus") return checkFocusBtn.click();
-    if (healthFix === "places") { goView("places"); return $("#places-read").click(); }
-    if (healthFix === "fps") { goView("search"); return $("#fps-read").click(); }
-    if (healthFix === "clipfaces") { goView("search"); return $("#clipfaces-find").click(); }
+    if (healthFix === "places") return $("#places-read").click();
+    if (healthFix === "fps") return $("#fps-read").click();
+    if (healthFix === "clipfaces") return $("#clipfaces-find").click();
   });
   // ===== end resume =====
 
@@ -5195,6 +5467,22 @@
     });
   }
 
+  // ===== Finish this shoot: the passes a shoot can still want, one link each on the Shoot tab, only while there is
+  // something left for it to do. The links keep their old ids and handlers; this only says which ones show. =====
+  var finishLine = $("#finish-line");
+  function finishLink(sel, n, noun, what, how) {
+    var b = $(sel);
+    b.hidden = !(n > 0);
+    if (n > 0) b.title = num(n) + " " + noun + (n === 1 ? "" : "s") + " " + what + "; " + how;
+  }
+  function renderFinish() {
+    var d = state.places;
+    finishLink("#finish-places", d && !d.read_at && d.unlocated, "file", "not read for a location", "only reads, never changes a file; needs the disk");
+    finishLine.hidden = state.scanning || !$$("button", finishLine).some(function (b) { return !b.hidden; });
+  }
+  $("#finish-places").addEventListener("click", function () { $("#places-read").click(); });
+  // ===== end Finish this shoot =====
+
   // ===== the project file: sorted_<shoot>.sorted. The card on the Scan tab shows the name, where Save
   // writes (the shoot folder itself, or the folder picked last time) and when it was last saved. Every finished
   // scan saves it there on its own; the buttons are for saving again, moving it, or a copy.
@@ -5206,7 +5494,7 @@
   // ===== show in the Finder: the picked photos and clips, the way Premiere reveals a clip. Used by the
   // inspector button, the selection bar and command shift R. =====
   function revealIds(ids, what) {
-    if (!ids || !ids.length) { setStatus("select a photo or clip first"); return; }
+    if (!ids || !ids.length) { setStatus("pick a photo or clip first"); return; }
     return api("/api/reveal/ids", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids.slice(0, 20) }) })
       .then(function (res) {
         var msg = "showing " + res.revealed + " " + (res.revealed === 1 ? (what || "file") : "files") + " in the Finder";
@@ -5244,13 +5532,13 @@
     if (info.exists && info.skeleton) {
       // the placeholder written before the scan: the place works, the full file lands when the scan finishes
       projectState.textContent = state.scanning ? "The scan saves the full file here when it finishes"
-                                                : "Only a placeholder is here so far. Save project to write the full file.";
+                                                : "Only a placeholder is here so far. Save shoot file to write the full file.";
       if (!state.scanning) projectState.classList.add("stale");
     } else if (info.exists && info.opened) {
       // the file was opened here, not written here: the time inside it is the Mac that made it, so say so
       projectState.textContent = "Opened from this file" + (info.saved_at ? ", saved " + info.saved_at.slice(0, 16) + " where it was made" : "");
       projectState.classList.add("saved");
-      projectState.title = "Save project writes back over " + info.path;
+      projectState.title = "Save shoot file writes back over " + info.path;
     } else if (info.exists && info.saved_at) {
       projectState.textContent = "Saved " + info.saved_at.slice(0, 16);
       projectState.classList.add("saved");
@@ -5270,7 +5558,7 @@
   }
   function saveProject() {
     if (!(state.folder && state.folder.root)) { setStatus("open a shoot first"); return; }
-    setStatus("saving the project…", true);
+    setStatus("saving the shoot file…", true);
     api("/api/project/save", { method: "POST" }).then(function (res) {
       if (res && res.started === false && res.blocked) {
         // the place Save writes to cannot take the file (read-only, full, unplugged): ask, never Documents quietly
@@ -5278,8 +5566,8 @@
         askProjectPlace({ mode: "save", blocked: res.blocked });
         return;
       }
-      pollExportProgress("saving the project");
-    }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
+      pollExportProgress("saving the shoot file");
+    }).catch(function (err) { setStatus("could not save the shoot file: " + err.message, true); });
   }
   $("#project-save").addEventListener("click", saveProject);
   projectReveal.addEventListener("click", function () { if (state.project && state.project.path) revealPath(state.project.path); });
@@ -5287,9 +5575,9 @@
     setStatus("waiting for the folder picker…", true);
     pickerPost("/api/bundle/export/choose").then(function (res) {
       if (!res) { setStatus("save cancelled"); return; }
-      setStatus("saving the project…", true);
-      pollExportProgress("saving the project");
-    }).catch(function (err) { setStatus("could not save the project: " + err.message, true); });
+      setStatus("saving the shoot file…", true);
+      pollExportProgress("saving the shoot file");
+    }).catch(function (err) { setStatus("could not save the shoot file: " + err.message, true); });
   });
   // ===== Save a copy: one more file, written wherever the picker says. Save to moves the project file and
   // every Save after it follows; a copy changes nothing about the shoot, which is the whole difference. =====
@@ -5315,7 +5603,7 @@
     applyFolderInfo(info);
     // ===== resume: a project file of a half-scanned shoot says so, and the bar under the search offers Continue =====
     if (info.scan && !info.scan.complete) {
-      setStatus("opened " + (info.name || info.root) + ": " + scanSummary(info.scan) + ". This project is incomplete; press Continue scan with the disk connected.", true);
+      setStatus("opened " + (info.name || info.root) + ": " + scanSummary(info.scan) + ". This shoot file is incomplete; press Continue scan with the disk connected.", true);
     } else {
       setStatus("opened " + (info.name || info.root) + ": " + info.photos + " photos, ready", true);
     }
@@ -5328,7 +5616,7 @@
       if (!res) { setStatus("open cancelled"); return null; }
       if (!res.needs_root) return res;
       // Made on a Mac where the disk sat under another path: ask for the folder, then install under it.
-      setStatus("that project was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
+      setStatus("that shoot file was made for " + res.bundle.root + ", which is not here; pick the photo folder", true);
       return pickerPost("/api/bundle/import/choose-root", { zip: res.zip }).then(function (r2) {
         if (!r2) { setStatus("open cancelled, nothing was changed"); return null; }
         return r2;
@@ -5336,7 +5624,7 @@
     }).then(function (info) {
       if (info) openedProject(info);
     }).catch(function (err) {
-      setStatus("could not open the project: " + err.message, true);
+      setStatus("could not open the shoot file: " + err.message, true);
     });
   }
   $("#bundle-import").addEventListener("click", importBundle);
@@ -5352,9 +5640,9 @@
         return pickerPost("/api/bundle/import/choose-root", { zip: zip }).then(function (r2) {
           if (!r2) { setStatus("open cancelled, nothing was changed"); return; }
           openedProject(r2);
-        }).catch(function (e2) { setStatus("could not open the project: " + e2.message, true); });
+        }).catch(function (e2) { setStatus("could not open the shoot file: " + e2.message, true); });
       }
-      setStatus("could not open the project: " + err.message, true);
+      setStatus("could not open the shoot file: " + err.message, true);
       return null;
     });
   }
@@ -5381,7 +5669,6 @@
   }
   $("#welcome-scan").addEventListener("click", function () { scanAnotherFolder(welcomeFaces, welcomeProducts); });
   $("#welcome-live").addEventListener("click", function () { window.open("/ui/live.html", "sorted-live"); });
-  $("#scan-another").addEventListener("click", function () { scanAnotherFolder($("#faces"), $("#scan-products")); });
   $("#welcome-load").addEventListener("click", importBundle);
   $("#welcome-help").addEventListener("click", function () { setHelp(true); });
   // ===== end welcome =====
@@ -5514,19 +5801,25 @@
   });
   // ===== end feedback =====
 
-  // ===== focus: the status line under the filters, "Check focus" and its poll =====
+  // ===== focus: the Focus row in the filters, "Check focus" and its poll =====
   // GET /api/focus/status gives {checked, unchecked, bad, soft}; POST /api/focus scores every unchecked row
   // once (photos from the index row, clips from their stored frames) and GET /api/focus/progress follows it.
   // Both reads are skipped on a server without the endpoints (state.caps.focus, set from /api/stats).
-  var focusStatusEl = $("#focus-status");
   var checkFocusBtn = $("#check-focus");
+  var focusOffer = $("#focus-offer");
   var focusTimer = null;
+  // The filter list offers the menu once anything has been checked, and Check focus until then. What is left to check
+  // sits on the Finish line. The boxes on a chip keep the menu up, or the chip would have no control.
   function renderFocusLine(st) {
     var checked = (st && st.checked) || 0;
     var total = checked + ((st && st.unchecked) || 0);
-    focusStatusEl.textContent = checked ? checked + " of " + total + " checked" : "focus not checked";
-    focusStatusEl.title = checked ? (st.bad || 0) + " out of focus, " + (st.soft || 0) + " soft" : "how much of the shoot has been through the focus check";
-    checkFocusBtn.hidden = !!(checked && total && checked >= total);   // nothing left to check
+    var on = !!focusSelect.value;
+    $("#focus-row").hidden = !state.caps.focus && !on;
+    focusSelect.hidden = !checked && !on;
+    focusOffer.hidden = !focusSelect.hidden;
+    focusSelect.title = checked ? num(checked) + " of " + num(total) + " checked: " + num(st.bad || 0) + " blurry, " + num(st.soft || 0) + " soft" : "hide what the focus check found soft";
+    finishLink("#check-focus", total - checked, "item", "not checked for focus", "photos are free, clips take seconds");
+    renderFinish();
   }
   function loadFocusStatus() {
     if (!state.caps.focus || !(state.folder && state.folder.root)) return Promise.resolve();
@@ -5539,28 +5832,29 @@
       api("/api/focus/progress").then(function (p) {
         if (p.running) { setStatus("checking focus " + (p.done || 0) + " of " + (p.total || 0), true); return; }
         stopFocusPoll();
-        checkFocusBtn.disabled = false;
+        checkFocusBtn.disabled = focusOffer.disabled = false;
         if (p.error) { setStatus("focus check failed: " + p.error, true); return; }
         var c = p.counts || {};
-        setStatus("checked focus on " + (c.checked || 0) + ": " + (c.bad || 0) + " out of focus, " + (c.soft || 0) + " soft", true);
+        setStatus("checked focus on " + (c.checked || 0) + ": " + (c.bad || 0) + " blurry, " + (c.soft || 0) + " soft", true);
         loadFocusStatus();
         loadStats();
-        runSearch();                                   // the hide boxes may now drop rows
-      }).catch(function () { stopFocusPoll(); checkFocusBtn.disabled = false; });
+        runSearch();                                   // the Focus menu may now drop rows
+      }).catch(function () { stopFocusPoll(); checkFocusBtn.disabled = focusOffer.disabled = false; });
     }, 800);
   }
   checkFocusBtn.addEventListener("click", function () {
     if (!(state.folder && state.folder.root)) { setStatus("open a shoot first"); return; }
-    checkFocusBtn.disabled = true;
+    checkFocusBtn.disabled = focusOffer.disabled = true;
     api("/api/focus", { method: "POST" }).then(function (res) {
       setStatus("checking focus 0 of " + (res.total || 0), true);
       pollFocusProgress();
     }).catch(function (err) {
       if (err.status === 409 && /already/.test(err.message)) { setStatus("already checking focus"); pollFocusProgress(); return; }
-      checkFocusBtn.disabled = false;
+      checkFocusBtn.disabled = focusOffer.disabled = false;
       setStatus("could not check focus: " + err.message);
     });
   });
+  focusOffer.addEventListener("click", function () { checkFocusBtn.click(); });
   // ===== end focus =====
 
   // ===== optional faces: "N need faces" in the title, the Scan tab's health line ("Detect faces now"), the People tab link =====
@@ -5571,7 +5865,7 @@
     var n = (s && s.faces_pending) || 0;
     state.facesPending = n;
     facesPendingRow.hidden = !(n > 0);
-    $("#faces-pending-text").textContent = n + (n === 1 ? " photo" : " photos") + " not scanned for faces yet,";
+    $("#faces-pending-text").textContent = n + (n === 1 ? " photo" : " photos") + " not checked for people yet.";
   }
   function scanFacesNow() {
     startIndexJob({ faces: true }, "finding faces in " + state.facesPending + " photo(s)…");
@@ -5579,6 +5873,11 @@
   }
   $("#faces-pending-scan").addEventListener("click", scanFacesNow);
   // ===== end optional faces =====
+  $("#people-more").addEventListener("click", function () {
+    var box = $("#people-tuning"), b = $("#people-more");
+    box.hidden = !box.hidden;
+    b.setAttribute("aria-expanded", box.hidden ? "false" : "true");
+  });
 
   // ===== reorganise disk: plan, confirm by typing the folder name, apply, poll, undo =====
   // The one flow that writes to the shoot disk. POST /api/reorganise/plan lists the moves (a 400 carries a
@@ -5621,7 +5920,7 @@
     reorgStatus.hidden = !done;
     if (done) {
       reorgPlanId = null; reorgPlan.hidden = true;
-      reorgStatusText.textContent = "reorganised on " + fmtWhen(st.created) + ", " + st.moves + " file" + (st.moves === 1 ? "" : "s");
+      reorgStatusText.textContent = "moved into folders on " + fmtWhen(st.created) + ", " + st.moves + " file" + (st.moves === 1 ? "" : "s");
     }
   }
   function loadReorganiseStatus() {
@@ -5639,9 +5938,8 @@
     (plan.sample || []).forEach(function (m) {
       var tr = document.createElement("tr");
       var a = document.createElement("td"); a.className = "filename"; a.textContent = m.src_rel; a.title = m.reason || "";
-      var arrow = document.createElement("td"); arrow.className = "arrow"; arrow.textContent = "→";
       var b = document.createElement("td"); b.className = "filename"; b.textContent = m.dst_rel + (m.also && m.also.length ? "  (also " + m.also.join(", ") + ")" : "");
-      tr.appendChild(a); tr.appendChild(arrow); tr.appendChild(b);
+      tr.appendChild(a); tr.appendChild(b);
       reorgSample.appendChild(tr);
     });
     reorgConfirm.value = "";
@@ -5674,7 +5972,7 @@
         fails = 0;
         if (p.running) { setStatus(verb + " " + (p.done || 0) + " of " + (p.total || 0) + (p.failed ? ", " + p.failed + " failed" : ""), true); return; }
         clearInterval(exportTimer); exportTimer = null;
-        if (p.error) setStatus("could not " + (verb === "moving" ? "reorganise" : "undo") + ": " + p.error, true);
+        if (p.error) setStatus("could not " + (verb === "moving" ? "move the files" : "undo") + ": " + p.error, true);
         else if (verb === "moving") setStatus("moved " + ((p.done || 0) - (p.failed || 0)) + " of " + (p.total || 0) + " files into " + (p.path || "sorted/") + (p.failed ? " (" + p.failed + " failed, left in place)" : ""), true);
         else setStatus("restored " + ((p.done || 0) - (p.failed || 0)) + " of " + (p.total || 0) + " files" + (p.failed ? " (" + p.failed + " could not go back)" : ""), true);
         onDone();

@@ -1,4 +1,4 @@
 {
-  "version": "0.8.0",
-  "notes": "Live shoot: tether your camera and watch each shot land, with blur and light alerts for you and a clean window for the client. Shots sort by product and model onto your SSD as you shoot. Flash and light flicker filters, Find products at scan time, and Client pick for product shoots."
+  "version": "0.8.2",
+  "notes": "One Picked list. Click a shot or press P and it is picked, and that same list is what exports, what the Picks filter shows and what Lightroom gets. Clear has an Undo. Plus a much calmer main window and a faster Live start."
 }

@@ -14,9 +14,14 @@ restarted on the same folder carries on from them.
 With a drive picked, every frame also goes into a persistent queue (live_copies) and a thread of its own copies it to
 <drive>/<shoot>/. The worker only ever adds a row. The source is read, never moved, and a pulled or full drive pauses the
 queue while the shoot carries on.
+
+A shoot belongs to the folder's index, so a second shoot in the same folder has to say so. The start screen does: mode
+new_only or everything starts a real new shoot, and the last one's tags, products and queue step aside into *_prev
+tables. mode resume carries on from them. new_only also notes every photo already there in live_skipped, so a resume
+later still leaves them alone.
 """
 from __future__ import annotations
-import csv, errno, fcntl, hashlib, io, itertools, json, os, queue, re, shutil, sqlite3, subprocess, threading, time, uuid
+import csv, errno, fcntl, hashlib, io, itertools, json, os, queue, re, shutil, sqlite3, subprocess, tempfile, threading, time, uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,13 +34,13 @@ from PIL import Image
 from pydantic import BaseModel
 from . import awake, bundle, db, index
 from .config import (DEV_DIRS, EMBED_DIM, FACE_CLUSTER_MIN_EYE_SHARP, FOCUS_BAD_ABS, FOCUS_BAD_MAX_ABS, IMAGE_EXTS, MODEL_TAG,
-                     RAW_EXTS, SHARP_TILE_GRID, SKIP_DIRS, export_root)
+                     RAW_EXTS, SHARP_TILE_GRID, SKIP_DIRS, app_home, export_root, shoot_slug)
 from .decode import DecodeError, load_preview
 from .export import safe_segment
 from .features import to_gray
 from .products import PRODUCT_MIN_PHOTOS, PRODUCT_SIM
 from .search import Index, _frame_no
-from .walk import PROJECT_SUFFIXES
+from .walk import PHOTOS_LIBRARY_SUFFIX, PROJECT_SUFFIXES
 
 POLL_S = 0.2              # how often the folder is listed
 STABLE_POLLS = 2          # a file has landed when two polls in a row after the first sighting find it unchanged
@@ -48,6 +53,11 @@ LONG_POLL_S = 20.0
 STORE_MAX_EDGE = 4472     # Shopify's limit on the longest side
 STORE_QUALITY = 92
 ORIGINAL_EDGE = 1 << 15   # no camera reaches this: the 100% view is never scaled down
+# Folders the Finder shows as one file. A library or a catalog keeps thousands of pictures of its own inside, and none
+# of them is a shot, so a watch on ~/Pictures never goes in.
+PACKAGE_SUFFIXES = (PHOTOS_LIBRARY_SUFFIX, ".photolibrary", ".migratedphotolibrary", ".aplibrary", ".cocatalog", ".lrlibrary", ".lrdata",
+                    ".fcpbundle", ".imovielibrary", ".tvlibrary", ".app", ".bundle", ".framework", ".plugin", ".pkg")
+COUNT_MAX_S = 1.5         # the start screen's count of a folder stops here and says "more than"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_products(
@@ -61,10 +71,15 @@ CREATE TABLE IF NOT EXISTS live_copies(
   rel TEXT PRIMARY KEY, photo_id INTEGER, src_size INTEGER, src_mtime REAL, state TEXT NOT NULL DEFAULT 'queued',
   dest TEXT, hash TEXT, verified INTEGER NOT NULL DEFAULT 0, stale INTEGER NOT NULL DEFAULT 0,
   tries INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL DEFAULT 0, error TEXT);
+CREATE TABLE IF NOT EXISTS live_skipped(rel TEXT PRIMARY KEY, size INTEGER, mtime REAL);
 """
+SHOOT_TABLES = ("live_tags", "live_products", "live_copies", "live_skipped")    # children first: live_tags points at live_products
 ACTIVE_KEY = "live_active"      # meta: the active product and model, cleared by a clean stop so a crash can restore them
 UNSORTED = "Unsorted"           # the one pile of a session that does not sort into products
 DRIVE_KEY = "live_drive"        # meta: the drive this shoot copies to, its shoot name and the id of the marker on it
+SHOOT_KEY = "live_shoot"        # meta: the shoot's name and switches, what Back to the last shoot starts again with
+PROJECT_KEY = "live_project"    # meta: this shoot's own project file, so a resume saves over itself and nothing else
+NEW_ONLY, EVERYTHING, RESUME = "new_only", "everything", "resume"
 
 _UNSET = object()
 _STOP = object()
@@ -76,6 +91,24 @@ def ensure_tables(conn) -> None:
     for col, typ in (("alerts", "TEXT"), ("level", "REAL"), ("hidden", "INTEGER NOT NULL DEFAULT 0")):
         if col not in have:
             conn.execute(f"ALTER TABLE live_tags ADD COLUMN {col} {typ}")
+
+
+def step_aside(conn) -> None:
+    """A new shoot in this folder. The last shoot keeps one place, *_prev, in the index: nothing reads it, but a slip of
+    the finger costs no typed names. Files are not touched, here or on the drive. An empty shoot has nothing to keep and
+    leaves the one before it where it is."""
+    if conn.execute("SELECT 1 FROM live_tags LIMIT 1").fetchone():
+        for t in SHOOT_TABLES:
+            conn.execute(f"DROP TABLE IF EXISTS {t}_prev")
+        for t in SHOOT_TABLES:
+            conn.execute(f"ALTER TABLE {t} RENAME TO {t}_prev")
+        ensure_tables(conn)
+    else:
+        for t in SHOOT_TABLES:
+            conn.execute(f"DELETE FROM {t}")
+    for k in (ACTIVE_KEY, DRIVE_KEY, SHOOT_KEY, PROJECT_KEY):
+        db.set_meta(conn, k, "")
+    conn.commit()
 
 
 # ===== the verdict =====
@@ -235,7 +268,7 @@ def _same_settings(a: dict, b: dict) -> bool:
 
 
 def light_alerts(cur: dict, recent, strobe: bool = False, clip: float | None = None) -> list[dict]:
-    """[{kind, text}] for one frame. cur and each frame of recent carry level, exposure_s, fnumber, iso and product. Only
+    """[{kind, text}] for one frame. cur and each frame of recent carry level, exposure_s, fnumber, iso, focal_mm and product. Only
     frames of the same product at the same settings are compared, so a black shoe after a white one is no alarm and a
     bracket is not read as a misfire. Below the flash line in Strobe it is only flash_miss, never dark as well."""
     out = []
@@ -253,7 +286,8 @@ def light_alerts(cur: dict, recent, strobe: bool = False, clip: float | None = N
     if iso and last and abs(float(np.log2(iso / last))) >= ISO_JUMP_STOPS:     # either way: a knocked dial is the same mistake
         out.append({"kind": "iso", "text": f"ISO jumped to {iso}"})
     t, focal = cur.get("exposure_s"), cur.get("focal_mm")
-    if not strobe and t and focal and t > 1.0 / (2.0 * focal):                # a strobe freezes the frame, whatever the shutter says
+    told = bool(recent) and recent[-1].get("exposure_s") == t and recent[-1].get("focal_mm") == focal     # said once for this setting
+    if not strobe and t and focal and t > 1.0 / (2.0 * focal) and not told:   # a strobe freezes the frame, whatever the shutter says
         out.append({"kind": "shutter", "text": "Shutter may be too slow to hand hold"})
     return out
 # ===== end light alerts =====
@@ -369,8 +403,8 @@ MANIFEST_EVERY_S = 3.0        # rewritten at most this often while frames pour i
 STATUS_EVERY_S = 0.5
 VOLUMES = Path("/Volumes")
 EXFAT_WARNING = "This drive is exFAT. Eject it before unplugging, because a pulled cable can damage the whole disk."
-PICK_PROMPTS = {"watch": "Pick the folder the camera writes to", "drive": "Pick the drive to copy onto",
-                "export": "Pick where the store export goes"}
+PICK_PROMPTS = {"watch": "Pick the folder your shots land in", "drive": "Pick where to copy the sorted photos",
+                "export": "Pick where the store copies go"}
 
 
 def _category(kind: str | None, model: str | None) -> str:
@@ -378,7 +412,7 @@ def _category(kind: str | None, model: str | None) -> str:
 
 
 def drive_off() -> dict:
-    return {"path": None, "name": None, "fs": None, "state": "off", "pending": 0, "copied": 0, "failed": 0, "free_bytes": None, "warning": None}
+    return {"path": None, "dest": None, "name": None, "fs": None, "state": "off", "pending": 0, "copied": 0, "failed": 0, "free_bytes": None, "warning": None}
 
 
 def _seg(name: str | None, fallback: str) -> str:
@@ -398,13 +432,20 @@ def _free_bytes(p: Path) -> int:
     return shutil.disk_usage(p).free
 
 
+def _mount_text() -> str:
+    try:
+        return subprocess.run(["mount"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def _mounts() -> dict[str, str]:
     """{mount point: filesystem}, from what mount prints: `/dev/disk4s1 on /Volumes/SSD (exfat, local, ...)`."""
-    try:
-        out = subprocess.run(["mount"], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    return {m[1]: m[2].lower() for m in re.finditer(r"^.+? on (.+?) \((\w+)[,)]", out, re.M)}
+    return {m[1]: m[2].lower() for m in re.finditer(r"^.+? on (.+?) \((\w+)[,)]", _mount_text(), re.M)}
+
+
+def _read_only_mounts() -> set[str]:
+    return {m[1] for m in re.finditer(r"^.+? on (.+?) \(([^)]*)\)", _mount_text(), re.M) if "read-only" in m[2]}
 
 
 def fs_type(path: Path) -> str | None:
@@ -413,8 +454,10 @@ def fs_type(path: Path) -> str | None:
 
 
 def volumes() -> list[dict]:
-    """The disks under /Volumes, without the Mac's own (its entry there is a link to /)."""
-    out, table = [], _mounts()
+    """The disks under /Volumes, without the Mac's own (its entry there is a link to /). writable is only what the mount
+    and the permission bits say: this runs every few seconds, so bundle.probe_writable's real write waits for the Start
+    press. card is a camera's own card, which a tether shoot never wants filled."""
+    out, table, locked = [], _mounts(), _read_only_mounts()
     try:
         names = sorted(os.listdir(VOLUMES))
     except OSError:
@@ -424,10 +467,31 @@ def volumes() -> list[dict]:
         try:
             if name.startswith(".") or not p.is_dir() or p.resolve() == Path("/"):
                 continue
-            out.append({"name": name, "path": str(p), "free": _free_bytes(p), "fs": table.get(str(p))})
+            out.append({"name": name, "path": str(p), "free": _free_bytes(p), "fs": table.get(str(p)),
+                        "writable": str(p) not in locked and os.access(p, os.W_OK), "card": (p / "DCIM").is_dir()})
         except OSError:
             continue                  # ejected between the listing and the stat
     return out
+
+
+def best_drive(vols: list[dict], last: str | None = None) -> str | None:
+    """Where the copy should go without being asked: the last place used while it is here, else the disk with the most
+    room that can take it. Never a camera card, and None when only this Mac is left."""
+    if last and Path(last).is_dir():
+        known = next((v for v in vols if v["path"] == last), None)
+        if known is None or known["writable"]:
+            return last
+    fit = [v for v in vols if v["writable"] and not v["card"] and v["free"] >= DRIVE_MIN_FREE]
+    return max(fit, key=lambda v: v["free"])["path"] if fit else None
+
+
+def new_shoot_name(drive: str | Path, shoot: str | None, fallback: str) -> str:
+    """A new shoot never shares a folder on the drive with an old one: its manifest would write over the other's."""
+    name = _seg(shoot, fallback or "shoot")
+    for k in itertools.count(1):
+        cand = name if k == 1 else f"{name} {k}"
+        if not (Path(drive).expanduser() / cand / MARKER).exists():
+            return cand
 
 
 def pick_folder(prompt: str) -> str | None:
@@ -656,7 +720,7 @@ class Copier:
 
     def info(self) -> dict:
         with self.lock:
-            return {"path": str(self.drive), "name": _volume_name(self.drive), "fs": self.fs, "state": self.state, "pending": self.counts["queued"],
+            return {"path": str(self.drive), "dest": str(self.dest), "name": _volume_name(self.drive), "fs": self.fs, "state": self.state, "pending": self.counts["queued"],
                     "copied": self.counts["copied"], "failed": self.counts["failed"], "free_bytes": self.free,
                     "warning": EXFAT_WARNING if self.fs == "exfat" else None}
 
@@ -981,6 +1045,105 @@ class Copier:
 # ===== end the copy to the drive =====
 
 
+def _keep_dir(name: str) -> bool:
+    return not name.startswith(".") and name not in SKIP_DIRS and name not in DEV_DIRS and not name.lower().endswith(PACKAGE_SUFFIXES)
+
+
+def _is_image(name: str) -> bool:
+    return not name.startswith(".") and not name.lower().endswith(PROJECT_SUFFIXES) and Path(name).suffix.lower() in IMAGE_EXTS
+
+
+def photo_files(root: Path) -> dict[str, tuple[int, float]]:
+    """{rel: (size, mtime)} of every picture a session would take from this folder."""
+    out: dict[str, tuple[int, float]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if _keep_dir(d)]
+        for fn in filenames:
+            if not _is_image(fn):
+                continue
+            p = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if st.st_size:
+                out[os.path.relpath(p, root)] = (st.st_size, st.st_mtime)
+    return out
+
+
+def count_photos(root: Path) -> tuple[int, bool]:
+    """(photos, whole) for the start screen: a RAW and its JPEG are one photo, and whole is False when the walk ran out of
+    time, so the number is a floor. No stat per file: this runs while someone is looking at the screen."""
+    seen: set[tuple[str, str]] = set()
+    end = time.monotonic() + COUNT_MAX_S
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if _keep_dir(d)]
+        seen.update((dirpath, Path(fn).stem.lower()) for fn in filenames if _is_image(fn))
+        if time.monotonic() > end:
+            return len(seen), False
+    return len(seen), True
+
+
+# ===== which folder is the camera writing to =====
+# The photographer takes one test frame and sorted looks for where it landed, in the home folder and on the disks, so no
+# tether app's path is written down here. A new file moves its folder's own time, which is how most folders are passed
+# over without a look at a single file. Breadth first and against the clock: the near folders are the likely ones.
+FIND_WINDOW_S = 60.0      # "just written"
+FIND_DEPTH = 4            # below each place looked in; ~/Pictures/Client/Job/Capture is as deep as a session folder goes
+FIND_MAX_S = 1.0
+FIND_KEEP = 3
+HOME_SKIP = {"Library", "Applications", "Music", "Public"}
+
+
+def _places() -> list[Path]:
+    home = Path.home()
+    try:
+        out = [home / d for d in sorted(os.listdir(home)) if d not in HOME_SKIP and _keep_dir(d) and (home / d).is_dir()]
+    except OSError:
+        out = []
+    return out + [Path(v["path"]) for v in volumes()]
+
+
+def recent_folders(last: str | None = None, places: list[Path] | None = None, now: float | None = None) -> list[dict]:
+    """[{path, name, photos, newest}] of folders an image was written to in the last minute, the last used folder first,
+    then the newest. Only ever reads, and never goes inside a package or a shoot this app is copying to."""
+    now = time.time() if now is None else now
+    end = time.monotonic() + FIND_MAX_S
+    since = now - FIND_WINDOW_S
+    start = [Path(last).expanduser()] if last else []
+    todo = deque((p, 0) for p in dict.fromkeys(start + (_places() if places is None else places)))
+    skip = Path(export_root()).expanduser()
+    found: dict[str, dict] = {}
+    while todo and time.monotonic() < end:
+        d, depth = todo.popleft()
+        try:
+            fresh = os.stat(d).st_mtime >= since
+            with os.scandir(d) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        if any(e.name == MARKER for e in entries) or d == skip:
+            continue
+        hits, newest = 0, 0.0
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if depth < FIND_DEPTH and _keep_dir(e.name):
+                        todo.append((Path(e.path), depth + 1))
+                elif fresh and _is_image(e.name):
+                    st = e.stat()
+                    t = max(st.st_mtime, getattr(st, "st_birthtime", 0.0))    # a tether app may stamp the file with the camera's clock
+                    if since <= t <= now + 5 and st.st_size:
+                        hits += 1; newest = max(newest, t)
+            except OSError:
+                continue
+        if hits:
+            found[str(d)] = {"path": str(d), "name": d.name or str(d), "photos": hits, "newest": newest}
+    want = str(start[0]) if start else None
+    return sorted(found.values(), key=lambda f: (f["path"] != want, -f["newest"]))[:FIND_KEEP]
+# ===== end which folder =====
+
+
 class LiveSession:
     """One session on one folder. start() returns at once; stop() drains what has landed and then calls on_finished on
     the worker thread. Files that have not landed by then are simply picked up by the next session."""
@@ -989,8 +1152,10 @@ class LiveSession:
                  poll_s: float = POLL_S, pair_window_s: float = PAIR_WINDOW_S, queue_max: int = QUEUE_MAX,
                  on_shot: Callable[[dict], None] | None = None, on_finished: Callable[["LiveSession"], None] | None = None,
                  drive: str | Path | None = None, shoot: str | None = None, drive_resume: bool = False,
-                 drive_poll_s: float = DRIVE_POLL_S, faces: bool = True, products: bool = True):
+                 drive_poll_s: float = DRIVE_POLL_S, faces: bool = True, products: bool = True, mode: str | None = None):
         self.root = Path(root); self.log = log or EventLog(); self.shoot = shoot
+        self.mode = mode                  # NEW_ONLY or EVERYTHING: a new shoot. Anything else carries on from what the folder's index holds
+        self.project: str | None = None   # the project file, once the stop has saved it
         # Both only put work off. Frames are ordinary index rows either way: n_faces stays NULL, which is what Detect faces
         # looks for, and Find products reads every still, so the skipped work can be done after the shoot.
         self.use_faces, self.use_products = bool(faces), bool(products)
@@ -1026,7 +1191,15 @@ class LiveSession:
         try:
             ensure_tables(conn)
             db.stamp_model(conn)
+            if self.is_new:
+                step_aside(conn)
             self._resume(conn)
+            if self.mode == EVERYTHING:
+                self.done.clear()         # already read by a scan or an old shoot, and still wanted in this one
+            elif self.mode == NEW_ONLY:
+                self._skip_what_is_there(conn)
+            db.set_meta(conn, SHOOT_KEY, json.dumps({"name": self.shoot, "strobe": self.strobe, "no_flash": self.no_flash,
+                                                     "faces": self.use_faces, "products": self.use_products}))
             if self.copier:
                 self.copier.open(conn)
         finally:
@@ -1039,6 +1212,19 @@ class LiveSession:
             t.start()
         if self.copier:
             self.copier.poke()
+
+    @property
+    def is_new(self) -> bool:
+        return self.mode in (NEW_ONLY, EVERYTHING)
+
+    def _skip_what_is_there(self, conn) -> None:
+        """Only new shots: what is in the folder at this moment is not this shoot's. A later write over one of these has
+        new bytes, so it counts as a new shot. Kept in the table because a resume has to leave them alone as well."""
+        files = photo_files(self.root)
+        self.done.update(files)
+        conn.executemany("INSERT OR REPLACE INTO live_skipped(rel, size, mtime) VALUES(?,?,?)", [(r, s, m) for r, (s, m) in files.items()])
+        conn.commit()
+        self.first_poll = False           # the next file to appear is a shot, and it takes the active product
 
     def stop(self) -> None:
         with self.lock:
@@ -1059,10 +1245,12 @@ class LiveSession:
                 self.done[r[0]] = (r[1], r[2])
             if r[5]:
                 self.attached.add(r[5])
+        for r in conn.execute("SELECT rel, size, mtime FROM live_skipped"):
+            self.done[r[0]] = (r[1], r[2])
         for r in conn.execute("SELECT id, name, auto FROM live_products ORDER BY id"):
             self.products[r[0]] = {"id": r[0], "name": r[1], "auto": bool(r[2]), "n": 0, "sum": np.zeros(EMBED_DIM, np.float32)}
         rows = conn.execute(
-            "SELECT t.*, p.id, p.rel, p.qhash, p.camera, p.taken_at, p.subsec, p.exposure_s, p.fnumber, p.iso, p.ev_bias, p.exp_mode, "
+            "SELECT t.*, p.id, p.rel, p.qhash, p.camera, p.taken_at, p.subsec, p.exposure_s, p.fnumber, p.iso, p.focal_mm, p.ev_bias, p.exp_mode, "
             "p.kind AS photo_kind, p.embed FROM live_tags t JOIN photos p ON p.id=t.photo_id ORDER BY t.n").fetchall()
         for r in rows:
             shot = self._shot_dict(dict(r), self.products[r["product"]]["name"] if r["product"] in self.products else None)
@@ -1083,7 +1271,7 @@ class LiveSession:
                 self.window.add(dict(row, kind=r["photo_kind"]), np.frombuffer(r["embed"], np.float16).astype(np.float32))
         for r in rows[-ALERT_WINDOW:]:
             if r["level"] is not None:
-                self.recent.append({"level": r["level"], "exposure_s": r["exposure_s"], "fnumber": r["fnumber"], "iso": r["iso"], "product": r["product"]})
+                self.recent.append({"level": r["level"], "exposure_s": r["exposure_s"], "fnumber": r["fnumber"], "iso": r["iso"], "focal_mm": r["focal_mm"], "product": r["product"]})
         saved = db.get_meta(conn, ACTIVE_KEY)     # only a session that never stopped cleanly leaves this behind
         if saved:
             try:
@@ -1093,20 +1281,7 @@ class LiveSession:
 
     # ===== the watcher =====
     def _listing(self) -> dict[str, tuple[int, float]]:
-        out: dict[str, tuple[int, float]] = {}
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in SKIP_DIRS and d not in DEV_DIRS]
-            for fn in filenames:
-                if fn.startswith(".") or fn.lower().endswith(PROJECT_SUFFIXES) or Path(fn).suffix.lower() not in IMAGE_EXTS:
-                    continue
-                p = os.path.join(dirpath, fn)
-                try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                if st.st_size:
-                    out[os.path.relpath(p, self.root)] = (st.st_size, st.st_mtime)
-        return out
+        return photo_files(self.root)
 
     @staticmethod
     def _stem(rel: str) -> tuple[str, str]:
@@ -1321,10 +1496,10 @@ class LiveSession:
                 product, tagged = self._assign(conn, item.product, grey, verdict["verdict"] == "soft")
                 model, n = item.model, len(self.shots) + 1
             shot = self._shot_dict(dict(row, id=pid), product["name"])
-            light = {"level": level, "exposure_s": row.get("exposure_s"), "fnumber": row.get("fnumber"), "iso": row.get("iso"), "product": product["id"]}
+            light = {"level": level, "exposure_s": row.get("exposure_s"), "fnumber": row.get("fnumber"), "iso": row.get("iso"), "focal_mm": row.get("focal_mm"), "product": product["id"]}
             shot.update(verdict, product_id=product["id"], model=model, tagged=tagged, n=n,
                         flash=flash_state(row.get("flash"), self.strobe, self.no_flash),
-                        alerts=light_alerts(dict(light, focal_mm=row.get("focal_mm")), self.recent, self.strobe, clip),
+                        alerts=light_alerts(light, self.recent, self.strobe, clip),
                         category=_category(verdict["kind"], model), copy="queued" if self.copier else None)
             if old is not None:
                 shot["burst"], shot["bracket"], shot["ev"], shot["hidden"] = old["burst"], old["bracket"], old["ev"], old["hidden"]
@@ -1574,7 +1749,7 @@ class LiveSession:
             return dict(self._status_body(), running=self.state not in ("stopped", "new"), folder=str(self.root),
                         shoot=self.shoot, strobe=self.strobe, no_flash=self.no_flash, faces=self.use_faces, products_on=self.use_products,
                         products=[{"id": p["id"], "name": p["name"], "n": p["n"]} for p in self.products.values()],
-                        models=self._models(), shots=list(self.shots.values()), seq=self.log.seq)
+                        models=self._models(), shots=list(self.shots.values()), project=self.project, seq=self.log.seq)
 
     def _models(self) -> list[dict]:
         counts: dict[str, int] = {}
@@ -1657,6 +1832,9 @@ class StartReq(BaseModel):
     products: bool = True     # false: no running centroids, frames go in the active product or the Unsorted pile
     drive: str | None = None  # copy onto this folder. Left out: the drive this shoot used last. null: no copy
     shoot: str | None = None  # the folder on the drive; the watched folder's name when empty
+    # new_only: a new shoot, and what is in the folder now stays out of it. everything: a new shoot that takes it all in.
+    # resume: the last shoot again, with its name and switches. Left out: carry on from the index, with these fields
+    mode: str | None = None
 
 
 class ActiveReq(BaseModel):
@@ -1705,6 +1883,48 @@ class Hub:
     def running(self) -> bool:
         return self.session is not None and not self.session.finished.is_set()
 
+    def busy(self) -> str | None:
+        """Why a session could not start right now, in the start screen's words."""
+        s = self.state
+        if self.running():
+            return "A live shoot is already running."
+        if s["running"]:
+            return "sorted is scanning a folder. Start works again when the scan ends."
+        if any(s[k]["running"] for k in ("export", "focus", "fps", "clipfaces") if k in s):
+            return "sorted is busy with another job. Start works again when it ends."
+        return None
+
+    def ready(self, folder: str | None) -> dict:
+        """What the start screen says before Start is pressed. Reads only: an index is not made for a folder that is just
+        being looked at, and waiting counts what the last shoot has not yet got onto its drive."""
+        out = {"busy": self.busy(), "exists": False, "photos": 0, "whole": True, "last": None, "waiting": 0}
+        if self.session is not None and self.session.copier:
+            out["waiting"] = self.session.copier.info()["pending"]
+        p = Path(folder).expanduser() if folder else None
+        if p is None or not p.is_dir():
+            return out
+        out["exists"] = True
+        out["photos"], out["whole"] = count_photos(p)
+        out["last"] = self._last_shoot(p)
+        if out["last"]:
+            out["waiting"] = max(out["waiting"], out["last"]["waiting"])
+        return out
+
+    @staticmethod
+    def _last_shoot(folder: Path) -> dict | None:
+        if not (app_home() / shoot_slug(folder) / db.DB_NAME).is_file():
+            return None
+        conn = db.connect(folder)
+        try:
+            ensure_tables(conn)
+            shots = conn.execute("SELECT COUNT(*) FROM live_tags").fetchone()[0]
+            if not shots:
+                return None
+            waiting = conn.execute("SELECT COUNT(*) FROM live_copies WHERE state='queued'").fetchone()[0]
+            return {"shoot": json.loads(db.get_meta(conn, SHOOT_KEY) or "{}").get("name"), "shots": shots, "waiting": waiting}
+        finally:
+            conn.close()
+
     def _open(self, folder: Path) -> None:
         here = self.state.get("root")
         if here is not None and Path(here).resolve() == folder.resolve():
@@ -1718,6 +1938,8 @@ class Hub:
         folder = Path(req.folder).expanduser()
         if req.strobe and req.no_flash:
             raise HTTPException(400, "pick strobes or no flash, not both")
+        if req.mode not in (None, NEW_ONLY, EVERYTHING, RESUME):
+            raise HTTPException(400, "mode is new_only, everything or resume")
         if not folder.is_dir():
             raise HTTPException(400, "that folder is not there")
         if req.drive:
@@ -1739,19 +1961,23 @@ class Hub:
                 drive, shoot, remembered = req.drive, req.shoot, False
                 if "drive" not in req.model_fields_set:     # a restart after a crash comes back to the same drive
                     saved = json.loads(db.get_meta(conn, DRIVE_KEY) or "{}")
-                    drive, shoot, remembered = saved.get("path"), saved.get("shoot"), bool(saved.get("path"))
+                    drive, shoot, remembered = saved.get("path"), saved.get("shoot") or req.shoot, bool(saved.get("path"))
                 elif not drive:
                     db.set_meta(conn, DRIVE_KEY, "")
+                last = json.loads(db.get_meta(conn, SHOOT_KEY) or "{}") if req.mode == RESUME else {}
             finally:
                 conn.close()
             if used and used != MODEL_TAG:
                 raise HTTPException(409, "this shoot was read with another encoder; rescan it before shooting live into it")
+            if drive and req.mode in (NEW_ONLY, EVERYTHING):
+                shoot = new_shoot_name(drive, shoot, folder.name)
             if self.session is not None and self.session.copier:
                 self.session.copier.close()     # one copier at a time; what the last one left is still in its db
             s["running"] = True       # what every scan gate and folder switch already refuses on
             s["progress"] = {"stage": "live", "done": 0, "total": 0, "stage_started": time.time()}
-            self.session = LiveSession(folder, self.log, req.strobe, req.no_flash, on_shot=self._on_shot, on_finished=self._on_finished,
-                                       drive=drive, shoot=shoot, drive_resume=remembered, faces=req.faces, products=req.products)
+            self.session = LiveSession(folder, self.log, last.get("strobe", req.strobe), last.get("no_flash", req.no_flash),
+                                       on_shot=self._on_shot, on_finished=self._on_finished, drive=drive, shoot=shoot or last.get("name"),
+                                       drive_resume=remembered, faces=last.get("faces", req.faces), products=last.get("products", req.products), mode=req.mode)
             awake.acquire()
             try:
                 self.session.start()
@@ -1782,12 +2008,39 @@ class Hub:
         base.mkdir(parents=True, exist_ok=True)
         return base
 
+    def _save_project(self, session: LiveSession) -> Path:
+        """A new shoot's project file has the shoot's own name, because export_bundle's name is the folder's and a second
+        shoot there would write over the first. It is made aside and moved in whole. A session started without a mode keeps
+        the folder's name. Either way the meta says where the file is, which is what the main window's project card reads."""
+        root = session.root
+        base = self._project_dir(root)
+        conn = db.connect(root)
+        try:
+            own = db.get_meta(conn, PROJECT_KEY)
+            final = Path(own) if own and Path(own).parent.is_dir() else None
+            if final is None and session.is_new:
+                name = _seg(session.shoot, root.name or "shoot")
+                final = next(p for k in itertools.count(1) if not (p := base / (f"sorted_{name}.sorted" if k == 1 else f"sorted_{name} {k}.sorted")).exists())
+            if final is None:
+                made = bundle.export_bundle(root, base)
+            else:
+                with tempfile.TemporaryDirectory(prefix=".sorted-save-", dir=final.parent) as td:
+                    os.replace(bundle.export_bundle(root, td), final)
+                made = final
+                db.set_meta(conn, PROJECT_KEY, str(final))
+            db.set_meta(conn, "project_path", str(made))
+            db.set_meta(conn, "project_opened", "0"); db.set_meta(conn, "project_skeleton", "0")
+            db.set_meta(conn, "project_saved_at", time.strftime("%Y-%m-%d %H:%M:%S"))
+            return made
+        finally:
+            conn.close()
+
     def _on_finished(self, session: LiveSession) -> None:
         """Runs once, on the worker thread, after the last frame. The server is handed back whatever happens here."""
         out = {"project": None, "error": None}
         try:
             session._status()
-            out["project"] = str(bundle.export_bundle(session.root, self._project_dir(session.root)))
+            out["project"] = session.project = str(self._save_project(session))
         except Exception as e:
             out["error"] = f"The project file could not be saved: {type(e).__name__}"
         finally:
@@ -1810,7 +2063,7 @@ class Hub:
         if self.session is None:
             return {"running": False, "state": "stopped", "folder": None, "queue": 0, "behind": False, "done": 0, "errors": 0,
                     "active": {"product": None, "model": None}, "strobe": False, "no_flash": False, "faces": True, "products_on": True,
-                    "products": [], "models": [], "shots": [],
+                    "products": [], "models": [], "shots": [], "project": None,
                     "drive": drive_off(), "seq": self.log.seq, "export": dict(self.export)}
         return dict(self.session.snapshot(), export=dict(self.export))
 
@@ -1975,8 +2228,17 @@ def install(app: FastAPI, switch_root: Callable[[Path], dict] | None = None) -> 
         return hub.original(pid)
 
     @r.get("/volumes")
-    def list_volumes():
-        return {"volumes": volumes()}
+    def list_volumes(last: str | None = None):
+        found = volumes()
+        return {"volumes": found, "best": best_drive(found, last)}
+
+    @r.get("/ready")
+    def ready(folder: str | None = None):
+        return hub.ready(folder)
+
+    @r.get("/recent")
+    def recent(last: str | None = None):
+        return {"folders": recent_folders(last)}
 
     @r.post("/pick")
     def pick(req: PickReq):

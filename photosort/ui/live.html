@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Live shoot</title>
 <link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/ui/scene.css">
 <link rel="stylesheet" href="/ui/live.css">
 </head>
 <body class="live">
@@ -14,14 +13,16 @@
   <h1 class="title" id="title">Live shoot</h1>
   <dl class="tally">
     <div><dd id="n-shots">0</dd><dt id="w-shots">shots</dt></div>
-    <div><dd id="n-sharp">0</dd><dt>sharp</dt></div>
     <div><dd id="n-soft">0</dd><dt>soft</dt></div>
-    <div><dd id="n-flash">0</dd><dt>flash</dt></div>
   </dl>
-  <p id="queue" class="queue" role="status" hidden></p>
-  <p id="drive-line" class="drive-line" role="status" hidden></p>
-  <p class="state" role="status"><i id="state-dot" class="dot"></i><span id="state-text">Connecting to the Mac</span></p>
-  <button type="button" class="btn" id="panel-toggle" aria-controls="rail" aria-expanded="true">Hide panel</button>
+  <p class="state" id="status-line" role="status"><i id="state-dot" class="dot"></i><span id="state-text">Connecting to the Mac</span></p>
+  <div class="menu">
+    <button type="button" class="btn" id="view-btn" aria-haspopup="true" aria-expanded="false" aria-controls="view-list">View</button>
+    <div class="menu-list" id="view-list" hidden>
+      <button type="button" id="full"><span>Fullscreen</span><kbd>F</kbd></button>
+      <button type="button" id="panel-toggle" aria-controls="rail" aria-expanded="true">Hide sorted shots</button>
+    </div>
+  </div>
 </header>
 
 <div class="alarms" id="alarms">
@@ -49,14 +50,24 @@
     <p class="side-state" id="side-state" hidden></p>
     <div class="side-tools">
       <p class="held" id="held" role="status" hidden></p>
-      <button type="button" class="btn" id="zoom" title="Z">Zoom to 100%</button>
-      <button type="button" class="btn" id="compare" title="Hold C">Compare with previous</button>
       <button type="button" class="btn" id="hide" aria-pressed="false">Hide from client</button>
+      <p class="key-hint">Hold C to see the last shot</p>
     </div>
   </div>
-  <div class="scene-view" id="scene-view" hidden>
-    <div id="finder-scene" class="finder-scene" hidden aria-hidden="true"></div>
-  </div>
+  <section class="finish" id="finish" aria-labelledby="finish-title" hidden>
+    <h2 id="finish-title">Shoot finished</h2>
+    <dl class="finish-counts" id="finish-counts"></dl>
+    <p class="finish-where" id="finish-where"></p>
+    <p class="finish-line" id="finish-source"></p>
+    <p class="finish-line" id="finish-project"></p>
+    <div class="finish-go">
+      <button type="button" class="btn primary" id="new-shoot">New shoot</button>
+      <button type="button" class="btn" id="export" disabled>Save store copies</button>
+      <button type="button" class="btn" id="open-sorted">Open in sorted</button>
+      <button type="button" class="btn quiet" id="carry-on">Carry on this shoot</button>
+    </div>
+    <p class="finish-note" id="finish-note" role="status" hidden></p>
+  </section>
 </main>
 
 <aside class="rail" id="rail" aria-label="Sorted shots">
@@ -75,23 +86,17 @@
   <div class="soft-slot" id="soft-slot"></div>
 </aside>
 
-<footer class="bar">
+<footer class="bar" id="bar">
   <div class="bar-group grow">
     <label class="scan"><span>Product</span><input type="text" id="product" spellcheck="false" autocomplete="off"></label>
     <label class="scan"><span>Model</span><input type="text" id="model" spellcheck="false" autocomplete="off"></label>
   </div>
   <div class="bar-group">
-    <div class="seg" role="group" aria-label="View">
-      <button type="button" id="view-picture" aria-pressed="true">Picture</button>
-      <button type="button" id="view-desktop" aria-pressed="false">Desktop</button>
-    </div>
-    <button type="button" class="btn" id="pause" title="Space">Pause</button>
-    <button type="button" class="btn" id="full" title="F">Fullscreen</button>
-    <button type="button" class="btn" id="client-open">Open client window</button>
-    <button type="button" class="btn" id="export" disabled>Export for store</button>
-    <button type="button" class="btn" id="stop" hidden>Stop</button>
-    <button type="button" class="btn primary" id="new-shoot" hidden>New shoot</button>
+    <button type="button" class="btn" id="pause" title="Space">Hold this shot</button>
+    <button type="button" class="btn" id="client-open">Show on TV</button>
+    <button type="button" class="btn" id="stop" hidden>Finish shoot</button>
   </div>
+  <p class="field-hint" id="field-hint" hidden></p>
   <p class="note" id="note" role="status" hidden></p>
 </footer>
 
@@ -102,45 +107,58 @@
       <h1 id="setup-title">Start a live shoot</h1>
     </div>
 
-    <ol class="steps">
-      <li class="step">
-        <h2><label for="folder">Where the camera app saves</label></h2>
-        <p class="step-help">The folder your tether app writes to. Nothing in it is moved or changed.</p>
-        <div class="step-row">
-          <input type="text" id="folder" class="path" placeholder="Pick the folder or type its path" spellcheck="false" autocomplete="off">
-          <button type="button" class="btn" id="pick">Choose folder</button>
-        </div>
-        <div class="flash-row">
-          <span id="flash-label">Flash</span>
-          <div class="seg" role="group" aria-labelledby="flash-label">
-            <button type="button" id="flash-unknown" aria-pressed="true" title="Read it from each file">Read from the file</button>
-            <button type="button" id="flash-strobe" aria-pressed="false" title="Radio triggers often leave no flash mark in the file. This counts every frame as flash.">Strobes</button>
-            <button type="button" id="flash-none" aria-pressed="false" title="Count every frame without a flash mark as no flash">No flash</button>
-          </div>
-        </div>
-      </li>
-      <li class="step">
-        <h2 id="drive-title">Where to keep the sorted photos</h2>
-        <p class="step-help">Connect the SSD or hard disk now. Each shot is copied there, sorted, as it lands.</p>
-        <div class="drives" id="drives" role="radiogroup" aria-labelledby="drive-title"></div>
-        <p class="step-warn" id="drive-warn" hidden></p>
-      </li>
-      <li class="step">
-        <h2><label for="shoot">Shoot name</label></h2>
-        <p class="step-help">The sorted photos go in a folder with this name.</p>
-        <div class="step-row"><input type="text" id="shoot" spellcheck="false" autocomplete="off"></div>
-        <div class="finds">
-          <label class="tick"><input type="checkbox" id="find-people" checked> Find people</label>
-          <label class="tick"><input type="checkbox" id="find-products" checked> Find products</label>
-        </div>
-        <p class="step-help">Both can be run later from the People and Products tabs.</p>
-      </li>
-    </ol>
+    <div class="field">
+      <h2 id="folder-title">Where your shots land</h2>
+      <div class="field-row">
+        <p class="folder-show" id="folder-show"></p>
+        <input type="text" id="folder" class="path" aria-labelledby="folder-title" placeholder="Type the path of the folder" spellcheck="false" autocomplete="off" hidden>
+        <button type="button" class="btn" id="pick">Change</button>
+      </div>
+      <div class="found" id="found" hidden>
+        <span id="found-text"></span>
+        <button type="button" class="btn" id="found-use">Use this folder</button>
+      </div>
+      <p class="field-help" id="folder-help">Take one test frame and sorted finds the folder</p>
+    </div>
 
-    <p class="setup-error" id="setup-error" role="alert" hidden></p>
-    <div class="setup-go">
-      <button type="submit" class="btn primary" id="start" disabled>Start</button>
-      <button type="button" class="btn quiet" id="setup-back" hidden>Back to the last shoot</button>
+    <div class="field">
+      <h2 id="drive-title">Copy sorted photos to</h2>
+      <div class="drives" id="drives" role="radiogroup" aria-labelledby="drive-title"></div>
+      <p class="field-warn" id="drive-warn" hidden></p>
+    </div>
+
+    <div class="field">
+      <h2><label for="shoot">Shoot name</label></h2>
+      <div class="field-row"><input type="text" id="shoot" spellcheck="false" autocomplete="off"></div>
+    </div>
+
+    <details class="more" id="more">
+      <summary>More options</summary>
+      <div class="flash-row">
+        <span id="flash-label">Flash</span>
+        <div class="seg" role="group" aria-labelledby="flash-label">
+          <button type="button" id="flash-unknown" aria-pressed="true" title="Read it from each file">Auto</button>
+          <button type="button" id="flash-strobe" aria-pressed="false" title="Radio triggers often leave no flash mark in the file. This counts every frame as flash.">Strobes</button>
+          <button type="button" id="flash-none" aria-pressed="false" title="Count every frame without a flash mark as no flash">No flash</button>
+        </div>
+      </div>
+      <div class="finds">
+        <label class="tick"><input type="checkbox" id="find-people" checked> Find people</label>
+        <label class="tick"><input type="checkbox" id="find-products" checked> Find products</label>
+      </div>
+      <p class="field-help">You can do this later in the main window</p>
+    </details>
+
+    <div class="setup-foot">
+      <p class="setup-error" id="setup-error" role="alert" hidden></p>
+      <p class="setup-why" id="start-why" role="status" hidden></p>
+      <p class="setup-ask" id="ask" hidden></p>
+      <p class="field-warn" id="setup-warn" hidden></p>
+      <div class="setup-go">
+        <button type="submit" class="btn primary" id="start" disabled>Start</button>
+        <button type="button" class="btn" id="start-all" hidden></button>
+        <button type="button" class="btn quiet" id="setup-back" hidden>Back to the last shoot</button>
+      </div>
     </div>
   </form>
 </section>
@@ -151,8 +169,6 @@
   <img id="client-b" alt="">
 </div>
 
-<script type="module" src="/ui/liquid-glass.es.js"></script>
-<script src="/ui/scene.js"></script>
 <script src="/ui/live.js"></script>
 </body>
 </html>

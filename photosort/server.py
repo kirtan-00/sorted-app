@@ -100,6 +100,10 @@ class PileReq(BaseModel):
     remove: list[int] = []
 
 
+class PileRestoreReq(BaseModel):
+    rows: list[dict[str, Any]]                  # what DELETE /api/pile answered with as cleared
+
+
 class UpdateCheckReq(BaseModel):
     enabled: bool
 
@@ -1154,6 +1158,11 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     # ===== the pile: what the editor has picked on this shoot, in the index (photosort.pile) =====
     _EMPTY_PILE = {"ids": [], "n": 0, "photos": 0, "videos": 0, "bytes": 0}
 
+    def _pile_marks(conn, ids) -> None:
+        """A pile change moves photos.flag, and the search Index keeps its own copy of the marks."""
+        if state["index"] is not None:
+            state["index"].set_marks(db.get_marks(conn, ids))
+
     @app.get("/api/pile")
     def get_pile():
         """{ids, n, photos, videos, bytes}: the picked rows still in the shoot, in picking order."""
@@ -1164,22 +1173,40 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     @app.post("/api/pile")
     def change_pile(req: PileReq):
         """Takes out req.remove, then puts in req.add (so a row in both ends up picked), and answers with the
-        pile as it now is. One call per click or per select all, never per tile."""
+        pile as it now is, plus unrejected: the ids a pick took a reject off. One call per click or per select
+        all, never per tile."""
         if state["root"] is None:
             raise HTTPException(400, "no folder open")
         conn = db.connect(state["root"])
+        unrejected = []
         if req.remove:
             pile.remove(conn, req.remove)
         if req.add:
-            pile.add(conn, req.add)
-        return pile.summary(conn)
+            unrejected = pile.add(conn, req.add)
+        _pile_marks(conn, req.remove + req.add)
+        return dict(pile.summary(conn), unrejected=unrejected)
 
     @app.delete("/api/pile")
     def clear_pile():
+        """Empties the list. cleared is every row as it was: POST it to /api/pile/restore to undo this."""
         if state["root"] is None:
-            return dict(_EMPTY_PILE)
+            return dict(_EMPTY_PILE, cleared=[])
         conn = db.connect(state["root"])
-        pile.clear(conn)
+        cleared = pile.clear(conn)
+        _pile_marks(conn, [r["id"] for r in cleared])
+        return dict(pile.summary(conn), cleared=cleared)
+
+    @app.post("/api/pile/restore")
+    def restore_pile(req: PileRestoreReq):
+        """Undo for a Clear. Answers with the pile as it now is."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        conn = db.connect(state["root"])
+        try:
+            pile.restore(conn, req.rows)
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "rows must be what clearing the list answered with")
+        _pile_marks(conn, [r["id"] for r in req.rows])
         return pile.summary(conn)
     # ===== end the pile =====
 
@@ -1594,7 +1621,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         if state["index"] is not None:
             state["index"].set_marks(marks)
         usage.log("marks", n=len(req.ids), **given)
-        return {"marks": {str(k): v for k, v in marks.items()}}
+        out = {"marks": {str(k): v for k, v in marks.items()}}
+        if "flag" in given:                            # a flag moves the Picked list too
+            out["pile"] = pile.summary(conn)
+        return out
 
     @app.get("/api/marks/counts")
     def mark_counts():
@@ -1795,9 +1825,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         conn = db.connect(state["root"])
         before = set(pile_mod.ids(conn))
         ids = list(dict.fromkeys(best.values()))
-        pile_mod.add(conn, ids)
+        unrejected = pile_mod.add(conn, ids)
+        _pile_marks(conn, ids)
         usage.log("keep_best", kind=kind, sets=len(ids))
-        return dict(pile_mod.summary(conn), sets=len(ids), added=len([i for i in ids if i not in before]))
+        return dict(pile_mod.summary(conn), sets=len(ids), added=len([i for i in ids if i not in before]), unrejected=unrejected)
 
     @app.get("/api/products")
     def get_products():
@@ -2035,9 +2066,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         conn = _cull_conn()
         ids = [f["id"] for p in cull_mod.listing(conn)["products"] for f in p["picks"]]
         before = set(pile_mod.ids(conn))
-        pile_mod.add(conn, ids)
+        unrejected = pile_mod.add(conn, ids)
+        _pile_marks(conn, ids)
         usage.log("client_pick_pile", n=len(ids))
-        return dict(pile_mod.summary(conn), added=len([i for i in ids if i not in before]))
+        return dict(pile_mod.summary(conn), added=len([i for i in ids if i not in before]), unrejected=unrejected)
 
     @app.post("/api/export/cull")
     def export_cull(req: CullExportReq):

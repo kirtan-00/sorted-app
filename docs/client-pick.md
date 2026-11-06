@@ -41,7 +41,7 @@ and a number; Pick again re-picks from the stored reasons instantly). One row a 
 Swap (the next frame of the same colour and angle, best first, then retakes and rejects, round and round) and Drop on
 hover; the rejects folded under one line ("105 left out: 68 retakes, 1 soft, ..."), opened into groups by reason,
 each tile captioned with its reason and a Pick button. Click a tile to see it big with the whole sentence. "Same
-product as" folds a product Find products split off (detail shots, mostly) into the right one. Send picks to the pile;
+product as" folds a product Find products split off (detail shots, mostly) into the right one. Add to Picked puts the picks on the Picked list;
 Export for the client: `<destination>/<shoot>/client pick/<product>/<colour>/` plus `client pick.csv` (product,
 colour, angle, file, status, reason) for every frame, picked or left out.
 

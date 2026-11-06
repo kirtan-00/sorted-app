@@ -120,11 +120,16 @@ def _resolve_destination(dst_dir: Path, name: str, pid: int, src: Path, web: boo
             return "skip", cand
     return "fail", f"no free name for {name} in {dst_dir} after 99 tries"
 
-# ===== XMP sidecars on export: <stem>.xmp beside every exported copy (or link) of an item that carries a flag,
-# stars or a label, so the cull opens in Lightroom, Bridge or Capture One. Written in the export folder only,
+# ===== XMP sidecars on export: <stem>.xmp beside every exported copy (or link) of an item that carries stars, a label
+# or a reject, so the cull opens in Lightroom, Bridge or Capture One. Written in the export folder only,
 # never under the shoot (xmp.write_sidecar checks). An item whose marks came off still gets its old sorted
 # sidecar rewritten (to rating 0), and a sidecar sorted did not write is never touched. =====
 XMP_LOG = "xmp-skipped.txt"
+
+def says_more_than_picked(m: dict) -> bool:
+    """Everything exported from the Picked list is picked, so a sidecar holding only that flag tells the next app nothing
+    and clutters a client's folder. Save ratings for Lightroom (write_xmp) still writes it."""
+    return db.is_marked(m) and (m.get("flag") != "pick" or bool(m.get("rating") or m.get("label")))
 
 def write_sidecars(root: Path, landed: list[tuple[int, Path]], log_dir: Path) -> dict:
     """landed: (photo id, path of the exported file). Writes the sidecars, returns {written, foreign, clash}.
@@ -136,7 +141,7 @@ def write_sidecars(root: Path, landed: list[tuple[int, Path]], log_dir: Path) ->
     claimed: dict[Path, int] = {}; notes: list[str] = []; n = {"written": 0, "foreign": 0, "clash": 0}
     for pid, dst in landed:
         side = xmp.sidecar_path(dst); m = marks.get(pid)
-        if m is None or not (db.is_marked(m) or xmp.is_ours(side)):
+        if m is None or not (says_more_than_picked(m) or xmp.is_ours(side)):
             continue
         if side in claimed:
             if claimed[side] != pid:

@@ -212,6 +212,7 @@ def test_server_filters_best_and_camera(tmp_path):
     assert c.get("/api/search", params={"iso": "huge"}).status_code == 400
     assert c.get("/api/search/ids", params={"lens": "FE 24-70mm F2.8 GM II"}).json()["total"] == 7
     best = c.post("/api/groups/best", params={"kind": "burst"}).json()
+    assert c.get("/api/marks/counts").json()["flag"]["pick"] == best["n"]  # the one list: the flag moved with it
     assert best["sets"] == 1 and best["added"] == 1 and best["n"] == 1
     assert c.post("/api/groups/best", params={"kind": "burst", "camera": "nobody"}).json()["sets"] == 0   # every filter counts
     best = c.post("/api/groups/best", params={"kind": "bracket"}).json()

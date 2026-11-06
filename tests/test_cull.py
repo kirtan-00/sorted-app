@@ -212,6 +212,7 @@ def test_client_pick_endpoints(tmp_path):
     n = c.get("/api/cull").json()["picked"]
     pile = c.post("/api/cull/pile").json()
     assert pile["n"] == n and pile["added"] == n
+    assert c.get("/api/marks/counts").json()["flag"]["pick"] == n          # the one list: the flag moved with it
     # export: a folder per product with a folder per colour, and the spreadsheet of every frame
     before = sorted(p.name for p in tmp_path.rglob("*"))
     ex = c.post("/api/export/cull", json={"mode": "copy"}).json()
