@@ -213,3 +213,37 @@ def settings_path() -> Path:
 def shoot_slug(root: Path) -> str:
     r = Path(root).resolve()
     return f"{r.name or 'root'}-{hashlib.sha1(str(r).encode()).hexdigest()[:8]}"
+
+# ===== shoot modes (v0.7, docs/shoot-modes.md) =====
+# Exposure brackets: a run of stills in one folder off one body, consecutive frame numbers, each within
+# BRACKET_GAP_S (plus the previous frame's own shutter time, so a 4 s night bracket still chains) of the last,
+# every neighbour's exposure differing by at least BRACKET_MIN_STEP stops, and the same framing. Framing is a
+# brightness-blind compare: the correlation of log-luminance gradients on a 32 px grid thumb, best over a +-2 px
+# shift. Calibrated on the 50 landing-page photos pushed -2 and +2 stops and cropped up to 4% (handheld drift):
+# same frame 0.62 worst / 0.82 median; two different photos 0.19 at the 95th percentile, 0.78 worst (two frames
+# of the same scene a minute apart). SigLIP cosine on the same pairs overlapped (same frame 0.63 worst, different
+# photos 0.91 at the 95th), which is why the embedding is not the framing test here.
+BRACKET_GAP_S = 2.0
+BRACKET_MIN_STEP = 0.3          # stops; a third of a stop is the smallest step any body brackets in
+BRACKET_FRAMING_MIN = 0.6
+BRACKET_MIN_FRAMES = 3          # two frames at different exposures are a photographer adjusting, unless the camera said bracket (ExposureMode 2)
+# Auto exposure drifts: consecutive frames of one scene in auto ISO move by a third of a stop (the nine real ILCE-7RM5
+# frames went 8000, 12800, 10000). So a run the camera did not flag as a bracket has to span BRACKET_MIN_SPAN stops
+# from darkest to brightest, and a burst only breaks where neighbours are BURST_MAX_STEP stops apart: a 10 fps burst
+# panning from shade into sun stays one burst. Third-stop AEB is caught by the camera's own ExposureMode 2.
+BRACKET_MIN_SPAN = 1.0
+BURST_MAX_STEP = 1.0
+# Camera facets: (key, upper bound inclusive, label) in order; a value goes in the first bucket whose bound it is
+# under. Focal length is the 35 mm equivalent when the camera wrote one.
+CAMERA_BUCKETS: dict[str, tuple[tuple[str, float, str], ...]] = {
+    "focal": (("lt20", 19.5, "under 20 mm"), ("20to35", 35.5, "20 to 35 mm"), ("36to70", 70.5, "36 to 70 mm"),
+              ("71to135", 135.5, "71 to 135 mm"), ("gt135", float("inf"), "over 135 mm")),
+    "iso": (("le400", 400, "ISO 400 and under"), ("to1600", 1600, "ISO 500 to 1600"), ("to6400", 6400, "ISO 2000 to 6400"),
+            ("gt6400", float("inf"), "over ISO 6400")),
+    "shutter": (("fast", 1 / 1000 * 1.05, "1/1000 and faster"), ("action", 1 / 250 * 1.05, "1/800 to 1/250"),
+                ("normal", 1 / 60 * 1.05, "1/200 to 1/60"), ("slow", 0.99, "slower than 1/60"), ("long", float("inf"), "1 s and longer")),
+    # not a range: search.bucket reads the EXIF Flash bit. Listed here for the keys and words.
+    "flash": (("fired", 1, "flash fired"), ("none", 0, "no flash recorded")),
+    "aperture": (("wide", 2.0, "f/2 and wider"), ("mid", 4.0, "f/2.2 to f/4"), ("small", 8.0, "f/4.5 to f/8"),
+                 ("tiny", float("inf"), "f/9 and narrower")),
+}

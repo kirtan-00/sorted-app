@@ -327,13 +327,18 @@ def test_categories_endpoint_returns_fixed_and_discovered(tmp_path):
     make_image(tmp_path, "a.jpg"); make_image(tmp_path, "b.jpg", seed=2)
     index_folder(tmp_path, faces=False, workers=1, embed=False)
     c = TestClient(create_app(tmp_path))
-    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}, "drone": 0}
+    assert c.get("/api/categories").json() == {"fixed": {"unclassified": 2}, "discovered": {}, "drone": 0, "also": {}}
     conn = db_mod.connect(tmp_path)
     conn.execute("UPDATE photos SET category='beach', cluster='excavator', cluster_score=0.9 WHERE rel='a.jpg'")
     conn.execute("UPDATE photos SET cluster='excavator', cluster_score=0.2, aerial=1 WHERE rel='b.jpg'")
     conn.commit()
-    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}, "drone": 1}
-    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}, "drone": 0}
+    assert c.get("/api/categories").json() == {"fixed": {"beach": 1, "unclassified": 1}, "discovered": {"excavator": 2}, "drone": 1, "also": {}}
+    # b.jpg also fits beach (photo_categories): the tile counts it, and "also" says how many of the tile's are that
+    ids = {r[0]: r[1] for r in conn.execute("SELECT rel, id FROM photos")}
+    db_mod.replace_photo_categories(conn, [(ids["b.jpg"], "beach", 0.3)])
+    got = c.get("/api/categories").json()
+    assert got["fixed"]["beach"] == 2 and got["also"] == {"beach": 1}
+    assert TestClient(create_app(None)).get("/api/categories").json() == {"fixed": {}, "discovered": {}, "drone": 0, "also": {}}
 
 
 def test_categories_endpoint_lists_fixed_tiles_in_calibrated_order(tmp_path):
@@ -367,6 +372,26 @@ def test_search_by_aerial(tmp_path):
     assert c.get("/api/search/ids", params={"aerial": 1}).json()["total"] == 1
     res = c.get("/api/search").json()["results"]
     assert len(res) == 2 and [bool(x["aerial"]) for x in res] == [False, True]      # every result carries it
+
+
+def test_search_facets_count_what_each_filter_would_leave(tmp_path):
+    """GET /api/search/facets takes the search's filters and answers with the live counts; total agrees with
+    /api/search, the drone axis is counted with the drone filter off, and a bad value is the same 400."""
+    from conftest import make_image
+    from photosort import db as db_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2); make_image(tmp_path, "c.jpg", seed=3)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    conn = db_mod.connect(tmp_path)
+    conn.execute("UPDATE photos SET aerial=1, shot_size='wide' WHERE rel='b.jpg'")
+    conn.execute("UPDATE photos SET shot_size='wide' WHERE rel='c.jpg'"); conn.commit()
+    c = TestClient(create_app(tmp_path))
+    f = c.get("/api/search/facets", params={"aerial": 1}).json()
+    assert f["total"] == c.get("/api/search", params={"aerial": 1}).json()["total"] == 1
+    assert f["drone"] == 1 and f["shot_size"] == {"wide": 1} and f["kind"] == {"photos": 1}
+    f = c.get("/api/search/facets", params={"shot_size": "wide"}).json()
+    assert f["total"] == 2 and f["drone"] == 1 and f["shot_size"] == {"wide": 2}
+    assert c.get("/api/search/facets", params={"shot_size": "huge"}).status_code == 400
+    assert TestClient(create_app(None)).get("/api/search/facets").json()["total"] == 0
 
 
 def test_search_by_cluster(tmp_path):
@@ -906,6 +931,37 @@ def test_export_web_size_and_raw_sibling(tmp_path):
     p3 = _wait_export(c)
     assert Image.open(Path(p3["path"]) / "a.jpg").size == (1600, 1200) and sorted(os.listdir(Path(p3["path"]))) == ["a.jpg", "b.jpg"]
     assert sorted(os.listdir(tmp_path)) == ["a.ARW", "a.jpg", "b.jpg"]
+
+
+def test_export_plan_says_what_is_about_to_happen(tmp_path, monkeypatch):
+    """POST /api/export/plan, before the button: how many, how big (RAW siblings included when asked), where
+    they land, whether they fit and about how long, with the basis of the time named. It writes nothing."""
+    from conftest import make_image
+    from photosort import export as export_mod
+    make_image(tmp_path, "a.jpg", seed=1); make_image(tmp_path, "b.jpg", seed=2)
+    (tmp_path / "a.ARW").write_bytes(b"raw bytes, never decoded")
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    ids = [r["id"] for r in c.get("/api/search").json()["results"]]
+    size = {n: (tmp_path / n).stat().st_size for n in ("a.jpg", "b.jpg", "a.ARW")}
+    r = c.post("/api/export/plan", json={"ids": ids, "name": "sel", "mode": "copy", "include_raw": True}).json()
+    assert (r["n"], r["photos"], r["videos"], r["files"], r["web"]) == (2, 2, 0, 3, 0)
+    assert r["bytes"] == sum(size.values()) and r["fits"] and r["free"] > 0
+    assert Path(r["dest"]).parts[-2:] == (tmp_path.resolve().name, "sel")
+    assert r["basis"] == "estimate" and r["seconds"] == pytest.approx(sum(size.values()) / export_mod.COPY_BPS)
+    w = c.post("/api/export/plan", json={"ids": ids, "name": "sel", "mode": "copy", "web_size": 2048}).json()
+    assert w["web"] == 2 and w["seconds"] == pytest.approx(2 * export_mod.WEB_SECONDS_PER_PHOTO)
+    assert c.post("/api/export/plan", json={"ids": ids, "name": "sel", "mode": "symlink"}).json()["seconds"] == 0
+    bad = c.post("/api/export/plan", json={"ids": ids, "name": "../../x", "mode": "copy"}).json()
+    assert bad["dest"] is None and bad["dest_error"]
+    assert sorted(os.listdir(tmp_path)) == ["a.ARW", "a.jpg", "b.jpg"]
+    assert not Path(r["dest"]).exists()
+    # a finished copy big enough to time makes the next plan "measured" (the floor is lowered for a test file)
+    monkeypatch.setattr(export_mod, "RATE_MIN_BYTES", 0); monkeypatch.setattr(export_mod, "RATE_MIN_SECONDS", 0.0)
+    c.post("/api/export", json={"ids": ids, "name": "sel", "mode": "copy"})
+    assert _wait_export(c)["error"] is None
+    assert c.post("/api/export/plan", json={"ids": ids, "name": "again", "mode": "copy"}).json()["basis"] == "measured"
+    assert TestClient(create_app(None)).post("/api/export/plan", json={"ids": [1], "name": "x"}).status_code == 400
 
 
 def test_export_prefs_per_shoot(tmp_path):

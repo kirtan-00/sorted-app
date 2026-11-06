@@ -5,8 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 from . import db
+import math
 from .config import (GROUP_MIN_FACES, CATEGORY_FALLBACK, SURE_MIN, BURST_SIM, BURST_GAP_S, ANGLE_WINDOW_S, SLOWMO_MIN_FPS,
-                     DURATION_BUCKETS)
+                     DURATION_BUCKETS, BRACKET_GAP_S, BRACKET_MIN_STEP, BRACKET_FRAMING_MIN, BRACKET_MIN_FRAMES, CAMERA_BUCKETS,
+                     BRACKET_MIN_SPAN, BURST_MAX_STEP)
+GROUP_KINDS = ("burst", "bracket", "copies")           # the group filter's values; "copies" is a duplicate set
+CAMERA_AXES = ("focal", "iso", "shutter", "aperture", "flash")   # bucketed camera facets (config.CAMERA_BUCKETS); lens is exact
 LOOKS = ("log", "standard")            # the two answers the picture profile filter takes (see _passes)
 DURATION_KEYS = tuple(k for k, _, _ in DURATION_BUCKETS)
 
@@ -56,6 +60,19 @@ class Filters:
     stars_min: int | None = None    # at least this many stars, 1 to 5
     label: str | None = None        # one of db.LABELS, or "none" (no label)
     # ===== end marks =====
+    pile: bool = False              # only what the editor has picked (photosort.pile, the pile table in the index)
+    # ===== shoot modes (docs/shoot-modes.md) =====
+    group: str | None = None        # "burst" | "bracket" | "copies": only rows inside a set of that kind (see Index.groups)
+    lens: str | None = None         # photos.lens exactly, or "unknown" (a still whose file names no lens, or never read)
+    focal: str | None = None        # a CAMERA_BUCKETS["focal"] key or "unknown"; same for the three below
+    iso: str | None = None
+    shutter: str | None = None
+    aperture: str | None = None
+    flash: str | None = None        # "fired", "none" or "unknown"
+    flicker: str | None = None      # "pulsing", "banding" or "none": what flicker.check_clip found in a clip
+    product: int | None = None      # a product from products.find_products (the products table)
+    variant: int | None = None      # one colour variant inside that product
+    # ===== end shoot modes =====
 
 def category_match(p, cat: str) -> tuple[bool, float] | None:
     """(sure, confidence) for a photo row against fixed category cat, or None when it is not there at all.
@@ -77,6 +94,11 @@ def category_match(p, cat: str) -> tuple[bool, float] | None:
     if p["category"] == "people" and cat != "people" and p.get("category_guess") == cat:
         s = float(p.get("category_guess_score") or 0.0)
         return s >= SURE_MIN, s
+    # Every other category the row fits (classify.SECOND_MIN_PROB, photo_categories). A runner-up took less
+    # of the softmax than the winner did, so it sorts into the less sure band by its own probability.
+    s = (p.get("also") or {}).get(cat)
+    if s is not None:
+        return float(s) >= SURE_MIN, float(s)
     return None
 
 def cluster_match(p, name: str) -> tuple[bool, float] | None:
@@ -176,6 +198,73 @@ def angles(rows: list[dict], window_s: float = ANGLE_WINDOW_S) -> dict:
                      "taken_at": anchor.get("taken_at"), "others": near, "unknown": near_unknown}
     return out
 
+# ===== shoot modes: exposure arithmetic, the brightness-blind framing compare, and the camera buckets =====
+def ev100(p: dict) -> float | None:
+    """The exposure a frame was given, in stops at ISO 100: log2(N^2 / t) - log2(ISO / 100). Lower is brighter.
+    None unless the file carried all three; a bracket off a camera that wrote none of them falls back to ev_bias."""
+    t, n, iso = p.get("exposure_s"), p.get("fnumber"), p.get("iso")
+    if not (t and n and iso):
+        return None
+    return math.log2(n * n / t) - math.log2(iso / 100.0)
+
+def _brightness(p: dict) -> float | None:
+    """How bright a frame was made, in stops, higher is brighter: -ev100, else the EV compensation it was shot at."""
+    e = ev100(p)
+    if e is not None:
+        return -e
+    b = p.get("ev_bias")
+    return float(b) if b is not None else None
+
+def ev_label(x: float) -> str:
+    """Stops as a photographer writes them, to the nearest third: "0", "+2", "-1.3", "+0.7"."""
+    v = round(x * 3) / 3
+    if abs(v) < 1e-6:
+        return "0"
+    txt = f"{v:+.0f}" if abs(v - round(v)) < 1e-6 else f"{v:+.1f}"
+    return txt
+
+def bucket(axis: str, p: dict) -> str:
+    """The camera facet value a still counts under on axis: a CAMERA_BUCKETS key, or "unknown"."""
+    if axis == "flash":
+        f = p.get("flash")
+        return "unknown" if f is None or f < 0 else "fired" if f & 1 else "none"
+    v = {"focal": p.get("focal_mm"), "iso": p.get("iso"), "shutter": p.get("exposure_s"), "aperture": p.get("fnumber")}[axis]
+    if not v:
+        return "unknown"
+    return next(k for k, hi, _ in CAMERA_BUCKETS[axis] if float(v) <= hi)
+
+_FIELD_N = 32         # the framing compare's grid: 32 x 21 cells off the grid thumb
+_FIELD_SHIFT = 2      # best over +-2 cells of drift, about 6% of the frame: a handheld bracket wanders
+
+def framing_field(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    """Horizontal and vertical gradients of log luminance on a 32 px copy of an image: what is in the frame and where,
+    with the brightness taken out (a stop up or down is a constant added to log luminance, which a gradient drops)."""
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            g = np.log1p(np.asarray(im.convert("L").resize((_FIELD_N, _FIELD_N * 2 // 3), Image.BILINEAR), np.float32))
+    except Exception:
+        return None
+    return np.diff(g, axis=1)[:-1], np.diff(g, axis=0)[:, :-1]
+
+def framing_similarity(fa, fb) -> float:
+    """Correlation of two framing fields, the best over a small shift. 1 is the same frame at any exposure."""
+    (ax, ay), (bx, by) = fa, fb
+    h, w = ax.shape
+    best = -1.0
+    for dy in range(-_FIELD_SHIFT, _FIELD_SHIFT + 1):
+        for dx in range(-_FIELD_SHIFT, _FIELD_SHIFT + 1):
+            def cut(m, oy, ox):
+                return m[max(oy, 0):h + min(oy, 0), max(ox, 0):w + min(ox, 0)]
+            va = np.concatenate([cut(ax, dy, dx).ravel(), cut(ay, dy, dx).ravel()])
+            vb = np.concatenate([cut(bx, -dy, -dx).ravel(), cut(by, -dy, -dx).ravel()])
+            va = va - va.mean(); vb = vb - vb.mean()
+            den = float(np.linalg.norm(va) * np.linalg.norm(vb))
+            if den > 0:
+                best = max(best, float(va @ vb) / den)
+    return best
+# ===== end shoot modes helpers =====
+
 
 class Index:
     def __init__(self, root: Path):
@@ -189,14 +278,15 @@ class Index:
         Clips never burst; a clip can be a duplicate."""
         by_hash: dict[str, list[int]] = {}
         for p in self.photos.values():
-            p["dup"] = None; p["burst"] = None
+            p["dup"] = None; p["burst"] = None; p["bracket"] = None; p["ev"] = None
             if p.get("qhash"):
                 by_hash.setdefault(p["qhash"], []).append(p["id"])
         for qh, ids in by_hash.items():
             if len(ids) > 1:
                 for i in ids: self.photos[i]["dup"] = qh
         stills = [p for p in self.photos.values() if p.get("kind") != "video" and _taken(p) is not None and _frame_no(p["rel"]) is not None]
-        stills.sort(key=lambda p: (str(Path(p["rel"]).parent), _taken(p), p["rel"]))
+        stills.sort(key=lambda p: (str(Path(p["rel"]).parent), _taken(p), p.get("subsec") or 0.0, p["rel"]))
+        self._find_brackets(stills)
         gid = 0; run: list[dict] = []
         def close():
             nonlocal gid
@@ -213,8 +303,68 @@ class Index:
             prev = p
         close()
 
+    # ===== shoot modes: exposure brackets =====
+    def _framing(self, a: dict, b: dict) -> float:
+        grid = db.index_dir(self.root) / "grid"
+        fields = []
+        for p in (a, b):
+            if p["qhash"] not in self._fields:
+                self._fields[p["qhash"]] = framing_field(grid / f"{p['qhash']}.jpg")
+            fields.append(self._fields[p["qhash"]])
+        return framing_similarity(*fields) if fields[0] is not None and fields[1] is not None else -1.0
+
+    def _bracket_pair(self, a: dict, b: dict, run: list[dict] | None = None) -> bool:
+        """a then b could be neighbours in one bracket: same folder and body, the next frame number, within
+        BRACKET_GAP_S plus a's own shutter time, a different exposure by BRACKET_MIN_STEP or more, the same framing
+        as some frame already in the run (a Sony brackets 0, -2, +2: the -2 and the +2 are four stops apart and
+        share little detail, but each matches the 0)."""
+        if Path(a["rel"]).parent != Path(b["rel"]).parent or a.get("camera") != b.get("camera"): return False
+        na, nb = _frame_no(a["rel"]), _frame_no(b["rel"])
+        if na is None or nb is None or nb != na + 1: return False
+        ta, tb = _taken(a), _taken(b)
+        if ta is None or tb is None: return False
+        gap = (tb - ta).total_seconds() + (b.get("subsec") or 0.0) - (a.get("subsec") or 0.0)
+        if not 0 <= gap <= BRACKET_GAP_S + float(a.get("exposure_s") or 0.0): return False
+        ea, eb = _brightness(a), _brightness(b)
+        if ea is None or eb is None or abs(ea - eb) < BRACKET_MIN_STEP: return False
+        return any(self._framing(q, b) >= BRACKET_FRAMING_MIN for q in (run or [a]))
+
+    def _find_brackets(self, stills: list[dict]) -> None:
+        """Marks p["bracket"] (an int id) and p["ev"] (its exposure against the set's middle frame, in stops) on every
+        frame of an exposure bracket. A run breaks where a pair fails _bracket_pair and also where an exposure comes
+        round again, so two brackets of the same view shot back to back (0 -2 +2 0 -2 +2) stay two sets."""
+        self._fields: dict = {}
+        gid = 0; run: list[dict] = []
+        def close():
+            nonlocal gid
+            said = all(p.get("exp_mode") == 2 for p in run)          # the camera wrote "auto bracket"
+            br0 = [_brightness(p) or 0.0 for p in run]
+            wide = bool(run) and max(br0) - min(br0) >= BRACKET_MIN_SPAN - 1e-6   # not auto exposure drifting by thirds
+            if (len(run) >= BRACKET_MIN_FRAMES and (wide or said)) or (len(run) >= 2 and said):
+                gid += 1
+                br = [_brightness(p) for p in run]
+                mid = sorted(br)[len(br) // 2]
+                for p, b in zip(run, br):
+                    p["bracket"] = gid; p["ev"] = round(b - mid, 2)
+            run.clear()
+        prev = None
+        for p in stills:
+            repeat = any(abs((_brightness(p) or 0.0) - (_brightness(q) or 0.0)) < BRACKET_MIN_STEP for q in run)
+            if prev is not None and run and not repeat and self._bracket_pair(prev, p, run):
+                run.append(p)
+            else:
+                close(); run.append(p)
+            prev = p
+        close()
+    # ===== end exposure brackets =====
+
     def _burst_pair(self, a: dict, b: dict) -> bool:
         if Path(a["rel"]).parent != Path(b["rel"]).parent: return False
+        # a frame of an exposure bracket is never also a burst frame, and two frames a whole stop or more apart are not
+        # a burst either; auto exposure drifting by thirds inside a burst is still a burst (config.BURST_MAX_STEP)
+        if a.get("bracket") or b.get("bracket"): return False
+        ea, eb = ev100(a), ev100(b)
+        if ea is not None and eb is not None and abs(ea - eb) >= BURST_MAX_STEP - 1e-6: return False
         if a.get("camera") != b.get("camera"): return False
         ta, tb = _taken(a), _taken(b)
         if ta is None or tb is None or (tb - ta).total_seconds() > BURST_GAP_S: return False
@@ -234,16 +384,29 @@ class Index:
         sets: dict[tuple, list[dict]] = {}
         for p in cands:
             p["group"] = None
-            key = ("burst", p["burst"]) if p.get("burst") else (("dup", p["dup"]) if p.get("dup") else None)
+            key = Index._group_key(p)
             if key is not None:
                 sets.setdefault(key, []).append(p)
+        reps: dict[tuple, dict] = {}
         for key, members in sets.items():
             if len(members) < 2:
                 continue
             best = max(members, key=lambda m: (m.get("sharp") or 0.0, -m["id"]))
-            info = {"kind": "burst" if key[0] == "burst" else "copies", "n": len(members),
+            kind = {"burst": "burst", "bracket": "bracket", "dup": "copies"}[key[0]]
+            info = {"kind": kind, "n": len(members),
                     "members": [{"id": m["id"], "rel": m["rel"], "qhash": m["qhash"], "sharp_pct": round(m["sharp_pct"], 1)} for m in members],
                     "sharpest": best["id"]}
+            if kind == "burst":
+                # eyes: every frame had a face, so sharp is the eye crop's sharpness (features.eye_sharpness) and
+                # "sharpest" is the frame whose eyes are sharpest; detail: the best tiles of the frame
+                info["best_by"] = "eyes" if all((m.get("n_faces") or 0) > 0 for m in members) else "detail"
+            if kind == "bracket":
+                order = sorted(members, key=lambda m: (_frame_no(m["rel"]) or 0, m["rel"]))
+                info["ev"] = [ev_label(m["ev"] or 0.0) for m in order]
+                for d, m in zip(info["members"], members):
+                    d["ev"] = ev_label(m["ev"] or 0.0)
+                info["base"] = min(members, key=lambda m: (abs(m["ev"] or 0.0), m["id"]))["id"]
+                reps[key] = next(m for m in members if m["id"] == info["base"])
             for m in members: m["group"] = info
         if not fold:
             return cands
@@ -251,10 +414,19 @@ class Index:
         for p in cands:
             g = p["group"]
             if g is None: out.append(p); continue
-            key = ("burst", p["burst"]) if p.get("burst") else ("dup", p["dup"])
+            key = Index._group_key(p)
             if key in seen: continue
-            seen.add(key); out.append(p)
+            # a folded bracket shows its middle exposure, never the darkest frame that happens to come first
+            seen.add(key); out.append(reps.get(key, p))
         return out
+
+    @staticmethod
+    def _group_key(p: dict) -> tuple | None:
+        """The set a row folds into: a bracket before a burst before a duplicate set."""
+        if p.get("bracket"): return ("bracket", p["bracket"])
+        if p.get("burst"): return ("burst", p["burst"])
+        if p.get("dup"): return ("dup", p["dup"])
+        return None
     # ===== end duplicates and bursts =====
 
     def refresh(self):
@@ -268,22 +440,37 @@ class Index:
         # picks photos_status_faces plus a temp b-tree sort even with fresh statistics, which is 43 ms
         # against 38 ms at 20k rows. Small, but this is the whole table in id order, so a scan is simply
         # the right plan and the unary plus says so in a way no planner version can drift away from.
-        rows = conn.execute("SELECT id, rel, size, mtime, lat, lon, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus, shot_size, shot_size_score, fps, capture_fps, gamma, people, face_h, flag, rating, label FROM photos WHERE +status='ok' ORDER BY id").fetchall()
+        rows = conn.execute("SELECT id, rel, size, mtime, lat, lon, qhash, sharp, n_faces, taken_at, width, height, category, category_score, category_guess, category_guess_score, cluster, cluster_score, kind, duration, camera, aerial, focus, shot_size, shot_size_score, fps, capture_fps, gamma, people, face_h, flag, rating, label, exposure_s, fnumber, iso, ev_bias, focal_mm, lens, exp_mode, subsec, flash, flicker FROM photos WHERE +status='ok' ORDER BY id").fetchall()
         self.photos = {r["id"]: dict(r) for r in rows}
+        also = db.load_photo_categories(conn)
         for p in self.photos.values():
             p["when"] = when_of(p)
             p["rating"] = p["rating"] or 0          # ===== marks: NULL on a row from before the column =====
+            p["also"] = also.get(p["id"], {})
         sharp = np.array([r["sharp"] or 0.0 for r in rows], float)
         order = sharp.argsort().argsort()
         for r, rank in zip(rows, order):
             self.photos[r["id"]]["sharp_pct"] = float(rank) / max(len(rows) - 1, 1) * 100
         self.ids, self.M = db.load_embeds(conn)
         self.pos = {pid: i for i, pid in enumerate(self.ids.tolist())}
+        for pid, prod, var in conn.execute("SELECT photo_id, product, variant FROM products"):   # products.find_products
+            if pid in self.photos:
+                self.photos[pid]["product"], self.photos[pid]["variant"] = prod, var
         self._find_groups()
 
     def _person_photo_ids(self, person_id: int) -> set[int]:
         conn = db.connect(self.root)
         return {r[0] for r in conn.execute("SELECT DISTINCT photo_id FROM faces WHERE person_id=?", (person_id,))}
+
+    def _allowed_ids(self, f: Filters) -> set[int] | None:
+        """The ids a person filter and the pile filter leave, both read fresh per query (the pile changes with
+        every click, the people with every merge); None when neither is on."""
+        out = self._person_photo_ids(f.person_id) if f.person_id is not None else None
+        if f.pile:
+            from . import pile
+            picked = pile.ids(db.connect(self.root))
+            out = picked if out is None else out & picked
+        return out
 
     def _passes(self, p: dict, f: Filters, person_ids: set[int] | None) -> bool:
         if f.sharp_min_pct is not None and p["sharp_pct"] < f.sharp_min_pct: return False
@@ -323,6 +510,7 @@ class Index:
             g = (p.get("gamma") or "").lower()
             if p.get("kind") != "video" or not g: return False
             if (f.look == "log") != g.startswith("s-log"): return False
+        if f.flicker is not None and (p.get("kind") != "video" or p.get("flicker") != f.flicker): return False
         if f.duration is not None:
             d = p.get("duration")
             if p.get("kind") != "video" or d is None: return False
@@ -350,7 +538,26 @@ class Index:
                 if not (west <= lon <= east): return False
             elif not (lon >= west or lon <= east):   # a box dragged across the date line
                 return False
+        if not self._passes_shoot(p, f): return False
         return self._passes_marks(p, f)
+
+    # ===== shoot modes: groups, the camera facets and products =====
+    @staticmethod
+    def _passes_shoot(p: dict, f: Filters) -> bool:
+        if f.group is not None:
+            if f.group == "burst" and not p.get("burst"): return False
+            if f.group == "bracket" and not p.get("bracket"): return False
+            if f.group == "copies" and not p.get("dup"): return False
+        # The camera facts are facts about a still; a clip is in none of their values, "unknown" included.
+        if f.lens is not None:
+            if p.get("kind") == "video" or (p.get("lens") or "unknown") != f.lens: return False
+        for axis in CAMERA_AXES:
+            want = getattr(f, axis)
+            if want is not None and (p.get("kind") == "video" or bucket(axis, p) != want): return False
+        if f.product is not None and p.get("product") != f.product: return False
+        if f.variant is not None and p.get("variant") != f.variant: return False
+        return True
+    # ===== end shoot modes =====
 
     # ===== marks: flag, minimum stars and colour label, all set by hand (db.set_marks) =====
     @staticmethod
@@ -428,7 +635,7 @@ class Index:
         upload endpoint encodes the dropped file and hands the result here. It scores through exactly the
         same matrix product as image_id, because a second scorer would be a second thing to keep in step
         with the encoder, the normalisation and the sure band."""
-        person_ids = self._person_photo_ids(filters.person_id) if filters.person_id is not None else None
+        person_ids = self._allowed_ids(filters)
         cands = [p for p in self.photos.values() if self._passes(p, filters, person_ids)]
         for p in cands: self._confidence(p, filters)
         if filters.sure_only:
@@ -461,6 +668,101 @@ class Index:
             unsure.sort(key=lambda p: -p["confidence"])     # stable: ties keep the order above
             cands = [p for p in cands if p["sure"]] + unsure
         return self._fold(cands, filters.fold)
+
+    # ===== live facet counts: what each filter would leave, given the others (Q4) =====
+    # Each axis is counted under every filter in force except its own, the usual faceted search rule: with
+    # videos and one camera on, the camera list still says what every other camera would show (of the videos),
+    # so ticking one is never a guess. The axes and the Filters fields behind them:
+    FACET_FIELDS = {"kind": ("kind",), "faces": ("faces",), "shot_size": ("shot_size",), "slowmo": ("slowmo",),
+                    "cameras": ("camera",), "look": ("look",), "duration": ("duration",), "drone": ("aerial",),
+                    "categories": ("category",), "days": ("day",),
+                    "groups": ("group",), "lens": ("lens",), "focal": ("focal",), "iso": ("iso",), "shutter": ("shutter",),
+                    "aperture": ("aperture",), "flash": ("flash",), "flicker": ("flicker",)}
+
+    @staticmethod
+    def _facet_values(p: dict, axis: str) -> list[str]:
+        """The values row p counts under on one axis, by exactly the rules _passes and category_match use: a
+        clip nobody checked for faces has no head count, a still has no frame rate, profile or length, a row
+        with a secondary category counts under that too."""
+        video = p.get("kind") == "video"
+        if axis == "kind":
+            return ["videos" if video else "photos"]
+        if axis == "faces":
+            if video and p.get("people") is None:
+                return []
+            n = (p.get("people") if video else p.get("n_faces")) or 0
+            return ["none" if n == 0 else "one" if n == 1 else "two" if n == 2 else "group" if n >= GROUP_MIN_FACES else ""]
+        if axis == "shot_size":
+            return [p["shot_size"]] if p.get("shot_size") else []
+        if axis == "slowmo":
+            rates = [float(x) for x in (p.get("fps"), p.get("capture_fps")) if x is not None]
+            return ["slow" if max(rates) >= SLOWMO_MIN_FPS else "normal"] if video and rates else []
+        if axis == "cameras":
+            return [p["camera"]] if p.get("camera") else []
+        if axis == "flicker":
+            return [p["flicker"]] if video and p.get("flicker") in ("pulsing", "banding", "none") else []
+        if axis == "look":
+            g = (p.get("gamma") or "").lower()
+            return ["log" if g.startswith("s-log") else "standard"] if video and g else []
+        if axis == "duration":
+            d = p.get("duration")
+            if not video or d is None:
+                return []
+            return [k for k, lo, hi in DURATION_BUCKETS if lo <= float(d) < hi]
+        if axis == "drone":
+            return ["drone"] if p.get("aerial") else []
+        if axis == "categories":
+            cat = p.get("category")
+            if cat is None:
+                return ["unclassified"]
+            out = [cat]
+            if cat in (CATEGORY_FALLBACK, "people") and p.get("category_guess") and p["category_guess"] != cat:
+                out.append(p["category_guess"])
+            return out + [c for c in (p.get("also") or {}) if c not in out]
+        if axis == "days":
+            day = (p.get("when") or "")[:10]
+            return [day] if len(day) == 10 else []
+        if axis == "groups":
+            return [k for k, on in (("burst", p.get("burst")), ("bracket", p.get("bracket")), ("copies", p.get("dup"))) if on]
+        if axis == "lens":
+            return [] if video else [p.get("lens") or "unknown"]
+        if axis in CAMERA_AXES:
+            return [] if video else [bucket(axis, p)]
+        raise ValueError(axis)
+
+    def facet_counts(self, filters: Filters = Filters()) -> dict:
+        """{total, kind, faces, shot_size, slowmo, cameras, look, duration, drone, categories, days}: total is what
+        query() would return with these filters; every axis is {value: rows} counted with its own filter taken
+        off (drone is one number). One pass for the filters that are not axes, one per axis filter in force."""
+        from dataclasses import replace
+        person_ids = self._allowed_ids(filters)
+        base = replace(filters, **{f: None for fs in self.FACET_FIELDS.values() for f in fs})
+        rows = [p for p in self.photos.values() if self._passes(p, base, person_ids)]
+        on = {axis: fs for axis, fs in self.FACET_FIELDS.items() if any(getattr(filters, f) is not None for f in fs)}
+        fails: dict[str, set[int]] = {}
+        for axis, fs in on.items():
+            only = Filters(**{f: getattr(filters, f) for f in fs})
+            fails[axis] = {p["id"] for p in rows if not self._passes(p, only, None)}
+        out: dict = {"total": sum(1 for p in rows if not any(p["id"] in s for s in fails.values()))}
+        # how many sets, not rows, each group kind has among what passes: "bursts 12 in 3"
+        live = [p for p in rows if not any(p["id"] in s for a, s in fails.items() if a != "groups")]
+        out["group_sets"] = {k: len({p[f] for p in live if p.get(f)}) for k, f in (("burst", "burst"), ("bracket", "bracket"), ("copies", "dup"))}
+        for axis in self.FACET_FIELDS:
+            others = [s for a, s in fails.items() if a != axis]
+            counts: dict[str, int] = {}
+            for p in rows:
+                if any(p["id"] in s for s in others):
+                    continue
+                for v in self._facet_values(p, axis):
+                    if v:
+                        counts[v] = counts.get(v, 0) + 1
+            if axis in ("cameras", "lens"):
+                counts = dict(sorted(counts.items(), key=lambda kv: (kv[0] == "unknown", -kv[1], kv[0])))
+            elif axis == "days":
+                counts = dict(sorted(counts.items()))
+            out[axis] = counts.get("drone", 0) if axis == "drone" else counts
+        return out
+    # ===== end live facet counts =====
 
     def search(self, text: str | None = None, image_id: int | None = None, filters: Filters = Filters(),
                limit: int = 200, offset: int = 0, sort: str | None = None,

@@ -175,11 +175,11 @@ def test_margin_gate_ignores_the_winners_own_family():
     def row(*idx):
         v = np.zeros(EMBED_DIM, np.float32); v[list(idx)] = 1.0; return v / np.linalg.norm(v)
     out = _score(np.stack([row(2, 3), row(0, 1), row(3)]), T, owner, names)
-    cat, score, margin, guess, guess_score, probs = out[0]
+    cat, score, margin, guess, guess_score, probs, _ = out[0]
     assert cat in ("people", "interview") and guess == cat
     assert abs(score - 0.5) < 1e-3 and abs(guess_score - 0.5) < 1e-3
     assert margin >= MIN_PROB_MARGIN and abs(margin - 0.5) < 1e-3          # against beach, not against the sibling
-    cat2, score2, margin2, guess2, _, _ = out[1]
+    cat2, score2, margin2, guess2, _, _, _ = out[1]
     assert cat2 == FALLBACK and guess2 in ("beach", "building") and abs(margin2) < 1e-3
     assert out[2][0] == "interview" and out[2][2] > 0.99                   # a clear winner is unchanged
 
@@ -640,7 +640,8 @@ def test_people_photo_keeps_its_scene_as_the_guess(tmp_path, monkeypatch):
     conn.execute("INSERT INTO photos(id, rel, status, n_faces, kind) VALUES (2, 'b.jpg', 'ok', 1, 'photo')")
     conn.commit()
     # what _score would say before the face rule: 1 is a confident beach, 2 a confident portrait
-    scored = {1: ("beach", 0.9, 0.5, "beach", 0.9, {"beach": 0.9}), 2: ("people", 0.8, 0.4, "people", 0.8, {"people": 0.8})}
+    scored = {1: ("beach", 0.9, 0.5, "beach", 0.9, {"beach": 0.9}, {"beach": 0.9}),
+              2: ("people", 0.8, 0.4, "people", 0.8, {"people": 0.8}, {"people": 0.8})}
     monkeypatch.setattr(c, "_score", lambda M, T, owner, names: [scored[i] for i in owner_ids])
     owner_ids = [1, 2]
     monkeypatch.setattr(db, "load_embeds", lambda conn_: (__import__("numpy").array(owner_ids), __import__("numpy").zeros((2, EMBED_DIM), "float32")))
@@ -907,3 +908,62 @@ def test_there_is_no_camera_motion_facet(tmp_path):
     assert not hasattr(c, "CAMERA_MOTION_PROMPTS")
     cols = {r[1] for r in db.connect(tmp_path).execute("PRAGMA table_info(photos)")}
     assert "camera_motion" not in cols and "locked_off" not in cols
+
+# ===== every category a row fits, not only the winner (Q4, backlog item 13) =====
+
+def test_score_names_every_category_that_clears_the_second_floor():
+    """The seventh element of a _score row: every real category whose softmax share reaches SECOND_MIN_PROB
+    and whose own cosine clears MIN_COSINE, the winner among them. A clear 74/26 split between beach and
+    building keeps both; a category with nothing behind it is not there."""
+    from photosort.classify import _score, SECOND_MIN_PROB, SCENE_GUESS_MIN_PROB, TEMPERATURE
+    assert SECOND_MIN_PROB == SCENE_GUESS_MIN_PROB == 0.15
+    names = ["beach", "building", "people", "interview", "__other__"]
+    T = np.eye(5, EMBED_DIM, dtype=np.float32)
+    owner = np.arange(5)
+    v = np.zeros(EMBED_DIM, np.float32); v[0], v[1] = 0.30, 0.30 - 1.0 / TEMPERATURE; v[10] = 0.9
+    v /= np.linalg.norm(v)
+    cat, score, margin, guess, guess_score, probs, cleared = _score(v[None, :], T, owner, names)[0]
+    assert cat == "beach" and 0.6 < score < 0.8
+    assert set(cleared) == {"beach", "building"} and abs(cleared["building"] - probs["building"]) < 1e-9
+
+
+def test_also_of_drops_the_filed_category_its_guess_home_and_everything_under_other():
+    """A secondary is a category the row is NOT already listed under: never the winner, never the scene a
+    people row keeps as its guess (the guess already lists it), and never anything for a row the gates
+    sent to "other" (its single guess is all it gets: secondaries must not flood the less-sure bands)."""
+    from photosort.classify import also_of
+    cleared = {"beach": 0.6, "ocean": 0.25, "people": 0.15}
+    assert also_of("beach", "beach", cleared) == {"ocean": 0.25, "people": 0.15}
+    assert also_of("people", "beach", cleared) == {"ocean": 0.25}
+    assert also_of(FALLBACK, "beach", cleared) == {}
+    assert also_of("interview", "interview", {"interview": 0.55, "people": 0.41}) == {"people": 0.41}
+
+
+def test_classify_and_store_writes_every_category_a_row_fits(tmp_path, monkeypatch):
+    """photo_categories holds the secondaries; db.category_counts counts a row under each of them, and a
+    changed file loses them with its category (they came from the same embedding)."""
+    from photosort import classify as c
+    import photosort.embed as embed_mod
+    root = tmp_path / "shoot"; root.mkdir()
+    conn = db.connect(root)
+    for i, rel in ((1, "a.mp4"), (2, "b.mp4"), (3, "c.mp4")):
+        conn.execute("INSERT INTO photos(id, rel, status, n_faces, kind, duration) VALUES (?, ?, 'ok', 0, 'video', 5.0)", (i, rel))
+    conn.commit()
+    scored = [("interview", 0.55, 0.5, "interview", 0.55, {"interview": 0.55, "people": 0.41}, {"interview": 0.55, "people": 0.41}),
+              ("beach", 0.9, 0.85, "beach", 0.9, {"beach": 0.9}, {"beach": 0.9}),
+              (FALLBACK, 0.4, 0.05, "office", 0.4, {"office": 0.4, "people": 0.35}, {"office": 0.4, "people": 0.35})]
+    monkeypatch.setattr(c, "_score", lambda M, T, owner, names: scored)
+    monkeypatch.setattr(db, "load_embeds", lambda conn_: (np.array([1, 2, 3]), np.zeros((3, EMBED_DIM), "float32")))
+    monkeypatch.setattr(db, "load_segment_embeds", lambda conn_: (np.array([], int), np.zeros((0, EMBED_DIM), "float32")))
+    monkeypatch.setattr(c, "_prompt_matrix", lambda emb: (["beach", "people"], np.zeros((2, EMBED_DIM), "float32"), [0, 1]))
+    monkeypatch.setattr(embed_mod, "get_embedder", lambda: None)
+    monkeypatch.setattr(c, "flag_aerial", lambda root: 0)
+    monkeypatch.setattr(c, "classify_shot_size", lambda root: {})
+    c.classify_and_store(root)
+    rows = conn.execute("SELECT photo_id, category, score FROM photo_categories ORDER BY photo_id").fetchall()
+    assert [tuple(r) for r in rows] == [(1, "people", 0.41)]
+    counts = db.category_counts(conn)
+    assert counts["interview"] == 1 and counts["people"] == 1 and counts["beach"] == 1 and counts[FALLBACK] == 1
+    assert db.category_also_counts(conn) == {"people": 1}
+    db.upsert_photo(conn, _row("a.mp4", kind="video"))             # the file changed on the disk
+    assert conn.execute("SELECT COUNT(*) FROM photo_categories").fetchone()[0] == 0

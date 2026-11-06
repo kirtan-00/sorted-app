@@ -1,0 +1,100 @@
+/* The Scan tab's desktop (scene.js): two Finder windows, the shoot as a Stack, loose files on the right edge and one
+   Liquid Glass status pill. Chrome values were measured off a dark Tahoe (macOS 26.1) Finder window. Everything is
+   prefixed fs- so none of it reaches the rest of the app. */
+.finder-scene {
+  --fs-win-bg: #1f2022; --fs-side-bg: #29292b; --fs-cap-bg: #252629; --fs-cap-sel: #48494c;
+  --fs-t1: #e4e4e6; --fs-t3: #6c6c6f; --fs-accent: #5a9af8; --fs-sel-row: #202022;
+  --fs-ui: -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  position: relative; width: 100%; aspect-ratio: 1440 / 900; max-height: max(340px, calc(100vh - 230px)); min-height: 300px;
+  margin: 2px 0 12px; border-radius: 12px; overflow: hidden; isolation: isolate; contain: layout paint;
+  color: var(--fs-t1); font-family: var(--fs-ui); -webkit-font-smoothing: antialiased; cursor: default; user-select: none; -webkit-user-select: none;
+  background:
+    radial-gradient(60% 70% at 18% 8%, rgba(38, 78, 96, .55), transparent 70%),
+    radial-gradient(55% 65% at 92% 96%, rgba(22, 48, 78, .55), transparent 70%),
+    radial-gradient(45% 50% at 60% 55%, rgba(30, 44, 52, .35), transparent 75%),
+    linear-gradient(180deg, #121518, #0c0e10);
+}
+.finder-scene[hidden] { display: none; }
+.finder-scene * { box-sizing: border-box; margin: 0; padding: 0; cursor: default; }
+.fs-stage { position: absolute; left: 0; top: 0; width: 1440px; height: 900px; transform-origin: 0 0; }
+.fs-fx { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 20; }
+.fs-fx.low { z-index: 0; }
+
+/* window */
+.fs-win { position: absolute; left: 0; top: 0; background: var(--fs-win-bg); border-radius: 26px; overflow: hidden; z-index: 1; transform-origin: 0 0;
+  box-shadow: 0 0 0 .5px rgba(0,0,0,.9), inset 0 0 0 .5px rgba(255,255,255,.13), 0 24px 64px 6px rgba(0,0,0,.5), 0 8px 18px rgba(0,0,0,.28); }
+.fs-win.inactive { box-shadow: 0 0 0 .5px rgba(0,0,0,.85), inset 0 0 0 .5px rgba(255,255,255,.09), 0 14px 40px 2px rgba(0,0,0,.38); }
+.fs-win.min { z-index: 15; box-shadow: 0 0 0 .5px rgba(0,0,0,.85), inset 0 0 0 .5px rgba(255,255,255,.12), 0 30px 60px rgba(0,0,0,.45); }
+.fs-win.min * { pointer-events: none; }
+.fs-side { position: absolute; left: 8px; top: 8px; bottom: 8px; width: 158px; background: var(--fs-side-bg); border-radius: 18px; box-shadow: inset 0 0 0 .5px rgba(255,255,255,.05); }
+.fs-lights { position: absolute; left: 12px; top: 11px; display: flex; gap: 9px; z-index: 3; }
+.fs-lights i { position: relative; display: block; width: 14px; height: 14px; border-radius: 50%; background: #4f4f52; }
+.fs-lights svg { position: absolute; inset: 0; width: 14px; height: 14px; opacity: 0; fill: none; stroke: rgba(60, 20, 10, .78); stroke-width: 1.35; stroke-linecap: round; }
+.fs-lights i:nth-child(2) svg { stroke: rgba(90, 55, 0, .78); }
+.fs-lights i:nth-child(3) svg { stroke: rgba(0, 70, 10, .78); }
+.fs-win:not(.inactive) .fs-lights i, .fs-lights:hover i { box-shadow: inset 0 0 0 .5px rgba(0,0,0,.25); }
+.fs-win:not(.inactive) .fs-lights i:nth-child(1), .fs-lights:hover i:nth-child(1) { background: #ff5f57; }
+.fs-win:not(.inactive) .fs-lights i:nth-child(2), .fs-lights:hover i:nth-child(2) { background: #febc2e; }
+.fs-win:not(.inactive) .fs-lights i:nth-child(3), .fs-lights:hover i:nth-child(3) { background: #28c840; }
+.fs-lights:hover svg { opacity: 1; }
+.fs-lights i:active { filter: brightness(.82); }
+.fs-side h6 { font-size: 11px; font-weight: 600; color: var(--fs-t3); margin: 0 0 3px 16px; letter-spacing: .1px; }
+.fs-grp { margin-top: 18px; }
+.fs-grp.first { margin-top: 50px; }
+.fs-row { height: 32px; margin: 0 6px; padding: 0 10px; display: flex; align-items: center; gap: 9px; font-size: 13px; color: #dadadc; border-radius: 10px; white-space: nowrap; overflow: hidden; }
+.fs-row svg { width: 17px; height: 17px; flex: none; stroke: #8f8f93; fill: none; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.fs-row.sel { background: rgba(255,255,255,.075); color: var(--fs-accent); }
+.fs-row.sel svg { stroke: var(--fs-accent); }
+.inactive .fs-row { color: #a9a9ac; } .inactive .fs-row.sel { background: var(--fs-sel-row); color: #2f6bb3; } .inactive .fs-row.sel svg { stroke: #2f6bb3; }
+
+.fs-main { position: absolute; left: 166px; right: 0; top: 0; bottom: 0; }
+.fs-tb { position: absolute; left: 8px; right: 10px; top: 8px; height: 36px; display: flex; align-items: center; gap: 12px; z-index: 2; }
+.fs-cap { height: 36px; border-radius: 18px; background: var(--fs-cap-bg); display: flex; align-items: center; padding: 0 4px; gap: 2px; flex: none;
+  box-shadow: inset 0 .5px 0 rgba(255,255,255,.07), 0 0 0 .5px rgba(0,0,0,.35); }
+.fs-cap b { width: 32px; height: 28px; display: grid; place-items: center; border-radius: 14px; }
+.fs-cap b.on { background: var(--fs-cap-sel); width: 36px; }
+.fs-cap svg { width: 16px; height: 16px; stroke: #c9c9cc; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.fs-cap .dis svg { stroke: #6a6a6e; }
+.fs-cap .sep { width: 1px; height: 18px; background: #3a3b3e; }
+.fs-cap.round { width: 36px; padding: 0; justify-content: center; }
+.fs-ttl { font-size: 15px; font-weight: 600; color: #e9e9eb; letter-spacing: -.1px; white-space: nowrap; }
+.inactive .fs-ttl { color: #8b8b8e; }
+.inactive .fs-cap svg { stroke: #7c7c80; }
+.fs-sp { flex: 1; }
+
+.fs-grid { position: absolute; left: 0; right: 0; top: 60px; display: grid; justify-content: start; padding: 0 14px; row-gap: 4px; grid-auto-rows: 104px; }
+.fs-cell { position: relative; display: flex; flex-direction: column; align-items: center; padding-top: 8px; width: 104px; height: 104px; transform-origin: 50% 40%; }
+.fs-hl { position: absolute; top: 2px; width: 82px; height: 68px; border-radius: 9px; background: rgba(255,255,255,.11); opacity: 0; }
+.fs-ficon { position: relative; width: 66px; height: 54px; flex: none; filter: drop-shadow(0 1px 1.2px rgba(0,0,0,.4)); transform-origin: 50% 90%; }
+.fs-ficon svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.fs-ficon .front { transform-origin: 50% 100%; }
+.fs-nm { margin-top: 7px; font-size: 12px; line-height: 15px; color: #ececee; text-align: center; white-space: nowrap; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+.fs-ct { font-size: 11px; line-height: 14px; color: var(--fs-accent); font-variant-numeric: tabular-nums; min-height: 14px; white-space: nowrap; }
+.inactive .fs-nm { color: #c9c9cc; }
+.fs-empty { position: absolute; left: 0; right: 0; top: 46%; text-align: center; font-size: 13px; color: #6c6c6f; }
+
+/* the one Liquid Glass surface, above the canvas so flying cards refract through it */
+.fs-hud { position: absolute; z-index: 30; pointer-events: none; }
+.fs-hud glass-element { pointer-events: none; }
+.fs-hud .fs-plain { width: 100%; height: 100%; border-radius: 999px; background: rgba(30,32,36,.55); -webkit-backdrop-filter: blur(14px) saturate(1.4); backdrop-filter: blur(14px) saturate(1.4);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.30), inset 0 0 0 .5px rgba(255,255,255,.16), 0 10px 30px rgba(0,0,0,.35); }
+.fs-hud-in { display: flex; align-items: center; gap: 12px; width: 100%; height: 100%; padding: 0 20px 0 14px; font-family: var(--fs-ui); color: #f2f2f4; text-align: left; }
+.fs-hud-in svg { width: 30px; height: 30px; flex: none; }
+.fs-hud-in .l1 { font-size: 13.5px; font-weight: 600; line-height: 17px; letter-spacing: -.1px; text-shadow: 0 1px 2px rgba(0,0,0,.35); white-space: nowrap; }
+.fs-hud-in .l2 { font-size: 12px; line-height: 16px; color: rgba(235,235,240,.72); font-variant-numeric: tabular-nums; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+
+/* desktop labels under the loose files and the Stack */
+.fs-dlabel { position: absolute; font-size: 12px; line-height: 15px; color: #f4f4f6; text-align: center; text-shadow: 0 1px 3px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,.6);
+  white-space: nowrap; transform: translateX(-50%); z-index: 0; pointer-events: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.fs-dlabel small { display: block; font-size: 11px; color: var(--fs-accent); font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+
+/* a product's folder on the desktop: the same cell as in a window, set on the wallpaper. Under the windows, like the Stack */
+.fs-dcell { position: absolute; z-index: 0; pointer-events: none; }
+.fs-dcell .fs-nm, .fs-dcell .fs-ct { text-shadow: 0 1px 3px rgba(0,0,0,.85), 0 0 1px rgba(0,0,0,.6); }
+.fs-bare .fs-win { display: none; }
+
+/* a minimized window's count, on its tile */
+.fs-badge { position: absolute; left: 0; top: 0; z-index: 31; pointer-events: none; min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px;
+  background: #e5484d; color: #fff; font: 600 12px/22px var(--fs-ui); text-align: center; font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 3px rgba(0,0,0,.4), inset 0 0 0 .5px rgba(255,255,255,.2); transform-origin: 50% 50%; }
+.fs-badge[hidden] { display: none; }

@@ -108,3 +108,20 @@ def test_a_selection_export_carries_sidecars(tmp_path):
         if not p["running"]: break
         time.sleep(0.05)
     assert sorted(os.listdir(p["path"])) == ["p0.jpg", "p0.xmp", "p1.jpg"]
+
+
+def test_live_facet_counts_honour_the_ratings_filter(tmp_path):
+    """The facet rail counts what the grid shows: with picks only on, the total is the picks."""
+    from fastapi.testclient import TestClient
+    from conftest import make_image
+    from photosort.index import index_folder
+    from photosort.server import create_app
+    for n in ("a.jpg", "b.jpg", "c.jpg"):
+        make_image(tmp_path, n)
+    index_folder(tmp_path, faces=False, workers=1, embed=False)
+    c = TestClient(create_app(tmp_path))
+    ids = [r["id"] for r in c.get("/api/search").json()["results"]]
+    assert c.post("/api/marks", json={"ids": ids[:1], "flag": "pick"}).status_code == 200
+    assert c.get("/api/search/facets").json()["total"] == 3
+    assert c.get("/api/search/facets", params={"flag": "pick"}).json()["total"] == 1
+    assert c.get("/api/search/facets", params={"flag": "bogus"}).status_code == 400

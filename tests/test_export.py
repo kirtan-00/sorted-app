@@ -325,6 +325,40 @@ def test_category_jobs_name_the_subfolder_and_place_a_photo_twice(tmp_path):
     assert sorted(os.listdir(tmp_path)) == before
 
 
+def test_category_rows_take_a_secondary_only_with_the_less_sure(tmp_path):
+    """b.jpg is filed under ocean and fits beach too (photo_categories): the beach folder gets it only when
+    less sure rows are asked for, which is where the grid shows it."""
+    from photosort import db
+    from photosort.export import category_rows
+    _two_category_shoot(tmp_path)
+    conn = db.connect(tmp_path)
+    ids = {r[0]: r[1] for r in conn.execute("SELECT rel, id FROM photos")}
+    db.replace_photo_categories(conn, [(ids["b.jpg"], "beach", 0.3)])
+    assert [r["rel"] for r in category_rows(tmp_path, ["beach"])] == ["a.jpg"]
+    assert [r["rel"] for r in category_rows(tmp_path, ["beach"], include_unsure=True)] == ["a.jpg", "b.jpg"]
+    assert [r["rel"] for r in category_rows(tmp_path, ["ocean"], include_unsure=True)] == ["b.jpg"]
+
+
+def test_export_time_is_the_measured_rate_when_there_is_one(tmp_path):
+    """Until this shoot has exported something big enough to time, the estimate is the conservative constant
+    and says so; after that it is the measured rate. A tiny export is too short to time and changes nothing.
+    Re-encoding photos is timed per photo, apart from plain copies, because it costs CPU, not bytes."""
+    from photosort import db
+    from photosort.export import estimate_seconds, record_rate, export_rates, COPY_BPS, WEB_SECONDS_PER_PHOTO
+    conn = db.connect(tmp_path)
+    assert export_rates(conn) == {}
+    assert estimate_seconds(conn, "copy", copy_bytes=COPY_BPS * 60, web_files=0) == (60.0, "estimate")
+    assert estimate_seconds(conn, "copy", 0, web_files=10) == (10 * WEB_SECONDS_PER_PHOTO, "estimate")
+    assert estimate_seconds(conn, "symlink", COPY_BPS * 60, 0) == (0.0, "estimate")
+    record_rate(conn, nbytes=10_000_000, seconds=0.1, files=3, web=False)            # too small to say anything
+    assert export_rates(conn) == {}
+    record_rate(conn, nbytes=500_000_000, seconds=5.0, files=40, web=False)          # 100 MB/s
+    assert estimate_seconds(conn, "copy", 1_000_000_000, 0) == (10.0, "measured")
+    assert estimate_seconds(conn, "copy", 1_000_000_000, 10)[1] == "estimate"       # half of it still a guess
+    record_rate(conn, nbytes=0, seconds=20.0, files=100, web=True)                   # 0.2 s a photo
+    assert estimate_seconds(conn, "copy", 1_000_000_000, 10) == (12.0, "measured")
+
+
 def test_folder_jobs_and_ids_jobs_share_the_shape(tmp_path):
     from photosort import db
     from photosort.export import folder_jobs, ids_jobs

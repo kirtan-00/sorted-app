@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS photos(
   category_guess TEXT, category_guess_score REAL, cluster TEXT, cluster_score REAL, aerial INTEGER DEFAULT 0,
   focus TEXT, focus_score REAL, lat REAL, lon REAL, shot_size TEXT, shot_size_score REAL, fps REAL,
   gamma TEXT, capture_fps REAL, people INTEGER, face_h REAL,
-  flag TEXT, rating INTEGER DEFAULT 0, label TEXT);
+  flag TEXT, rating INTEGER DEFAULT 0, label TEXT,
+  exposure_s REAL, fnumber REAL, iso INTEGER, ev_bias REAL, focal_mm REAL, lens TEXT, exp_mode INTEGER, subsec REAL, flash INTEGER, flicker TEXT);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   idx INTEGER, start REAL, end REAL, frame TEXT, embed BLOB, category TEXT, category_score REAL);
@@ -47,6 +48,16 @@ CREATE TABLE IF NOT EXISTS exports(
 CREATE TABLE IF NOT EXISTS clip_faces(
   id INTEGER PRIMARY KEY, photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   frame INTEGER, x INTEGER, y INTEGER, w INTEGER, h INTEGER, score REAL, embed BLOB);
+CREATE TABLE IF NOT EXISTS photo_categories(
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE, category TEXT NOT NULL, score REAL,
+  PRIMARY KEY(photo_id, category));
+CREATE TABLE IF NOT EXISTS products(
+  photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE, product INTEGER NOT NULL, variant INTEGER NOT NULL,
+  view INTEGER);
+CREATE TABLE IF NOT EXISTS product_sets(
+  product INTEGER NOT NULL, variant INTEGER NOT NULL, name TEXT, named INTEGER DEFAULT 0, colour TEXT, hex TEXT,
+  n INTEGER, views INTEGER, PRIMARY KEY(product, variant));
+CREATE INDEX IF NOT EXISTS photo_categories_category ON photo_categories(category, photo_id);
 CREATE INDEX IF NOT EXISTS clip_faces_photo ON clip_faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_photo ON faces(photo_id);
 CREATE INDEX IF NOT EXISTS faces_person ON faces(person_id);
@@ -77,7 +88,8 @@ CREATE INDEX IF NOT EXISTS photos_status_marks ON photos(status, flag, rating, l
 
 PHOTO_COLS = ["rel","size","mtime","qhash","sibling","width","height","taken_at","camera","phash",
               "sharp_tile","sharp_max","sharp_eye","sharp","n_faces","status","kind","duration","aerial","lat","lon","fps",
-              "gamma","capture_fps","people","face_h"]
+              "gamma","capture_fps","people","face_h",
+              "exposure_s","fnumber","iso","ev_bias","focal_mm","lens","exp_mode","subsec","flash","flicker"]
 
 def index_dir(root: Path) -> Path:
     d = app_home() / shoot_slug(root)
@@ -180,6 +192,14 @@ def connect(root: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE photos ADD COLUMN rating INTEGER DEFAULT 0")
     if "label" not in cols:
         conn.execute("ALTER TABLE photos ADD COLUMN label TEXT")
+    # ===== camera settings (features.SETTING_KEYS): what the camera recorded about each still's exposure, read
+    # off the standard EXIF sub-IFD at index time. lens NULL means never read (a shoot indexed before these
+    # columns: index.read_camera_info is the catch-up), '' means read and the file names no lens. =====
+    for col, typ in (("exposure_s", "REAL"), ("fnumber", "REAL"), ("iso", "INTEGER"), ("ev_bias", "REAL"),
+                     ("focal_mm", "REAL"), ("lens", "TEXT"), ("exp_mode", "INTEGER"), ("subsec", "REAL"),
+                     ("flash", "INTEGER"), ("flicker", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE photos ADD COLUMN {col} {typ}")
     conn.executescript(INDEXES)
     conn.commit()
     # camera: features.exif_info used to hand back a DJI DNG's Make and Model padded with NULs to their
@@ -218,8 +238,10 @@ def upsert_photo(conn, row: dict) -> int:
                  "category_guess=NULL, category_guess_score=NULL, cluster=NULL, cluster_score=NULL, focus=NULL, focus_score=NULL, "
                  "shot_size=NULL, shot_size_score=NULL, indexed_at=datetime('now')",
                  [row.get(c) for c in PHOTO_COLS])
+    pid = conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
+    conn.execute("DELETE FROM photo_categories WHERE photo_id=?", (pid,))   # the secondaries go with the category
     conn.commit()
-    return conn.execute("SELECT id FROM photos WHERE rel=?", (row["rel"],)).fetchone()[0]
+    return pid
 
 def mark_error(conn, rel: str, size: int, mtime: float) -> None:
     """Flag a file that could not be read this pass. Only status/size/mtime move: qhash, embed,
@@ -426,7 +448,33 @@ def category_counts(conn) -> dict[str, int]:
     for cat, n in conn.execute("""SELECT category_guess, COUNT(*) FROM photos WHERE status='ok' AND category='people'
                                   AND category_guess IS NOT NULL AND category_guess != 'people' GROUP BY category_guess"""):
         counts[cat] = counts.get(cat, 0) + n
+    # And every other category a row fits (classify.SECOND_MIN_PROB): a tile counts what clicking it shows.
+    for cat, n in category_also_counts(conn).items():
+        counts[cat] = counts.get(cat, 0) + n
     return counts
+
+# The ok ids come off a covering (status, ...) index: a join to photos would read each row past its embed.
+CATEGORY_ALSO_COUNTS_SQL = ("SELECT category, COUNT(*) FROM photo_categories "
+                            "WHERE photo_id IN (SELECT id FROM photos WHERE status='ok') GROUP BY category")
+
+def category_also_counts(conn) -> dict[str, int]:
+    """category -> ok rows listed there as a secondary only (photo_categories), so a tile can say how much of
+    its number is rows filed elsewhere."""
+    return {r[0]: r[1] for r in conn.execute(CATEGORY_ALSO_COUNTS_SQL)}
+
+def replace_photo_categories(conn, rows: list[tuple[int, str, float]]) -> None:
+    """Every secondary category of the shoot as (photo_id, category, score), replacing whatever was there:
+    classify_and_store scores every row in one pass, so it writes them all at once."""
+    conn.execute("DELETE FROM photo_categories")
+    conn.executemany("INSERT OR REPLACE INTO photo_categories(photo_id, category, score) VALUES(?,?,?)", rows)
+    conn.commit()
+
+def load_photo_categories(conn) -> dict[int, dict[str, float]]:
+    """photo_id -> {category: score} for every row with a secondary."""
+    out: dict[int, dict[str, float]] = {}
+    for pid, cat, score in conn.execute("SELECT photo_id, category, score FROM photo_categories ORDER BY photo_id, score DESC"):
+        out.setdefault(pid, {})[cat] = score
+    return out
 
 def aerial_count(conn) -> int:
     """Drone shots (photos and videos) among status='ok' rows: the "drone" tile."""
@@ -667,6 +715,70 @@ def add_pending(conn, files) -> int:
         [(f.rel, f.size, f.mtime, "video" if f.is_video else "photo") for f in files])
     conn.commit()
     return int(conn.execute("SELECT count(*) FROM photos WHERE status='pending'").fetchone()[0])
+
+SAMPLE_MAX = 240     # the most cards a Scan tab sample may ask for
+
+def scan_sample(conn, n: int = 120, since: int = 0, ids=(), folders: bool = True) -> dict:
+    """The Scan tab's desktop: a fixed, evenly spaced sample of the files the scan listed (pending, ok and error,
+    the population scan_counts calls items), and the true counts the folders show.
+
+    rows: every k-th listed file in id order (k = ceil(items / n), so at most n rows), only those with id > since,
+    each {id, name, video, qhash, category, width, height, duration, error, looked}. qhash is None until features has
+    read the file (no thumb yet), looked False until embed has, category None until categorise has, error True for a
+    file that could not be read (it never gets a thumb). The sample is the same on every call while the listing
+    is the same, so a client pages forward with since = the last id it holds and gets nothing twice.
+    updates: the same fields for the ids asked for, the cards a client holds that still lack a thumb or a folder.
+    max_id: the last id in rows (or since when there are none). folders: [{kind, name, n}] per kind ("photos" or
+    "videos") and category over the read files, largest first; empty until something is categorised, and not counted
+    at all with folders=False (a GROUP BY over every row, which a client polling mid-scan has no use for)."""
+    n = max(1, min(SAMPLE_MAX, int(n)))
+    since = max(0, int(since))
+    live = "status IN ('pending','ok','error')"
+    c = conn.execute(f"SELECT count(*), SUM(kind='video') FROM photos WHERE {live}").fetchone()
+    total, videos = int(c[0] or 0), int(c[1] or 0)
+    out = {"total": total, "photos": total - videos, "videos": videos, "since": since, "max_id": since,
+           "rows": [], "updates": [], "folders": []}
+    if not total:
+        return out
+    k = -(-total // n)
+    cols = ("id, rel, kind, CASE WHEN status='ok' THEN qhash END, CASE WHEN status='ok' THEN category END, width, height, duration, "
+            "status='error', status='ok' AND embed IS NOT NULL AND length(embed)=%d, "
+            "(SELECT x.product FROM products x WHERE x.photo_id=photos.id)" % EMBED_BYTES)
+
+    def shape(r) -> dict:
+        return {"id": r[0], "name": r[1].rsplit("/", 1)[-1], "video": r[2] == "video", "qhash": r[3], "category": r[4],
+                "width": r[5], "height": r[6], "duration": r[7], "error": bool(r[8]), "looked": bool(r[9]), "product": r[10]}
+    # The positions are picked over ids alone (photos_status_kind covers status and the rowid), and only the picked
+    # rows are read: a shoot's rows carry their embeddings, and a window over whole rows reads every one of them.
+    picked = [r[0] for r in conn.execute(
+        f"SELECT id FROM (SELECT id, row_number() OVER (ORDER BY id) - 1 AS rn FROM photos WHERE {live}) "
+        "WHERE rn % ? = 0 AND id > ? ORDER BY id", (k, since))]
+
+    def fetch(idlist) -> list[dict]:
+        if not idlist:
+            return []
+        q = ",".join("?" * len(idlist))
+        return [shape(r) for r in conn.execute(f"SELECT {cols} FROM photos WHERE id IN ({q}) ORDER BY id", idlist)]
+    out["rows"] = fetch(picked)
+    # products: only when Find products has run, so the desktop stays as it was on a shoot without them
+    found = conn.execute("SELECT product, MIN(name), SUM(n) FROM product_sets GROUP BY product ORDER BY SUM(n) DESC").fetchall()
+    if found:
+        out["products"] = [{"id": r[0], "name": r[1] or f"product {i}", "count": int(r[2] or 0)} for i, r in enumerate(found, 1)]
+    if picked:
+        out["max_id"] = picked[-1]
+    out["updates"] = fetch(sorted({int(i) for i in ids})[:SAMPLE_MAX])
+    if folders:
+        # Every read file per category off photos_status_category, and the clips per category off photos_status_kind,
+        # which reads only the clips' rows; the photos are the difference. Grouping by kind and category together
+        # would read every row in the shoot, embedding and all.
+        every = dict(conn.execute("SELECT category, count(*) FROM photos "
+                                  "WHERE status='ok' AND category IS NOT NULL GROUP BY category"))
+        clips = dict(conn.execute("SELECT category, count(*) FROM photos INDEXED BY photos_status_kind "
+                                  "WHERE status='ok' AND kind='video' AND category IS NOT NULL GROUP BY category"))
+        f = [{"kind": "photos", "name": c, "n": int(m) - int(clips.get(c, 0))} for c, m in every.items()]
+        f += [{"kind": "videos", "name": c, "n": int(m)} for c, m in clips.items()]
+        out["folders"] = sorted((x for x in f if x["n"] > 0), key=lambda x: (-x["n"], x["name"], x["kind"]))
+    return out
 
 def scan_counts(conn) -> dict:
     """How far the shoot's scan got, from the index alone (no disk needed):

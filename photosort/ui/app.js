@@ -7,7 +7,7 @@
     total: 0,
     offset: 0,
     lastParams: {},
-    selected: new Set(),
+    selected: pileSet([]),       // ===== the pile: a Set that also tells the server (see "the pile" below) =====
     people: [],
     peopleLoaded: false,        // the face groups are the most expensive thing a shoot can be asked for: nothing pulls them up front
     progressTimer: null,
@@ -222,10 +222,13 @@
     if (name === "people") ensurePeople();             // the grouping is fetched the first time the tab is actually opened
     if (name === "people") { loadReferences(); loadSuggestions(); }   // loadSuggestions: the "same person?" block below
     if (name === "categories") loadCategories();
+    if (name === "products") loadProducts();          // ===== shoot modes =====
     if (name === "places") loadPlaces();               // ===== places: the map and the city list load on the first visit =====
     if (name === "index") loadScanHealth();            // ===== resume: the health line walks the disk when the tab opens =====
+    if (name === "index" && window.ScanScene) ScanScene.open();   // ===== the scan desktop (scene.js): the Finder windows and the Stack =====
     mountDriveStrip();                                 // ===== Google Drive: the strip sits under whichever export row is showing =====
   }
+  $("#nav-live").addEventListener("click", function () { window.open("/ui/live.html", "sorted-live"); });
   $$("header nav button[data-view]").forEach(function (b) {   // ===== nav selector (see showView) =====
     b.addEventListener("click", function () { goView(b.dataset.view); });   // goView: showView plus a history entry (navigation block below)
   });
@@ -245,9 +248,9 @@
   var ctxCount = $("#ctx-count");
   var ctxClearBtn = $("#ctx-clear");
   var viewSearch = $("#view-search");
-  var VIEWS = ["search", "people", "categories", "places", "index"];
-  var TAB_NAMES = { people: "People", categories: "Categories", places: "Places" };
-  var CHIP_KINDS = ["person", "saved", "category", "cluster", "day", "place", "drone", "slowmo", "shot", "dur", "look", "camera", "kind", "hide_bad", "hide_soft"];
+  var VIEWS = ["search", "people", "categories", "places", "index", "products"];   // command-1 to 6; Scan keeps 5
+  var TAB_NAMES = { people: "People", categories: "Categories", places: "Places", products: "Products" };
+  var CHIP_KINDS = ["pile", "person", "saved", "category", "cluster", "day", "place", "drone", "slowmo", "shot", "dur", "look", "flicker", "camera", "faces", "kind", "hide_bad", "hide_soft"];
   // ===== pick-one filters: a sidebar list of check rows that act as one choice (framing). Each kind names the query
   // parameter it sets, the values it accepts, and the words its chip and its tooltip use; every place that walks the
   // chips (the form, the hash, search history) goes through this table instead of growing one branch per filter. =====
@@ -258,14 +261,50 @@
     dur: { param: "duration", values: ["lt10", "10to30", "30to120", "gt120"],
            label: function (k) { return DUR_WORDS[k] || k; },
            title: function (k) { return "only clips " + (DUR_WORDS[k] || k).toLowerCase(); } },
+    flicker: { param: "flicker", values: ["pulsing", "banding", "none"],
+               label: function (k) { return k === "none" ? "no flicker" : k + " flicker"; },
+               title: function (k) { return k === "none" ? "only clips checked and found clean" : "only clips with " + k + " light flicker"; } },
     look: { param: "look", values: ["log", "standard"],
             label: function (k) { return k === "log" ? "log, needs grading" : "Rec.709 and others"; },
             title: function (k) { return k === "log" ? "only clips shot in S-Log, which need grading" : "only clips the camera says are Rec.709 or another ready to watch profile"; } },
     // values: null takes any camera string the shoot has; the facet list is what the select offers
     camera: { param: "camera", values: null,
               label: function (k) { return cameraName(k); },
-              title: function (k) { return "only what the " + cameraName(k) + " shot (" + k + ")"; } }
+              title: function (k) { return "only what the " + cameraName(k) + " shot (" + k + ")"; } },
+    // ===== shoot modes: sequences, and the camera's own settings (selects, like the camera body) =====
+    grp: { param: "group", values: ["burst", "bracket", "copies"],
+           label: function (k) { return GROUP_WORDS[k] || k; },
+           title: function (k) { return "only " + (GROUP_WORDS[k] || k) + ", every frame of each"; } },
+    lens: { param: "lens", values: null,
+            label: function (k) { return k === "unknown" ? "lens unknown" : k; },
+            title: function (k) { return k === "unknown" ? "only photos that name no lens" : "only what the " + k + " shot"; } },
+    focal: { param: "focal", values: null, label: function (k) { return exifWord("focal", k); }, title: function (k) { return "only photos at " + exifWord("focal", k); } },
+    shutter: { param: "shutter", values: null, label: function (k) { return exifWord("shutter", k); }, title: function (k) { return "only photos at " + exifWord("shutter", k); } },
+    aperture: { param: "aperture", values: null, label: function (k) { return exifWord("aperture", k); }, title: function (k) { return "only photos at " + exifWord("aperture", k); } },
+    flash: { param: "flash", values: null, label: function (k) { return exifWord("flash", k); }, title: function (k) { return "only photos with " + exifWord("flash", k); } },
+    iso: { param: "iso", values: null, label: function (k) { return exifWord("iso", k); }, title: function (k) { return "only photos at " + exifWord("iso", k); } },
+    // ===== end shoot modes =====
+    // the faces select in the toolbar: a chip like the rest, so "wide + no people" reads as two filters in the bar
+    faces: { param: "faces", values: ["none", "one", "two", "group"],
+             label: function (k) { return FACES_WORDS[k] || k; },
+             title: function (k) { return "only " + (FACES_WORDS[k] || k) + " in the frame"; } }
   };
+  // ===== shoot modes: the words for the sequence rows and the camera buckets (config.CAMERA_BUCKETS, same order) =====
+  var GROUP_WORDS = { burst: "bursts", bracket: "brackets", copies: "copies" };
+  var EXIF_WORDS = {
+    focal: [["lt20", "under 20 mm"], ["20to35", "20 to 35 mm"], ["36to70", "36 to 70 mm"], ["71to135", "71 to 135 mm"], ["gt135", "over 135 mm"]],
+    shutter: [["fast", "1/1000 and faster"], ["action", "1/800 to 1/250"], ["normal", "1/200 to 1/60"], ["slow", "slower than 1/60"], ["long", "1 s and longer"]],
+    flash: [["fired", "flash fired"], ["none", "no flash recorded"]],
+    aperture: [["wide", "f/2 and wider"], ["mid", "f/2.2 to f/4"], ["small", "f/4.5 to f/8"], ["tiny", "f/9 and narrower"]],
+    iso: [["le400", "ISO 400 and under"], ["to1600", "ISO 500 to 1600"], ["to6400", "ISO 2000 to 6400"], ["gt6400", "over ISO 6400"]]
+  };
+  var EXIF_UNKNOWN = { focal: "focal length unknown", shutter: "shutter unknown", aperture: "aperture unknown", iso: "ISO unknown", flash: "flash unknown" };
+  function exifWord(axis, k) {
+    if (k === "unknown") return EXIF_UNKNOWN[axis];
+    for (var i = 0; i < EXIF_WORDS[axis].length; i++) if (EXIF_WORDS[axis][i][0] === k) return EXIF_WORDS[axis][i][1];
+    return k;
+  }
+  // ===== end shoot modes =====
   var DUR_WORDS = { lt10: "Under 10 s", "10to30": "10 to 30 s", "30to120": "30 s to 2 min", gt120: "Over 2 min" };
   // Sony writes model codes, not the names on the body. The ones that turn up on the shoots this was built on, and
   // their neighbours; anything else shows as written.
@@ -283,6 +322,7 @@
   }
   // ===== end pick-one filters =====
   CHIP_KINDS.push("flag", "stars", "label");          // ===== marks =====
+  CHIP_KINDS.push("product");                         // ===== shoot modes: a product, or one colour of it =====
   try { history.scrollRestoration = "manual"; } catch (e) { /* not supported */ }
 
   function chipsKey(chips) { return JSON.stringify((chips || []).map(function (c) { return [c.kind, c.key]; })); }
@@ -301,6 +341,7 @@
     var out = {};
     (chips || []).forEach(function (c) {
       if (c.kind === "person") out.person = c.key;
+      else if (c.kind === "pile") out.pile = 1;
       else if (c.kind === "category") out.category = c.key;
       else if (c.kind === "cluster") out.cluster = c.key;
       else if (c.kind === "day") out.day = c.key;
@@ -312,6 +353,7 @@
       else if (c.kind === "hide_bad") out.hide_bad = 1;
       else if (c.kind === "hide_soft") out.hide_soft = 1;
       else if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") out[c.kind] = c.key;   // ===== marks =====
+      else if (c.kind === "product") { var pv = String(c.key).split(":"); out.product = pv[0]; if (pv[1]) out.variant = pv[1]; }
     });
     return out;
   }
@@ -319,6 +361,7 @@
   // drone box, the kind segments, the two focus boxes). A saved find lives only in state.chips, never in the form.
   function chipsFromForm() {
     var fd = new FormData(form), out = [];
+    if (fd.get("pile")) out.push({ kind: "pile", key: "pile", from: null });
     if (fd.get("person")) out.push({ kind: "person", key: Number(fd.get("person")), from: null });
     if (fd.get("category")) out.push({ kind: "category", key: fd.get("category"), from: null });
     if (fd.get("cluster")) out.push({ kind: "cluster", key: fd.get("cluster"), from: null });
@@ -336,6 +379,7 @@
     // ===== marks =====
     ["flag", "stars", "label"].forEach(function (k) { if (fd.get(k)) out.push({ kind: k, key: fd.get(k), from: null }); });
     // ===== end marks =====
+    if (fd.get("product")) out.push({ kind: "product", key: fd.get("product") + (fd.get("variant") ? ":" + fd.get("variant") : ""), from: null });
     return out;
   }
   // After a form control changed by hand: chips still on the form keep their place and origin, new ones go last, gone ones drop.
@@ -361,6 +405,7 @@
   function writeChipsToForm(chips) {
     var c = function (kind) { return chipOf(kind, chips); };
     personSelect.value = c("person") ? String(c("person").key) : "";
+    $("#pile-filter").value = c("pile") ? "1" : "";
     $("#category-filter").value = c("category") ? c("category").key : "";
     $("#cluster-filter").value = c("cluster") ? c("cluster").key : "";
     $("#day-filter").value = c("day") ? c("day").key : "";
@@ -376,6 +421,8 @@
     ["flag", "stars", "label"].forEach(function (k) { $("#" + k + "-filter").value = c(k) ? String(c(k).key) : ""; });
     syncMarksFilter();
     // ===== end marks =====
+    var pc = c("product") ? String(c("product").key).split(":") : ["", ""];
+    $("#product-filter").value = pc[0] || ""; $("#variant-filter").value = pc[1] || "";
   }
   // Add one chip to the set: one per kind, so a second person replaces the first; a saved find stands alone.
   function addChip(chip, base) {
@@ -385,6 +432,7 @@
     return list;
   }
   function chipLabel(c) {
+    if (c.kind === "pile") return "the pile";
     if (c.kind === "person") return personLabel(personById(c.key), c.key);
     if (c.kind === "cluster") return "discovered: " + (/^group \d+$/.test(c.key) ? "Unnamed " + c.key : c.key);
     if (c.kind === "kind") return c.key;
@@ -395,9 +443,11 @@
     if (c.kind === "hide_bad") return "no out of focus";
     if (c.kind === "hide_soft") return "no soft";
     if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return marksChipLabel(c);   // ===== marks =====
+    if (c.kind === "product") return productChipLabel(c.key);
     return c.key;
   }
   function chipTitle(c) {
+    if (c.kind === "pile") return "only what is in the pile";
     if (c.kind === "person" || c.kind === "saved") return "only photos of " + chipLabel(c);
     if (c.kind === "category") return "only the " + c.key + " category";
     if (c.kind === "cluster") return "only the discovered category " + c.key;
@@ -409,6 +459,7 @@
     if (c.kind === "kind") return "only " + c.key;
     if (c.kind === "hide_bad") return "the focus check's out-of-focus rows are hidden";
     if (c.kind === "flag" || c.kind === "stars" || c.kind === "label") return "only " + marksChipLabel(c);   // ===== marks =====
+    if (c.kind === "product") return "only " + productChipLabel(c.key) + ", every angle";
     return "the focus check's soft rows are hidden too";
   }
   // The origin tab of the last chip that came from one: the Back button's label and the sidebar dot.
@@ -448,29 +499,42 @@
       chip.appendChild(x);
       ctxChips.appendChild(chip);
     });
+    // ===== live counts: the bar reads as a sum, "wide · no people · videos = 34 clips" =====
     var n = state.total, m = state.shootTotal;
-    ctxCount.textContent = m ? n + " of " + m + " match" : n + " match";
-    ctxCount.title = m ? n + " of the shoot's " + m + " photos and clips pass every filter" : "";
+    ctxCount.textContent = "= " + num(n) + " " + matchNoun(n);
+    ctxCount.title = m ? num(n) + " of the shoot's " + num(m) + " photos and clips pass every filter" : "";
+  }
+
+  // What the matches are: the kind chip says so outright; otherwise the live counts know whether any photos or clips are left.
+  function matchNoun(n) {
+    var k = chipOf("kind"), one = n === 1;
+    var kc = state.live && !k ? state.live.kind || {} : null;
+    if ((k && k.key === "videos") || (kc && !kc.photos && kc.videos)) return one ? "clip" : "clips";
+    if ((k && k.key === "photos") || (kc && kc.photos && !kc.videos)) return one ? "photo" : "photos";
+    return one ? "match" : "photos and clips";
   }
 
   // history
   var navRestoring = false;
-  var HASH_KEYS = { person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", slowmo: "slowmo", shot: "shot_size", dur: "duration", look: "look", camera: "camera", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
+  var HASH_KEYS = { pile: "pile", person: "person", saved: "saved", category: "category", cluster: "cluster", drone: "aerial", slowmo: "slowmo", shot: "shot_size", dur: "duration", look: "look", flicker: "flicker", camera: "camera", faces: "faces", kind: "kind", hide_bad: "hide_bad", hide_soft: "hide_soft" };
   HASH_KEYS.flag = "flag"; HASH_KEYS.stars = "stars"; HASH_KEYS.label = "label";   // ===== marks =====
+  ["grp", "lens", "focal", "shutter", "aperture", "iso", "flash"].forEach(function (k) { HASH_KEYS[k] = PICKS[k].param; });   // ===== shoot modes =====
+  HASH_KEYS.product = "product";
   function hashFor(view, chips) {
     if (view !== "search" || !chips || !chips.length) return "#" + view;
     var p = new URLSearchParams();
-    chips.forEach(function (c) { p.set(HASH_KEYS[c.kind], c.kind === "drone" || c.kind === "slowmo" || c.kind === "hide_bad" || c.kind === "hide_soft" ? "1" : String(c.key)); });
+    chips.forEach(function (c) { p.set(HASH_KEYS[c.kind], c.kind === "pile" || c.kind === "drone" || c.kind === "slowmo" || c.kind === "hide_bad" || c.kind === "hide_soft" ? "1" : String(c.key)); });
     return "#search?" + p.toString();
   }
   // A pasted or typed URL: the chips in the order the hash lists them; a person, category, cluster or drone chip remembers its tab.
   function parseHash(h) {
-    var m = /^#(search|people|categories|index)(?:\?(.*))?$/.exec(h || "");
+    var m = /^#(search|people|categories|index|products)(?:\?(.*))?$/.exec(h || "");
     if (!m) return null;
     var entry = { view: m[1], chips: [] };
     if (m[1] === "search" && m[2]) {
       new URLSearchParams(m[2]).forEach(function (v, k) {
-        if (k === "person" && /^\d+$/.test(v)) entry.chips = addChip({ kind: "person", key: Number(v), from: "people" }, entry.chips);
+        if (k === "pile" && v) entry.chips.push({ kind: "pile", key: "pile", from: null });
+        else if (k === "person" && /^\d+$/.test(v)) entry.chips = addChip({ kind: "person", key: Number(v), from: "people" }, entry.chips);
         else if (k === "saved" && v) entry.chips = [{ kind: "saved", key: v, from: "people" }];
         else if (k === "category" && v) entry.chips.push({ kind: "category", key: v, from: "categories" });
         else if (k === "cluster" && v) entry.chips.push({ kind: "cluster", key: v, from: "categories" });
@@ -484,6 +548,7 @@
         else if (k === "flag" && /^(pick|reject|none)$/.test(v)) entry.chips.push({ kind: "flag", key: v, from: null });
         else if (k === "stars" && /^[1-5]$/.test(v)) entry.chips.push({ kind: "stars", key: v, from: null });
         else if (k === "label" && /^(red|yellow|green|blue|purple|none)$/.test(v)) entry.chips.push({ kind: "label", key: v, from: null });
+        else if (k === "product" && /^\d+(:\d+)?$/.test(v)) entry.chips.push({ kind: "product", key: v, from: "products" });   // ===== shoot modes =====
         // ===== end marks =====
       });
       if (chipOf("saved", entry.chips)) entry.chips = [chipOf("saved", entry.chips)];
@@ -696,10 +761,12 @@
   var welcomeDisk = $("#welcome-disk");
   function setWelcomeFrame(hasFolder) {
     document.body.classList.toggle("nofolder", !hasFolder);
-    ["header nav", "#shootbar", "#exportbar", "#inspector-toggle"].forEach(function (sel) {
+    ["#shootbar", "#exportbar", "#inspector-toggle"].forEach(function (sel) {
       var el = $(sel);
       if (el) el.inert = !hasFolder;
     });
+    // Live picks its own folder, so it stays on with no shoot open
+    $$("header nav button:not(#nav-live)").forEach(function (b) { b.inert = !hasFolder; });
     var out = !hasFolder && !!(state.folder && state.folder.root);   // a shoot is open but its disk is unplugged
     welcomeUnmounted.hidden = !out;
     $(".welcome-ask").hidden = out;
@@ -869,7 +936,8 @@
   function settleFolder(info) {
     state.people = []; state.peopleLoaded = false;
     state.results = [];
-    state.selected = new Set();
+    state.selected = pileSet([]); state.pile = null; loadPile();   // ===== the pile: this shoot's, from the index =====
+    state.live = null;                                 // ===== live counts: the previous shoot's numbers mean nothing here =====
     state.categories = { fixed: {}, discovered: {}, drone: 0 };
     state.catTicked = new Set(); state.catSeen = new Set();
     state.findPath = null; syncSaveForm();            // a reference from the previous shoot must not be saved into this one
@@ -970,6 +1038,7 @@
     exportDestEl.title = "exports go to " + d.path;
     // ===== end destination label =====
     exportDestReset.hidden = !!d.default;
+    schedulePlan();                                    // ===== export summary: the line names the new folder =====
   }
 
   function loadExportDest() {
@@ -1074,6 +1143,12 @@
     if (fd.get("stars")) params.stars = fd.get("stars");
     if (fd.get("label")) params.label = fd.get("label");
     // ===== end marks =====
+    if (fd.get("pile")) params.pile = 1;               // ===== the pile: only what has been picked =====
+    if (fd.get("product")) params.product = fd.get("product");   // ===== shoot modes: a product and maybe one colour =====
+    if (fd.get("variant")) params.variant = fd.get("variant");
+    // the day and the map box are chips too: a plain search (a Videos click after a day) must keep them
+    if (fd.get("day")) params.day = fd.get("day");
+    if (fd.get("bbox")) params.bbox = fd.get("bbox");
     return params;
   }
 
@@ -1157,7 +1232,9 @@
       var name = document.createElement("span");
       name.className = "day-name"; name.textContent = dayLabel(d.day);
       var n = document.createElement("span");
-      n.className = "day-n mono"; n.textContent = num(d.n);
+      var liveN = state.live && state.live.days ? state.live.days[d.day] || 0 : d.n;   // ===== live counts =====
+      n.className = "day-n mono"; n.textContent = num(liveN);
+      if (!liveN && !(on && on.key === d.day)) row.classList.add("zero");
       row.appendChild(name); row.appendChild(n);
       row.addEventListener("click", function () { pickDay(d.day); });
       daysList.appendChild(row);
@@ -1511,6 +1588,460 @@
   });
   // ===== end places =====
 
+  // ===== shoot modes: keep the best of each burst, read camera settings, and the Products view =====
+  function keepBest(kind) {
+    var p = currentFilters();
+    ["q", "sort", "kind"].forEach(function (k) { delete p[k]; });
+    p.kind = kind;
+    api("/api/groups/best?" + new URLSearchParams(p).toString(), { method: "POST" }).then(function (d) {
+      track("keep_best", { kind: kind, sets: d.sets });
+      return loadPile().then(function () {
+        var what = kind === "burst" ? (d.sets === 1 ? "burst" : "bursts") : (d.sets === 1 ? "bracket" : "brackets");
+        setStatus(d.sets ? (kind === "burst" ? "kept the sharpest frame of " : "kept the middle exposure of ") + num(d.sets) + " " + what
+                           + (d.added < d.sets ? ", " + num(d.sets - d.added) + " already in the pile" : "") + "; the pile has " + num(d.n)
+                         : "no " + what + " in what the filters show", true);
+      });
+    }).catch(function (err) { setStatus("could not keep the best frames: " + err.message, true); });
+  }
+  $("#keep-burst").addEventListener("click", function () { keepBest("burst"); });
+  $("#keep-bracket").addEventListener("click", function () { keepBest("bracket"); });
+
+  $("#camread").addEventListener("click", function () {
+    var btn = $("#camread");
+    btn.disabled = true;
+    api("/api/camera/read", { method: "POST" }).then(function () {
+      var poll = setInterval(function () {
+        api("/api/camera/progress").then(function (p) {
+          if (p.running) { setStatus("reading camera settings, " + num(p.done) + " of " + num(p.total)); return; }
+          clearInterval(poll); btn.disabled = false;
+          var c = p.counts || {};
+          setStatus(p.error ? "reading camera settings failed: " + p.error
+                            : "read camera settings on " + num(c.found || 0) + " of " + num(c.read || 0) + " photos"
+                              + (c.missing ? ", " + num(c.missing) + " not on the disk" : ""), true);
+          loadFacets(); runSearch();
+        }).catch(function () { clearInterval(poll); btn.disabled = false; });
+      }, 700);
+    }).catch(function (err) { btn.disabled = false; setStatus("could not read camera settings: " + err.message); });
+  });
+
+  $("#flicker-read").addEventListener("click", function () {
+    var btn = $("#flicker-read");
+    btn.disabled = true;
+    api("/api/flicker/read", { method: "POST" }).then(function () {
+      var poll = setInterval(function () {
+        api("/api/flicker/progress").then(function (p) {
+          if (p.running) { setStatus("checking clips for flicker, " + num(p.done) + " of " + num(p.total)); return; }
+          clearInterval(poll); btn.disabled = false;
+          var c = p.counts || {};
+          setStatus(p.error ? "checking for flicker failed: " + p.error
+                            : "flicker found in " + num(c.found || 0) + " of " + num(c.read || 0) + " clips"
+                              + (c.missing ? ", " + num(c.missing) + " not on the disk" : ""), true);
+          loadFacets(); runSearch();
+        }).catch(function () { clearInterval(poll); btn.disabled = false; });
+      }, 700);
+    }).catch(function (err) { btn.disabled = false; setStatus("could not check for flicker: " + err.message); });
+  });
+
+  state.products = [];
+  function productById(id) {
+    for (var i = 0; i < state.products.length; i++) if (state.products[i].product === id) return state.products[i];
+    return null;
+  }
+  function productChipLabel(key) {
+    var pv = String(key).split(":"), pr = productById(Number(pv[0]));
+    var name = pr ? pr.name : "product " + pv[0];
+    if (!pv[1]) return name;
+    var v = pr && pr.variants.filter(function (x) { return x.variant === Number(pv[1]); })[0];
+    return name + " " + (v ? v.colour : "colour " + pv[1]);
+  }
+  function fetchProducts() {
+    var root = state.folder && state.folder.root;
+    return api("/api/products").then(function (d) {
+      if (root !== (state.folder && state.folder.root)) return;
+      state.products = d.products || [];
+      $("#nav-product-count").textContent = state.products.length || "";
+      if (chipOf("product")) renderCtxBar();          // the chip can say the product's name now
+    }).catch(function () { /* an older server: no products */ });
+  }
+  function loadProducts() { return fetchProducts().then(renderProducts); }
+  function renderProducts() {
+    var list = $("#product-list");
+    list.innerHTML = "";
+    var prods = state.products || [];
+    var running = $("#products-find").disabled;
+    $("#products-empty").hidden = prods.length > 0 || running;
+    $("#products-export-row").hidden = !prods.length;
+    var cur = chipOf("product");
+    var curKey = cur ? String(cur.key) : "";
+    var photos = 0, colours = 0;
+    prods.forEach(function (pr) {
+      photos += pr.n; colours += pr.variants.length;
+      var row = document.createElement("div"); row.className = "product";
+      var cover = document.createElement("img"); cover.className = "product-cover"; cover.alt = "";
+      var first = pr.variants[0];
+      if (first && first.cover) cover.src = "/api/thumb/" + first.cover;
+      row.appendChild(cover);
+      var head = document.createElement("div"); head.className = "product-head";
+      var name = document.createElement("span"); name.className = "product-name" + (pr.named ? "" : " unnamed");
+      name.textContent = pr.name;
+      name.title = pr.named ? pr.name : "no word fit this product well enough; rename it";
+      var meta = document.createElement("span"); meta.className = "product-meta";
+      var views = pr.variants.reduce(function (a, v) { return Math.max(a, v.views || 0); }, 0);
+      meta.textContent = num(pr.n) + " photos, " + pr.variants.length + (pr.variants.length === 1 ? " colour" : " colours")
+                         + (views > 1 ? ", up to " + views + " angles a colour" : "");
+      var ren = document.createElement("button"); ren.type = "button"; ren.className = "link small"; ren.textContent = "Rename";
+      ren.title = "give this product its own name; the export folders use it";
+      ren.addEventListener("click", function () { renameProduct(pr, head, name); });
+      head.appendChild(name); head.appendChild(meta); head.appendChild(ren);
+      row.appendChild(head);
+      var sw = document.createElement("div"); sw.className = "swatches";
+      var all = swatchButton(null, "every colour", pr.n, String(pr.product), curKey);
+      all.classList.add("all");
+      sw.appendChild(all);
+      pr.variants.forEach(function (v) {
+        sw.appendChild(swatchButton(v.hex, v.colour, v.n, pr.product + ":" + v.variant, curKey,
+                                    v.views > 1 ? v.views + " angles of " + pr.name + " in " + v.colour : pr.name + " in " + v.colour));
+      });
+      row.appendChild(sw);
+      list.appendChild(row);
+    });
+    $("#products-summary").textContent = prods.length ? num(prods.length) + (prods.length === 1 ? " product, " : " products, ") + num(colours) + " colours, " + num(photos) + " photos" : "";
+  }
+  function swatchButton(hex, label, n, key, curKey, title) {
+    var b = document.createElement("button"); b.type = "button"; b.className = "swatch" + (key === curKey ? " on" : "");
+    if (hex) { var dot = document.createElement("span"); dot.className = "swatch-dot"; dot.style.background = hex; b.appendChild(dot); }
+    var t = document.createElement("span"); t.textContent = label; b.appendChild(t);
+    var c = document.createElement("span"); c.className = "swatch-n"; c.textContent = num(n); b.appendChild(c);
+    b.title = (title || label) + "; show them in Search";
+    b.addEventListener("click", function () {
+      track("product_open", { variant: key.indexOf(":") > 0 });
+      jumpTo({ kind: "product", key: key, from: "products" }, function () { runSearch(); });
+    });
+    return b;
+  }
+  function renameProduct(pr, head, nameEl) {
+    var input = document.createElement("input"); input.type = "text"; input.className = "product-name-input";
+    input.value = pr.named ? pr.name : ""; input.placeholder = pr.name; input.maxLength = 80;
+    head.replaceChild(input, nameEl); input.focus();
+    var done = false;
+    function finish(save) {
+      if (done) return; done = true;
+      var v = input.value.trim();
+      if (!save || !v || v === pr.name) { renderProducts(); return; }
+      api("/api/products/" + pr.product + "/name", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: v }) })
+        .then(function () { setStatus("renamed " + pr.name + " to " + v); return loadProducts(); })
+        .catch(function (err) { setStatus("could not rename: " + err.message); renderProducts(); });
+    }
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") finish(true); if (e.key === "Escape") { e.stopPropagation(); finish(false); } });
+    input.addEventListener("blur", function () { finish(true); });
+  }
+  $("#products-find").addEventListener("click", function () {
+    var btn = $("#products-find");
+    var scope = ($$('input[name="products-scope"]').filter(function (r) { return r.checked; })[0] || {}).value;
+    var start = function (ids) {
+      btn.disabled = true;
+      $("#products-progress").textContent = "looking at the photos…";
+      return api("/api/products/find", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
+        .then(function () {
+          track("products_find", { scope: scope });
+          var poll = setInterval(function () {
+            api("/api/products/progress").then(function (p) {
+              if (p.running) { $("#products-progress").textContent = p.total ? "looking at " + num(p.done) + " of " + num(p.total) + " photos" : "looking at the photos…"; return; }
+              clearInterval(poll); btn.disabled = false;
+              var c = p.counts || {};
+              $("#products-progress").textContent = p.error ? "finding products failed: " + p.error
+                : c.products ? num(c.products) + (c.products === 1 ? " product in " : " products in ") + num(c.variants) + " colours" : "no product was shot more than once";
+              loadProducts();
+            }).catch(function () { clearInterval(poll); btn.disabled = false; });
+          }, 600);
+        }).catch(function (err) { btn.disabled = false; $("#products-progress").textContent = "could not start: " + err.message; });
+    };
+    if (scope !== "search") { start(null); return; }
+    var p = currentFilters(); delete p.product; delete p.variant;
+    api("/api/search/ids?" + new URLSearchParams(p).toString()).then(function (d) {
+      if (!d.ids.length) { $("#products-progress").textContent = "Search shows nothing to look at"; return; }
+      start(d.ids);
+    });
+  });
+  $("#products-export").addEventListener("click", function () {
+    var mode = $("#products-mode").value, raw = $("#products-raw").checked;
+    setStatus("exporting products…", true);
+    api("/api/export/products", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: mode, include_raw: raw }) })
+      .then(function (d) { track("products_export", { folders: d.folders.length }); pollExportProgress("exporting " + d.folders.length + " product folders"); })
+      .catch(function (err) { setStatus("export failed: " + err.message, true); });
+  });
+  // ===== end shoot modes =====
+
+  // ===== client pick (photosort/cull.py): the Products view's second mode =====
+  // Picks per product, rejects folded with their reason in words, one click to swap a pick for another frame of the
+  // same colour and angle. The reject tiles are only built when you open a product's fold: a 3,500 photo shoot keeps
+  // its DOM to the picks until then.
+  state.cull = null;
+  state.cullOpen = {};
+  var CULL_WORDS = { retake: ["retake", "retakes"], soft: ["soft", "soft"], motion: ["with motion blur", "with motion blur"],
+                     cut: ["cut off", "cut off"], blown: ["blown out", "blown out"], crushed: ["crushed to black", "crushed to black"],
+                     stray: ["not matched", "not matched"] };
+  var CULL_HEADS = { retake: "Retakes of an angle already kept", soft: "Soft on the product", motion: "Motion blur",
+                     cut: "Cut off by the frame edge", blown: "Blown out", crushed: "Crushed to black",
+                     stray: "Not sure which product", spare: "Fine, not needed for your target" };
+  var CULL_ORDER = ["retake", "soft", "motion", "cut", "blown", "crushed", "stray"];
+  function cullMode() {
+    var r = $$('input[name="products-view"]').filter(function (x) { return x.checked; })[0];
+    return r ? r.value : "groups";
+  }
+  function applyProductsMode() {
+    var cull = cullMode() === "cull";
+    $("#cull").hidden = !cull;
+    $("#product-list").hidden = cull;
+    if (cull) { $("#products-empty").hidden = true; $("#products-export-row").hidden = true; }
+    $("#products-find").hidden = cull; $("#products-scope").hidden = cull; $("#products-progress").hidden = cull;
+    if (cull) loadCull();
+  }
+  renderProducts = (function (orig) {
+    return function () { orig(); applyProductsMode(); };
+  })(renderProducts);
+  $$('input[name="products-view"]').forEach(function (r) {
+    r.addEventListener("change", function () { track("cull_mode", { mode: cullMode() }); applyProductsMode(); });
+  });
+  function loadCull() {
+    var root = state.folder && state.folder.root;
+    return api("/api/cull").then(function (d) {
+      if (root !== (state.folder && state.folder.root)) return;
+      state.cull = d;
+      renderCull();
+    }).catch(function (err) { setStatus("could not load Client pick: " + err.message); });
+  }
+  function cullCountLine(d) {
+    if (!d.photos) return "";
+    var n = d.products.filter(function (p) { return p.product; }).length;
+    return num(d.picked) + " picked from " + num(d.photos) + ", " + num(n) + (n === 1 ? " product" : " products");
+  }
+  function cullLeftLine(d) {
+    var parts = [];
+    CULL_ORDER.forEach(function (k) {
+      var n = (d.rejected || {})[k];
+      if (n) parts.push(num(n) + " " + CULL_WORDS[k][n === 1 ? 0 : 1]);
+    });
+    var spare = d.products.reduce(function (a, p) { return a + p.spare.length; }, 0);
+    var s = parts.length ? "Set aside " + parts.join(", ") + "." : "";
+    if (spare) s += (s ? " " : "") + num(spare) + (spare === 1 ? " more is fine but not needed." : " more are fine but not needed.");
+    return s;
+  }
+  function renderCull() {
+    var d = state.cull || { photos: 0, products: [] };
+    var none = !(state.products || []).length;
+    $("#cull-total").textContent = cullCountLine(d);
+    $("#cull-left").textContent = d.photos ? cullLeftLine(d) : "";
+    $("#cull-empty").hidden = !!d.photos;
+    $("#cull-run").disabled = none || !!state.cullRunning;
+    $("#cull-run").textContent = d.photos ? "Pick again" : "Pick the best";
+    $("#cull-run").title = none ? "find products first, in Products" : "";
+    $("#cull-actions").hidden = !d.picked;
+    var t = d.target || {};
+    if (!state.cullTargetTouched) {
+      var kind = t.total ? "total" : "per";
+      $$('input[name="cull-kind"]').forEach(function (r) { r.checked = r.value === kind; });
+      $("#cull-n").value = t.total || t.per_product || 10;
+    }
+    var list = $("#cull-list");
+    list.innerHTML = "";
+    d.products.forEach(function (p) { list.appendChild(cullRow(p)); });
+  }
+  function cullSwatch(p, variant) {
+    var v = p.variants.filter(function (x) { return x.variant === variant; })[0];
+    return v || null;
+  }
+  function cullTile(p, f, kind) {
+    var t = document.createElement("figure"); t.className = "cull-tile" + (kind === "pick" ? " pick" : "");
+    var im = document.createElement("img"); im.loading = "lazy"; im.alt = ""; im.src = "/api/thumb/" + f.qhash;
+    im.addEventListener("click", function () { cullPeek(p, f); });
+    t.appendChild(im);
+    var cap = document.createElement("figcaption");
+    var v = cullSwatch(p, f.variant);
+    // a pick says its colour and angle; a reject says why, short (the whole sentence is on the frame opened big)
+    if (v && v.hex) { var dot = document.createElement("span"); dot.className = "swatch-dot"; dot.style.background = v.hex; cap.appendChild(dot); }
+    var w = document.createElement("span"); w.className = "cull-cap" + (kind === "reject" ? " why" : "");
+    w.textContent = kind === "reject" ? (f.short || "") : (v ? v.colour : "") + (f.angle ? ", angle " + f.angle : "");
+    w.title = kind === "reject" ? (f.words || "") : "";
+    cap.appendChild(w);
+    t.appendChild(cap);
+    var acts = document.createElement("div"); acts.className = "cull-acts";
+    function act(label, title, fn) {
+      var b = document.createElement("button"); b.type = "button"; b.className = "cull-act"; b.textContent = label; b.title = title;
+      b.addEventListener("click", function (e) { e.stopPropagation(); fn(); });
+      acts.appendChild(b);
+    }
+    if (kind === "pick") {
+      act("Swap", "swap for the next frame of this colour and angle", function () { cullSwap(p, f); });
+      act("Drop", "take this one out of the picks", function () { cullSetPick(f, false); });
+    } else {
+      act("Pick", "add this frame to the picks", function () { cullSetPick(f, true); });
+    }
+    t.appendChild(acts);
+    return t;
+  }
+  function cullRow(p) {
+    var row = document.createElement("section"); row.className = "cull-product"; row.dataset.product = p.product;
+    var head = document.createElement("div"); head.className = "cull-phead";
+    var name = document.createElement("h2"); name.className = "cull-name"; name.textContent = p.name;
+    var meta = document.createElement("span"); meta.className = "cull-meta";
+    meta.textContent = num(p.picked) + " picked from " + num(p.n);
+    head.appendChild(name); head.appendChild(meta);
+    var dots = document.createElement("span"); dots.className = "cull-dots";
+    p.variants.forEach(function (v) {
+      if (!v.hex) return;
+      var s = document.createElement("span"); s.className = "swatch-dot"; s.style.background = v.hex; s.title = v.colour; dots.appendChild(s);
+    });
+    head.appendChild(dots);
+    var others = (state.cull.products || []).filter(function (o) { return o.product && o.product !== p.product; });
+    if (p.product && others.length) {
+      var sel = document.createElement("select"); sel.className = "cull-merge";
+      sel.title = "Find products split one product in two, detail shots on their own for instance: put this one with the other";
+      var o0 = document.createElement("option"); o0.value = ""; o0.textContent = "Same product as"; sel.appendChild(o0);
+      others.forEach(function (o) { var op = document.createElement("option"); op.value = o.product; op.textContent = o.name; sel.appendChild(op); });
+      sel.addEventListener("change", function () { if (sel.value) cullMerge(p, Number(sel.value), sel); });
+      head.appendChild(sel);
+    }
+    row.appendChild(head);
+    var picks = document.createElement("div"); picks.className = "cull-grid";
+    p.picks.forEach(function (f) { picks.appendChild(cullTile(p, f, "pick")); });
+    if (!p.picks.length) {
+      var e = document.createElement("p"); e.className = "cull-none";
+      e.textContent = p.product ? "Nothing here is fit to send. Open the frames below and pick one by hand if you need to." : "These frames looked like no product you shot. Each one says what else is wrong with it.";
+      picks.appendChild(e);
+    }
+    row.appendChild(picks);
+    var out = p.rejects.length + p.spare.length;
+    if (out) {
+      var det = document.createElement("details"); det.className = "cull-fold";
+      var sum = document.createElement("summary");
+      var counts = {};
+      p.rejects.forEach(function (f) { counts[f.reason] = (counts[f.reason] || 0) + 1; });
+      var bits = [];
+      CULL_ORDER.forEach(function (k) { if (counts[k]) bits.push(num(counts[k]) + " " + CULL_WORDS[k][counts[k] === 1 ? 0 : 1]); });
+      if (p.spare.length) bits.push(num(p.spare.length) + " fine but not needed");
+      sum.textContent = num(out) + " left out: " + bits.join(", ");
+      det.appendChild(sum);
+      var built = false;
+      function build() {
+        if (built) return; built = true;
+        var groups = {};
+        p.rejects.forEach(function (f) { (groups[f.reason] = groups[f.reason] || []).push(f); });
+        if (p.spare.length) groups.spare = p.spare;
+        CULL_ORDER.concat(["spare"]).forEach(function (k) {
+          var fs = groups[k];
+          if (!fs) return;
+          var h = document.createElement("h3"); h.className = "cull-group"; h.textContent = CULL_HEADS[k] + ", " + num(fs.length);
+          det.appendChild(h);
+          var g = document.createElement("div"); g.className = "cull-grid small";
+          fs.forEach(function (f) { g.appendChild(cullTile(p, f, k === "spare" ? "spare" : "reject")); });
+          det.appendChild(g);
+        });
+      }
+      det.addEventListener("toggle", function () {
+        state.cullOpen[p.product] = det.open;
+        if (det.open) { build(); track("cull_fold", { n: out }); }
+      });
+      if (state.cullOpen[p.product]) { det.open = true; build(); }
+      row.appendChild(det);
+    }
+    return row;
+  }
+  function cullPeek(p, f) {
+    var el = $("#cull-peek");
+    if (!el) {
+      el = document.createElement("div"); el.id = "cull-peek"; el.className = "cull-peek"; el.hidden = true;
+      el.innerHTML = '<figure><img alt=""><figcaption></figcaption></figure>';
+      el.addEventListener("click", function () { el.hidden = true; });
+      document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !el.hidden) { el.hidden = true; e.stopPropagation(); } }, true);
+      document.body.appendChild(el);
+    }
+    el.querySelector("img").src = "/api/thumb/" + f.qhash + "?size=full";
+    var v = cullSwatch(p, f.variant);
+    el.querySelector("figcaption").textContent = p.name + (v ? " in " + v.colour : "") + (f.angle ? ", angle " + f.angle : "")
+      + ". " + (f.pick ? "Picked." : f.words ? "Left out: " + f.words + "." : "Fine, not needed for your target.");
+    el.hidden = false;
+  }
+  function cullSwap(p, f) {
+    api("/api/cull/swap", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: f.id }) })
+      .then(function (d) {
+        track("cull_swap", {});
+        if (d["in"] == null) { setStatus("this colour and angle has no other frame"); return; }
+        return loadCull();
+      }).catch(function (err) { setStatus("could not swap: " + err.message); });
+  }
+  function cullSetPick(f, on) {
+    api("/api/cull/pick", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: f.id, on: on }) })
+      .then(function () { track("cull_pick", { on: on }); return loadCull(); })
+      .catch(function (err) { setStatus("could not change the pick: " + err.message); });
+  }
+  function cullMerge(p, into, sel) {
+    var target = (state.cull.products || []).filter(function (o) { return o.product === into; })[0];
+    setStatus("putting " + p.name + " with " + (target ? target.name : "the other product") + "…", true);
+    api("/api/cull/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ product: p.product, into: into }) })
+      .then(function (d) {
+        track("cull_merge", {});
+        state.cull = d; renderCull(); fetchProducts();
+        setStatus(p.name + " is now part of " + (target ? target.name : "the other product") + ". Find products again to undo it.", true);
+      }).catch(function (err) { sel.value = ""; setStatus("could not merge: " + err.message, true); });
+  }
+  function cullTargetBody() {
+    var kind = ($$('input[name="cull-kind"]').filter(function (r) { return r.checked; })[0] || {}).value;
+    var n = Math.max(1, Math.round(Number($("#cull-n").value) || 0));
+    return kind === "total" ? { total: n } : { per_product: n };
+  }
+  $$('input[name="cull-kind"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      state.cullTargetTouched = true;
+      var prods = ((state.cull && state.cull.products) || []).filter(function (p) { return p.product; }).length || (state.products || []).length;
+      $("#cull-n").value = r.value === "total" ? Math.max(prods * 10, 10) : 10;
+    });
+  });
+  $("#cull-n").addEventListener("input", function () { state.cullTargetTouched = true; });
+  $("#cull-n").addEventListener("keydown", function (e) { if (e.key === "Enter") $("#cull-run").click(); });
+  $("#cull-run").addEventListener("click", function () {
+    var body = cullTargetBody();
+    var fresh = !(state.cull && state.cull.photos);
+    state.cullTargetTouched = false;
+    if (!fresh) {
+      api("/api/cull/target", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+        .then(function (d) { track("cull_target", { total: !!body.total }); state.cull = d; renderCull(); setStatus(cullCountLine(d)); })
+        .catch(function (err) { setStatus("could not pick again: " + err.message, true); });
+      return;
+    }
+    state.cullRunning = true; renderCull();
+    var prog = $("#cull-progress");
+    prog.hidden = false; prog.textContent = "looking at the products…";
+    api("/api/cull/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function () {
+        track("cull_run", { total: !!body.total });
+        var poll = setInterval(function () {
+          api("/api/cull/progress").then(function (p) {
+            if (p.running) { prog.textContent = p.total ? "looking at " + num(p.done) + " of " + num(p.total) + " photos" : "looking at the products…"; return; }
+            clearInterval(poll); state.cullRunning = false; prog.hidden = true;
+            if (p.error) { setStatus("Client pick failed: " + p.error, true); renderCull(); return; }
+            loadCull().then(function () { setStatus(cullCountLine(state.cull)); });
+          }).catch(function () { clearInterval(poll); state.cullRunning = false; prog.hidden = true; renderCull(); });
+        }, 600);
+      }).catch(function (err) { state.cullRunning = false; prog.hidden = true; renderCull(); setStatus("could not start: " + err.message, true); });
+  });
+  $("#cull-pile").addEventListener("click", function () {
+    api("/api/cull/pile", { method: "POST" }).then(function (d) {
+      track("cull_pile", { added: d.added });
+      return loadPile().then(function () {
+        setStatus(d.added ? "added " + num(d.added) + " picks to the pile; it has " + num(d.n) : "every pick was in the pile already", true);
+      });
+    }).catch(function (err) { setStatus("could not add to the pile: " + err.message, true); });
+  });
+  $("#cull-export").addEventListener("click", function () {
+    setStatus("exporting the picks…", true);
+    api("/api/export/cull", { method: "POST", headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ mode: $("#cull-mode").value, include_raw: $("#cull-raw").checked }) })
+      .then(function (d) { track("cull_export", { folders: d.folders.length }); pollExportProgress("exporting the picks into " + d.folders.length + " folders"); })
+      .catch(function (err) { setStatus("export failed: " + err.message, true); });
+  });
+  // ===== end client pick =====
+
   var PAGE = 200;
   // Two searches can be in flight at once (a radio change fires one, the chip sync another), and the slower
   // reply used to land last and leave the counts describing a filter that is no longer on. Every search takes
@@ -1543,6 +2074,7 @@
       state.folded = data.folded || 0;                 // ===== duplicates and bursts: rows inside the tiles =====
       state.offset = state.results.length;
       renderGrid();
+      if (!append) loadLive(params);                   // ===== live counts: every filter's number follows the search =====
       if (pushOwed) { pushOwed = false; navPush(); }   // ===== combined filters: the hash and history follow the chips =====
     }).catch(function (err) {
       if (ticket !== searchSeq) return;
@@ -1575,8 +2107,43 @@
   // ===== pick-one filters: ticking a row clears the other rows of its list, ticking the lit row clears it =====
   function pickInputs(kind) { return $$('input[data-pick="' + kind + '"]'); }
   var cameraSelect = $("#camera-select");
+  // ===== shoot modes: the five camera-settings selects, filled from the facet counts like the camera one =====
+  var EXIF_SELECTS = { lens: $("#lens-select"), focal: $("#focal-select"), shutter: $("#shutter-select"),
+                       aperture: $("#aperture-select"), iso: $("#iso-select"), flash: $("#flash-select") };
+  function setSelectValue(sel, value, label) {
+    if (value && !Array.prototype.some.call(sel.options, function (o) { return o.value === value; })) {
+      var o = document.createElement("option"); o.value = value; o.textContent = label(value);
+      sel.appendChild(o);
+    }
+    sel.value = value || "";
+  }
+  // whole: the shoot's own counts (whether a list shows); live: what each value would leave given the other filters
+  function renderExif(whole) {
+    var anyKnown = false;
+    Object.keys(EXIF_SELECTS).forEach(function (axis) {
+      var sel = EXIF_SELECTS[axis], cur = sel.value;
+      var counts = (whole && whole[axis]) || {};
+      var live = state.live && state.live[axis];
+      var keys = axis === "lens" ? Object.keys(counts) : EXIF_WORDS[axis].map(function (w) { return w[0]; }).concat(["unknown"]);
+      keys = keys.filter(function (k) { return counts[k]; });
+      if (keys.some(function (k) { return k !== "unknown"; })) anyKnown = true;
+      while (sel.options.length > 1) sel.remove(1);
+      keys.forEach(function (k) {
+        var o = document.createElement("option");
+        o.value = k; o.textContent = PICKS[axis].label(k) + "  " + num(live ? live[k] || 0 : counts[k]);
+        sel.appendChild(o);
+      });
+      setSelectValue(sel, cur, PICKS[axis].label);
+      sel.classList.toggle("set", !!cur);
+    });
+    var anySet = Object.keys(EXIF_SELECTS).some(function (a) { return EXIF_SELECTS[a].value; });
+    $("#exif-group").hidden = !anyKnown && !anySet;
+  }
+  // ===== end shoot modes =====
   function setPick(kind, value) {
     if (kind === "camera") { setCameraValue(value); return; }
+    if (EXIF_SELECTS[kind]) { setSelectValue(EXIF_SELECTS[kind], value, PICKS[kind].label); return; }
+    if (kind === "faces") { form.querySelector('[name="faces"]').value = value || ""; return; }
     pickInputs(kind).forEach(function (r) { r.checked = !!value && r.value === value; });
   }
   // A camera that came from a URL or a saved search may not be in the list yet (the facets load after the boot
@@ -1602,10 +2169,11 @@
   function renderCameras(counts) {
     var cur = cameraSelect.value;
     var names = Object.keys(counts || {});
+    var live = state.live && state.live.cameras;        // ===== live counts: what each body would leave, given the other filters =====
     while (cameraSelect.options.length > 1) cameraSelect.remove(1);
     names.forEach(function (c) {
       var o = document.createElement("option");
-      o.value = c; o.textContent = cameraName(c) + "  " + num(counts[c]); o.title = c;
+      o.value = c; o.textContent = cameraName(c) + "  " + num(live ? live[c] || 0 : counts[c]); o.title = c;
       cameraSelect.appendChild(o);
     });
     setCameraValue(cur);
@@ -1613,13 +2181,20 @@
   }
   // The counts beside each row and whether the list shows at all: hidden until something has an answer for it,
   // but never while one of its rows is ticked (a chip the sidebar cannot show would be a filter nobody can untick).
+  // ===== live counts: the number beside a row is what ticking it would leave given every other filter in force
+  // (/api/search/facets); whether the list shows at all still follows the whole shoot, so a list does not vanish
+  // because the filters on screen happen to empty it. A row that would leave nothing is dimmed, not hidden. =====
+  var LIVE_AXIS = { shot: "shot_size", dur: "duration", look: "look", flicker: "flicker", grp: "groups" };
   function renderPick(kind, groupSel, counts) {
     var any = false;
+    var live = state.live && state.live[LIVE_AXIS[kind]];
     pickInputs(kind).forEach(function (r) {
       var n = (counts && counts[r.value]) || 0;
       if (n) any = true;
+      var shown = live ? live[r.value] || 0 : n;
       var c = r.parentNode.querySelector("[data-count]");
-      if (c) c.textContent = num(n);
+      if (c) c.textContent = num(shown);
+      r.parentNode.classList.toggle("zero", !!live && !shown && !r.checked);
     });
     var ticked = pickInputs(kind).some(function (r) { return r.checked; });
     $(groupSel).hidden = !any && !ticked;
@@ -1627,17 +2202,45 @@
   // ===== end pick-one filters =====
   function loadFacets() {
     if (!(state.folder && state.folder.root)) { renderFacets(null); return Promise.resolve(); }
+    fetchProducts();                                   // ===== shoot modes: the Products count and the chip names =====
     return api("/api/facets").then(renderFacets).catch(function () { renderFacets(null); });
   }
   function renderFacets(d) {
+    state.facets = d;                                  // ===== live counts: kept so a fresh /api/search/facets can repaint the numbers =====
     var sm = (d && d.slowmo) || {}, fr = d && d.fps_read;
     var clips = (sm.slow || 0) + (sm.normal || 0) + (sm.unknown || 0);
     $("#slowmo-row").hidden = !clips && !slowmoOnly.checked;
-    $("#slowmo-count").textContent = clips ? num(sm.slow || 0) : "";
+    var liveSlow = state.live && state.live.slowmo ? state.live.slowmo.slow || 0 : null;
+    $("#slowmo-count").textContent = clips ? num(liveSlow != null ? liveSlow : sm.slow || 0) : "";
     renderPick("shot", "#shot-group", d && d.shot_size);
     renderPick("dur", "#dur-group", d && d.duration);
     renderPick("look", "#look-group", d && d.look);
+    renderPick("flicker", "#flicker-group", d && d.flicker);
+    var fl = d && d.flicker_read;
+    $("#flicker-line").hidden = !(fl && fl.unchecked > 0);
+    if (fl && fl.unchecked > 0) $("#flicker-status").textContent = num(fl.unchecked) + (fl.unchecked === 1 ? " clip" : " clips") + " not checked for flicker";
     renderCameras(d && d.cameras);
+    // ===== shoot modes: sequences show "frames in sets", the camera settings fill their selects, and a shoot
+    // scanned before v0.7 is offered the header read =====
+    var sh = (d && d.shoot) || {};
+    renderPick("grp", "#grp-group", sh.groups);
+    var sets = (state.live && state.live.group_sets) || sh.group_sets || {};
+    pickInputs("grp").forEach(function (r) {
+      var c = r.parentNode.querySelector("[data-count]");
+      var n = sets[r.value] || 0;
+      if (c && r.value !== "copies" && n) { c.textContent = c.textContent + " in " + num(n); }
+      r.parentNode.hidden = !((sh.groups || {})[r.value]) && !r.checked;   // a kind the shoot has none of is not a row
+      r.parentNode.title = r.value === "burst" ? "only frames shot as a burst; the number is frames, then bursts"
+        : r.value === "bracket" ? "only exposure brackets; the number is frames, then brackets" : r.parentNode.title;
+    });
+    $("#keep-burst").hidden = !(sh.groups && sh.groups.burst);
+    $("#keep-bracket").hidden = !(sh.groups && sh.groups.bracket);
+    renderExif(sh);
+    var cr = d && d.camera_read;
+    var offerCam = !!(cr && cr.unknown > 0 && !cr.read_at);
+    $("#camread-line").hidden = !offerCam;
+    if (offerCam) $("#camread-status").textContent = num(cr.unknown) + (cr.unknown === 1 ? " photo" : " photos") + " without camera settings";
+    // ===== end shoot modes =====
     var cf = d && d.clip_faces;
     $("#clipfaces-line").hidden = !(cf && cf.pending > 0);
     if (cf && cf.pending > 0) $("#clipfaces-status").textContent = num(cf.pending) + (cf.pending === 1 ? " clip" : " clips") + " not checked for faces";
@@ -1645,6 +2248,35 @@
     $("#fps-line").hidden = !offer;
     if (offer) $("#fps-status").textContent = num(fr.unknown) + (fr.unknown === 1 ? " clip" : " clips") + " without clip details";
   }
+  // ===== live counts: one call per search, the same filters minus what only ranks or pages =====
+  var liveSeq = 0;
+  function loadLive(params) {
+    if (!(state.folder && state.folder.root)) { state.live = null; return; }
+    var p = Object.assign({}, params);
+    ["q", "image_id", "limit", "offset", "sort", "fold"].forEach(function (k) { delete p[k]; });
+    var ticket = ++liveSeq;
+    api("/api/search/facets?" + new URLSearchParams(p).toString()).then(function (d) {
+      if (ticket !== liveSeq) return;
+      state.live = d;
+      renderLive();
+    }).catch(function () { /* the numbers are a convenience; the old ones stay */ });
+  }
+  function renderLive() {
+    if (state.facets !== undefined) renderFacets(state.facets);
+    renderFacesCounts();
+    renderDays();
+    renderCtxBar();
+  }
+  // The faces select carries its counts in the option text: "No people  12".
+  function renderFacesCounts() {
+    var live = state.live && state.live.faces;
+    Array.prototype.forEach.call(form.querySelector('[name="faces"]').options, function (o) {
+      if (!o.value) return;
+      if (!o.dataset.label) o.dataset.label = o.textContent;
+      o.textContent = o.dataset.label + (live ? "  " + num(live[o.value] || 0) : "");
+    });
+  }
+  // ===== end live counts =====
   $("#fps-read").addEventListener("click", function () {
     var btn = $("#fps-read");
     btn.disabled = true;
@@ -1714,7 +2346,6 @@
     if (f.slowmo) parts.push("slow motion");
     Object.keys(PICKS).forEach(function (kind) { if (f[PICKS[kind].param]) parts.push(PICKS[kind].label(String(f[PICKS[kind].param]))); });
     if (f.kind) parts.push(f.kind);
-    if (f.faces) parts.push(FACES_WORDS[f.faces] || f.faces);
     if (f.sharp) parts.push("sharp " + Math.round(Number(f.sharp)));
     if (f.hide_soft) parts.push("no soft"); else if (f.hide_bad) parts.push("no out of focus");
     return parts.join(" · ");
@@ -1922,7 +2553,8 @@
         divided = true;
         var div = document.createElement("div");
         div.className = "grid-divider mono";
-        div.textContent = "less sure, sorted by confidence";
+        // under a category the band also holds what was filed elsewhere and fits here too (a runner-up)
+        div.textContent = state.lastParams.category ? "less sure, or filed under another category too, by confidence" : "less sure, sorted by confidence";
         gridEl.appendChild(div);
       }
       var card = document.createElement("div");
@@ -1955,8 +2587,10 @@
       if (r.group) {
         var grp = document.createElement("div");
         grp.className = "badge group mono";
-        grp.textContent = r.group.kind === "burst" ? "burst of " + r.group.n : "x" + r.group.n;
-        grp.title = r.group.kind === "burst" ? "one tile for " + r.group.n + " frames shot as a burst" : "the same file is on the disk " + r.group.n + " times";
+        grp.textContent = groupBadge(r.group);
+        grp.title = r.group.kind === "burst" ? "one tile for " + r.group.n + " frames shot as a burst"
+          : r.group.kind === "bracket" ? "one tile for an exposure bracket of " + r.group.n + " frames: " + evSorted(r.group).join(", ") + " stops; this is the middle one"
+          : "the same file is on the disk " + r.group.n + " times";
         card.appendChild(grp);
       }
       // ===== end duplicates and bursts =====
@@ -2007,19 +2641,21 @@
   function updateSelbar() {
     var n = state.selected.size;
     var shown = state.results.length;
-    selbar.hidden = shown === 0 && n === 0;
+    var pileOn = !!chipOf("pile");
+    selbar.hidden = shown === 0 && n === 0 && !pileOn;
     selbar.classList.toggle("has-sel", n > 0);
     selectAllTop.hidden = shown === 0;
-    // How much the selection weighs, so an export is never a surprise. Only when every selected row is on
-    // screen: after "select all matching" the rest have not been loaded and a partial total would lie.
-    var weight = 0, allHere = n > 0;
-    state.selected.forEach(function (id) {
-      var r = resultById.get(id);
-      if (r) weight += Number(r.size) || 0; else allHere = false;
-    });
-    if (!allHere) weight = 0;
-    selcount.textContent = n + " selected" + (shown ? " of " + shown + " shown" : "") + (weight ? ", " + bytes(weight) : "");
+    // ===== the pile: the count is the selection's, the size is the server's (it knows every picked row, on screen or
+    // not), shown only once the server has caught up with the last click so the two numbers never disagree. =====
+    var pile = state.pile;
+    var weight = pile && !pileTimer && pile.n === n ? pile.bytes : 0;
+    selcount.textContent = n ? num(n) + " in the pile" + (weight ? " · " + bytes(weight) : "") : "Nothing in the pile yet";
+    selcount.title = n ? "what you have picked on this shoot; it stays through new searches and the next time the shoot opens" : "click a tile, or press space on it, to put it in the pile";
+    pileShowBtn.hidden = !n && !pileOn;
+    pileShowBtn.textContent = pileOn ? "Back to the search" : "Show the pile";
+    pileShowBtn.title = pileOn ? "take the pile filter off" : "only what is in the pile, in the grid on its own";
     renderInspector();                                 // the inspector follows the selection
+    schedulePlan();                                    // ===== export summary: what Export would do now =====
   }
 
   function selectAllShown() {
@@ -2030,6 +2666,153 @@
   }
   $("#selectall").addEventListener("click", selectAllShown);
   selectAllTop.addEventListener("click", selectAllShown);
+
+  // ===== the pile: the selection IS the pile, kept per shoot in the index (/api/pile), so it survives a new search, a
+  // reload and a restart. state.selected is a Set whose add, delete and clear also queue the change; the queue goes
+  // to the server as one call a beat later (a select all is one call, not one per tile), and calls go one after the
+  // other so the server applies them in the order they were made. =====
+  var pileShowBtn = $("#pile-show");
+  var pileQueue = { add: new Set(), rem: new Set(), clear: false };
+  var pileTimer = null, pileRoot = null, pileChain = Promise.resolve();
+  function pileSet(ids) {
+    var s = new Set(ids || []);
+    var add = Set.prototype.add, del = Set.prototype.delete, clr = Set.prototype.clear;
+    s.add = function (id) { if (!this.has(id)) { pileQueue.rem.delete(id); pileQueue.add.add(id); pileSoon(); } return add.call(this, id); };
+    s.delete = function (id) { if (this.has(id)) { pileQueue.add.delete(id); pileQueue.rem.add(id); pileSoon(); } return del.call(this, id); };
+    s.clear = function () { pileQueue = { add: new Set(), rem: new Set(), clear: true }; pileSoon(); return clr.call(this); };
+    return s;
+  }
+  function pileSoon() {
+    pileRoot = state.folder && state.folder.root;
+    if (pileTimer) clearTimeout(pileTimer);
+    pileTimer = setTimeout(flushPile, 150);
+  }
+  function flushPile() {
+    pileTimer = null;
+    var q = pileQueue, root = pileRoot;
+    pileQueue = { add: new Set(), rem: new Set(), clear: false };
+    if (!root || root !== (state.folder && state.folder.root)) return;   // the shoot changed under the queue: it was that shoot's
+    var body = JSON.stringify({ add: Array.from(q.add), remove: Array.from(q.rem) });
+    var post = function () { return api("/api/pile", { method: "POST", headers: { "Content-Type": "application/json" }, body: body }); };
+    pileChain = pileChain.catch(function () { /* one failed call does not stop the next */ }).then(function () {
+      return q.clear ? api("/api/pile", { method: "DELETE" }).then(function (d) { return (q.add.size || q.rem.size) ? post() : d; }) : post();
+    }).then(function (d) {
+      if (root !== (state.folder && state.folder.root)) return;
+      state.pile = d;
+      updateSelbar();
+    }).catch(function (err) { setStatus("could not keep the pile: " + err.message); });
+  }
+  function loadPile() {
+    if (!(state.folder && state.folder.root)) return Promise.resolve();
+    var root = state.folder.root;
+    return api("/api/pile").then(function (d) {
+      if (root !== (state.folder && state.folder.root)) return;
+      state.pile = d;
+      state.selected = pileSet(d.ids || []);
+      $$(".card", gridEl).forEach(function (c) { c.classList.toggle("selected", state.selected.has(Number(c.dataset.id))); });
+      updateSelbar();
+    }).catch(function () { /* an older server has no pile: the selection simply is not kept */ });
+  }
+  // Show the pile on its own, or go back: on its own means the whole pile, whatever was filtered before, and going back
+  // puts those filters back. The pile is a chip like any other, so the history walks it too.
+  var pileBack = [];
+  pileShowBtn.addEventListener("click", function () {
+    var next;
+    if (chipOf("pile")) {
+      next = pileBack.length ? pileBack : state.chips.filter(function (c) { return c.kind !== "pile"; });
+      pileBack = [];
+    } else {
+      pileBack = state.chips.slice();
+      next = [{ kind: "pile", key: "pile", from: null }];
+    }
+    applyChips(next);
+    runSearch(ctxParams(state.chips));
+    navPush();
+  });
+  // ===== end the pile =====
+
+  // ===== export summary: one line above the Export button, "34 clips, 12.4 GB, to /Volumes/..., about 6 min".
+  // /api/export/plan does the counting (RAW siblings, the folder, the free space, the time); it is asked again a
+  // beat after the pile or any export control changes. =====
+  var planEl = $("#export-plan");
+  var planTimer = null, planSeq = 0, planKey = null;
+  function schedulePlan() {
+    if (planTimer) clearTimeout(planTimer);
+    planTimer = setTimeout(loadPlan, 250);
+  }
+  function loadPlan() {
+    planTimer = null;
+    var ids = Array.from(state.selected);
+    if (!ids.length || !(state.folder && state.folder.root)) { renderPlan(null); return; }
+    var prefs = exportPrefs();
+    var drive = exportDest() === "drive";
+    // every grid render calls this; with a big pile and nothing changed, the last answer stands
+    var key = JSON.stringify([ids.length, ids.reduce(function (a, b) { return a + b; }, 0), prefs, drive, $("#exportname").value.trim(), state.folder.root, state.exportDest && state.exportDest.path]);
+    if (key === planKey && !planEl.hidden) return;
+    planKey = key;
+    var ticket = ++planSeq;
+    api("/api/export/plan", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids, name: $("#exportname").value.trim() || "export", mode: drive ? "copy" : prefs.mode,
+                             web_size: drive ? null : prefs.web_size, include_raw: drive ? $("#drive-include-raw").checked : prefs.include_raw }) })
+      .then(function (d) { if (ticket === planSeq) renderPlan(d, drive, drive ? "copy" : prefs.mode); })
+      .catch(function () { if (ticket === planSeq) renderPlan(null); });
+  }
+  function planWhat(d) {
+    var parts = [];
+    if (d.photos) parts.push(num(d.photos) + (d.photos === 1 ? " photo" : " photos"));
+    if (d.videos) parts.push(num(d.videos) + (d.videos === 1 ? " clip" : " clips"));
+    var raw = d.files - d.n;
+    return parts.join(" and ") + (raw > 0 ? " + " + num(raw) + " RAW" : "");
+  }
+  // The part of the path worth reading in a line: the disk when it is a plugged-in one, then <shoot>/<name>. The whole
+  // path is the line's tooltip.
+  function planWhere(path) {
+    var parts = String(path || "").split("/").filter(Boolean);
+    var tail = parts.slice(-2).join("/");
+    var disk = parts[0] === "Volumes" && parts.length > 3 ? parts[1] : null;
+    return (disk ? disk + "/" : "") + (parts.length > (disk ? 4 : 2) ? "…/" : "") + tail;
+  }
+  function planTime(sec) {
+    if (sec < 60) return "under a minute";
+    var m = Math.round(sec / 60);
+    if (m < 90) return "about " + m + " min";
+    return "about " + Math.floor(m / 60) + " h " + (m % 60) + " min";
+  }
+  // Three parts, so a narrow bar shortens the folder (its tooltip has it whole) and never the count or the time.
+  function setPlan(head, where, tail, title, err) {
+    planEl.innerHTML = "";
+    [[head, "plan-head"], [where, "plan-where"], [tail, "plan-tail"]].forEach(function (p) {
+      if (!p[0]) return;
+      var s = document.createElement("span"); s.className = p[1]; s.textContent = p[0]; planEl.appendChild(s);
+    });
+    planEl.title = title || "";
+    planEl.classList.toggle("err", !!err);
+  }
+  function renderPlan(d, drive, mode) {
+    if (!d || !d.n) { setPlan("", "", "", ""); planEl.hidden = true; return; }
+    planEl.hidden = false;
+    var what = planWhat(d);
+    if (drive) {                                       // the Drive strip owns the folder and the upload speed is the network's
+      setPlan(what + ", " + bytes(d.bytes) + ", up to Google Drive", "", "", "how long depends on the connection, so no time is guessed");
+      return;
+    }
+    if (d.dest_error) { setPlan(what + ": ", d.dest_error, "", d.dest_error, true); return; }
+    var where = "to " + planWhere(d.dest);
+    if (mode === "copy" && d.fits === false) {
+      setPlan(what + ", " + bytes(d.bytes) + ": only " + bytes(d.free) + " free ", where, "", d.dest, true);
+      return;
+    }
+    if (mode === "symlink") { setPlan(what + ", links ", where, ", a few seconds", d.dest); return; }
+    if (mode === "csv") { setPlan(what + ", one CSV ", where, "", d.dest); return; }
+    var measured = d.basis === "measured";
+    setPlan(what + ", " + bytes(d.bytes) + ", ", where, ", " + planTime(d.seconds) + (measured ? " (measured)" : " (estimate)"),
+      d.dest + "\n" + (measured ? "timed on this shoot's last export" :
+      "no export from this shoot has been timed yet, so this assumes 50 MB/s off the disk and 0.75 s a resized photo, both on the slow side") +
+      (d.web ? "\n" + num(d.web) + " photos re-encoded to the web size" : ""));
+  }
+  selbar.addEventListener("change", schedulePlan);    // every export control in the bar: mode, size, RAW, preset, destination
+  $("#exportname").addEventListener("input", schedulePlan);
+  // ===== end export summary =====
 
   $("#clearsel").addEventListener("click", function () {
     state.selected.clear();
@@ -2622,7 +3405,7 @@
       return;
     }
     // ===== navigation keys: command-1 to command-5 switch tabs from anywhere; Esc on a filtered Search goes back =====
-    if (cmd && !e.shiftKey && !e.altKey && /^[1-5]$/.test(e.key) && state.folder && state.folder.root) {
+    if (cmd && !e.shiftKey && !e.altKey && /^[1-6]$/.test(e.key) && state.folder && state.folder.root) {
       e.preventDefault();
       goView(VIEWS[Number(e.key) - 1]);
       return;
@@ -2986,6 +3769,10 @@
   var inspBody = $("#insp-body");
   var inspToggle = $("#inspector-toggle");
   var INSP_KEY = "sorted.inspector";
+  function shutterText(t) {
+    if (t >= 0.95) return (Math.round(t * 10) / 10) + " s";
+    return "1/" + Math.round(1 / t);
+  }
   function inspRow(k, v, cls) {
     var row = document.createElement("div"); row.className = "insp-row";
     var kk = document.createElement("span"); kk.className = "k"; kk.textContent = k;
@@ -3056,6 +3843,18 @@
     if (r.taken_at) info.body.appendChild(inspRow("Taken", r.taken_at.replace("T", " ")));
     if (r.camera) info.body.appendChild(inspRow("Camera", cameraName(r.camera) !== r.camera ? cameraName(r.camera) + " (" + r.camera + ")" : r.camera));
     if (r.width && r.height) info.body.appendChild(inspRow("Size", r.width + " × " + r.height));
+    // ===== shoot modes: what the camera wrote about the exposure, one row each, only what the file says =====
+    if (r.kind !== "video") {
+      if (r.lens) info.body.appendChild(inspRow("Lens", r.lens));
+      if (r.focal_mm) info.body.appendChild(inspRow("Focal length", Math.round(r.focal_mm) + " mm"));
+      if (r.exposure_s) info.body.appendChild(inspRow("Shutter", shutterText(r.exposure_s)));
+      if (r.fnumber) info.body.appendChild(inspRow("Aperture", "f/" + (Math.round(r.fnumber * 10) / 10)));
+      if (r.iso) info.body.appendChild(inspRow("ISO", String(r.iso)));
+      if (r.ev_bias) info.body.appendChild(inspRow("EV comp", (r.ev_bias > 0 ? "+" : "") + (Math.round(r.ev_bias * 10) / 10)));
+      if (r.flash >= 0) info.body.appendChild(inspRow("Flash", r.flash & 1 ? "fired" : "none recorded"));
+      if (r.exp_mode === 2) info.body.appendChild(inspRow("Drive", "auto bracket, as the camera says"));
+    }
+    // ===== end shoot modes =====
     if (r.kind === "video") info.body.appendChild(inspRow("Duration", mmss(r.duration)));
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
     var sharpRow = inspRow("Sharpness", sharpPct + "%");
@@ -3067,6 +3866,9 @@
     // ===== end inspector focus label =====
     if (r.group) info.body.appendChild(groupRow(r));   // ===== duplicates and bursts: the copies toggle, pick the sharpest =====
     cats.body.appendChild(inspRow("Category", r.category ? r.category + (r.category_score != null ? "  " + Math.round(r.category_score * 100) + "%" : "") : "unclassified"));
+    // ===== every category it fits: the runners-up the classifier kept (classify.SECOND_MIN_PROB) =====
+    var alsoKeys = Object.keys(r.also || {});
+    if (alsoKeys.length) cats.body.appendChild(inspRow("Also fits", alsoKeys.map(function (k) { return k + "  " + Math.round(r.also[k] * 100) + "%"; }).join(", ")));
     if (r.cluster) cats.body.appendChild(inspRow("Discovered", /^group \d+$/.test(r.cluster) ? "Unnamed " + r.cluster : r.cluster));
     if (r.sure === false) cats.body.appendChild(inspRow("Confidence", Math.round((r.confidence || 0) * 100) + "%, less sure"));
     cats.body.appendChild(inspRow("Aerial", r.aerial ? "yes" : "no"));
@@ -3086,20 +3888,31 @@
   // unfolds them into their own tiles (and folds them back). Bursts: "12 frames", "pick the sharpest" selects the frame
   // with the best sharpness score (the tile swaps to it while folded), and the same unfold link. Export follows the
   // selection, so a folded set exports the shown one and an unfolded one exports every tile picked. =====
+  // ===== shoot modes: a bracket's badge reads its stops, "bracket -2 0 +2", up to three frames; a longer one its length =====
+  function evSorted(g) { return (g.ev || []).slice().sort(function (a, b) { return parseFloat(a) - parseFloat(b); }); }
+  function groupBadge(g) {
+    if (g.kind === "burst") return "burst of " + g.n;
+    if (g.kind === "bracket") return g.n <= 3 ? "bracket " + evSorted(g).join(" ") : "bracket of " + g.n;
+    return "x" + g.n;
+  }
+  // ===== end shoot modes =====
   function groupRow(r) {
-    var g = r.group, burst = g.kind === "burst";
-    var row = inspRow(burst ? "Burst" : "Copies", burst ? g.n + " frames" : g.n + " on disk");
+    var g = r.group, burst = g.kind === "burst", bracket = g.kind === "bracket", seq = burst || bracket;
+    var row = inspRow(burst ? "Burst" : bracket ? "Bracket" : "Copies",
+                      burst ? g.n + " frames" : bracket ? g.n + " frames, " + evSorted(g).join(" ") + " stops" : g.n + " on disk");
     var acts = document.createElement("span"); acts.className = "insp-acts";
-    if (burst) {
+    if (seq) {
+      var target = bracket ? g.base : g.sharpest;
       var pick = document.createElement("button");
-      pick.type = "button"; pick.className = "link small"; pick.textContent = "pick the sharpest";
-      pick.title = "select the frame with the best sharpness score" + (g.sharpest === r.id ? " (this one)" : "");
-      pick.addEventListener("click", function () { pickSharpest(r); });
+      pick.type = "button"; pick.className = "link small";
+      pick.textContent = bracket ? "pick the middle exposure" : g.best_by === "eyes" ? "pick the sharpest eyes" : "pick the sharpest";
+      pick.title = (bracket ? "select the frame shot at the middle exposure" : g.best_by === "eyes" ? "select the frame whose eyes are sharpest" : "select the frame with the best sharpness score") + (target === r.id ? " (this one)" : "");
+      pick.addEventListener("click", function () { pickSharpest(r, target); });
       acts.appendChild(pick);
     }
     var tog = document.createElement("button");
     tog.type = "button"; tog.className = "link small";
-    tog.textContent = state.showCopies ? (burst ? "fold the burst" : "fold copies") : (burst ? "show every frame" : "show copies");
+    tog.textContent = state.showCopies ? (seq ? "fold the " + (bracket ? "bracket" : "burst") : "fold copies") : (seq ? "show every frame" : "show copies");
     tog.title = state.showCopies ? "one tile per set again" : "every copy and frame as its own tile, selectable and exportable one by one";
     tog.addEventListener("click", function () { setShowCopies(!state.showCopies); });
     acts.appendChild(tog);
@@ -3121,10 +3934,10 @@
   var showCopiesBox = $("#show-copies");
   if (showCopiesBox) showCopiesBox.addEventListener("change", function () { setShowCopies(showCopiesBox.checked); });
 
-  function pickSharpest(r) {
+  function pickSharpest(r, target) {
     var g = r.group;
-    var best = null;
-    for (var i = 0; i < g.members.length; i++) if (g.members[i].id === g.sharpest) best = g.members[i];
+    var best = null, want = target != null ? target : g.sharpest;
+    for (var i = 0; i < g.members.length; i++) if (g.members[i].id === want) best = g.members[i];
     if (!best) return;
     g.members.forEach(function (m) { state.selected.delete(m.id); });
     if (state.showCopies || best.id === r.id) {
@@ -3145,7 +3958,7 @@
     }
     lastClickedId = best.id;
     updateSelbar();
-    setStatus("picked " + best.rel.split("/").pop() + ", the sharpest of " + g.n);
+    setStatus("picked " + best.rel.split("/").pop() + (g.kind === "bracket" ? ", the middle exposure of " : ", the sharpest of ") + g.n);
   }
   // ===== end duplicates and bursts =====
   function setInspector(open) {
@@ -3756,7 +4569,7 @@
     loadFacets();                                      // ===== slow motion: the count and the frame rate read ride along =====
     return api("/api/categories").then(function (counts) {
       state.categories = { fixed: (counts && counts.fixed) || {}, discovered: (counts && counts.discovered) || {},
-                           drone: (counts && counts.drone) || 0 };
+                           drone: (counts && counts.drone) || 0, also: (counts && counts.also) || {} };
       renderCategoryTiles();
     }).catch(function (err) {
       setStatus("could not load categories: " + err.message);
@@ -3799,6 +4612,14 @@
     var nameEl = document.createElement("span"); nameEl.className = "cat-name" + (unnamed ? " unnamed" : "");
     nameEl.textContent = unnamed ? "Unnamed " + cat : cat;
     var countEl = document.createElement("span"); countEl.className = "cat-count"; countEl.textContent = count;
+    // ===== every category it fits: how much of the number is rows filed under another category that fit here too =====
+    var also = !cluster && !drone && state.categories.also ? state.categories.also[cat] || 0 : 0;
+    if (also) {
+      countEl.textContent = num(count - also);           // filed here, then "+168" for the ones that also fit
+      var alsoEl = document.createElement("span"); alsoEl.className = "cat-also"; alsoEl.textContent = "+" + num(also);
+      countEl.appendChild(alsoEl);
+      countEl.title = num(count) + " in all: " + num(count - also) + " filed here, " + num(also) + " filed under another category that fit here too";
+    }
     var barEl = document.createElement("span"); barEl.className = "cat-bar";
     label.appendChild(nameEl); label.appendChild(countEl); label.appendChild(barEl);
     label.title = "show " + cat + " in the grid";
@@ -4000,7 +4821,7 @@
   // categorise and focus are jobs of their own that report through the same panel, so they get words too;
   // anything else falls through to its own stage name rather than to silence.
   var STAGE_TEXT = { scan: "finding files", features: "reading photos and clips", faces: "finding faces",
-                     embed: "learning what is in each shot", categorise: "sorting the shots into categories",
+                     embed: "learning what is in each shot", categorise: "sorting the shots into categories", products: "finding the products",
                      focus: "checking what is in focus", save: "saving the project file", clipfaces: "finding faces in clips" };
   // Embedding is three populations at three speeds per item: a photo is one frame, a clip's vector is the mean of
   // six to thirty sampled frames, and a shot inside a clip mostly reuses a frame its clip already learned. Naming
@@ -4069,6 +4890,7 @@
     state.progressTimer = setInterval(function () {
       api("/api/progress").then(function (p) {
         setScanning(p.running);
+        if (window.ScanScene) ScanScene.progress(p);   // ===== the scan desktop: a scan started here is drawn at once =====
         progressEl.textContent = formatProgress(p);
         progressEl.style.setProperty("--p", p.total ? (p.done || 0) / p.total : 0);   // the 4 px bar under the readout
         renderProgressCurrent(p.running ? p : null);
@@ -4226,7 +5048,7 @@
   // ===== end the project file needs a place =====
 
   $("#start-index").addEventListener("click", function () {
-    startIndexJob({ faces: $("#faces").checked, retry_errors: $("#retry-errors").checked }, "scan started…");
+    startIndexJob({ faces: $("#faces").checked, products: $("#scan-products").checked, retry_errors: $("#retry-errors").checked }, "scan started…");
   });
   // ===== end index job starter =====
 
@@ -4346,7 +5168,7 @@
   }
   scanFix.addEventListener("click", function () {
     if (healthFix === "continue") return continueScan();
-    if (healthFix === "rescan") return startIndexJob({ faces: $("#faces").checked, retry_errors: false }, "scanning the new files…");
+    if (healthFix === "rescan") return startIndexJob({ faces: $("#faces").checked, products: $("#scan-products").checked, retry_errors: false }, "scanning the new files…");
     if (healthFix === "faces") return scanFacesNow();
     if (healthFix === "focus") return checkFocusBtn.click();
     if (healthFix === "places") { goView("places"); return $("#places-read").click(); }
@@ -4541,22 +5363,25 @@
   // ===== welcome: the two buttons, the faces tick, the How it works link =====
   // Scan a disk or folder: the folder picker; a folder with nothing scanned yet starts the scan at once with the
   // welcome's faces choice (mirrored into the Scan tab's box); a scanned one just opens. Open a project file: importBundle.
-  var welcomeFaces = $("#welcome-faces");
+  var welcomeFaces = $("#welcome-faces"), welcomeProducts = $("#welcome-products");
   // Pick a folder and, if sorted has never read it, start the scan there and then. The welcome button, the
   // shoots menu and the Scan tab all come through here; the welcome's faces tick is the one the welcome
   // screen shows, the Scan tab's box everywhere else (they mirror each other).
-  function scanAnotherFolder(facesBox) {
-    var box = facesBox || $("#faces");
+  function scanAnotherFolder(facesBox, productsBox) {
+    var box = facesBox || $("#faces"), pbox = productsBox || $("#scan-products");
     return openFolderPicker().then(function (info) {
       if (!info || !folderOpen(info) || info.indexed) return info;
       $("#faces").checked = box.checked;
       welcomeFaces.checked = box.checked;
-      startIndexJob({ faces: box.checked, retry_errors: false }, "scan started…");
+      $("#scan-products").checked = pbox.checked;
+      welcomeProducts.checked = pbox.checked;
+      startIndexJob({ faces: box.checked, products: pbox.checked, retry_errors: false }, "scan started…");
       return info;
     });
   }
-  $("#welcome-scan").addEventListener("click", function () { scanAnotherFolder(welcomeFaces); });
-  $("#scan-another").addEventListener("click", function () { scanAnotherFolder($("#faces")); });
+  $("#welcome-scan").addEventListener("click", function () { scanAnotherFolder(welcomeFaces, welcomeProducts); });
+  $("#welcome-live").addEventListener("click", function () { window.open("/ui/live.html", "sorted-live"); });
+  $("#scan-another").addEventListener("click", function () { scanAnotherFolder($("#faces"), $("#scan-products")); });
   $("#welcome-load").addEventListener("click", importBundle);
   $("#welcome-help").addEventListener("click", function () { setHelp(true); });
   // ===== end welcome =====
@@ -4931,6 +5756,7 @@
     loadMarkCounts();                                  // ===== marks: the Ratings numbers =====
     placeCount();                                      // ===== places: the count next to the tab =====
     loadPrefs(); loadExports();                        // ===== export presets and history =====
+    loadPile();                                        // ===== the pile: what was picked last time on this shoot =====
     // ===== navigation boot: a person filter goes out explicitly, the select has no options yet; a saved name is a find =====
     applyChips(chips);
     if (chipOf("person", chips)) ensurePeople();        // a deep link filtering by person: the chip would read person_126 without the names

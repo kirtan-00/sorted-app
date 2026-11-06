@@ -96,6 +96,25 @@ PROMPTS = prompts_for(CLIP_MODEL)
 # A people photo keeps its best scene as the guess when the scene reached this much of the softmax;
 # below it the person is the whole picture (a studio portrait) and there is no scene to keep.
 SCENE_GUESS_MIN_PROB = 0.15
+# Every category a row fits, not only the winner (backlog item 13). A clip that is 0.55 interview and 0.41
+# people is both, and filing it only under interview hides it from someone browsing people. A runner-up is
+# kept as a secondary when it reaches this much of the softmax, and clears MIN_COSINE as the winner had to.
+#
+# It is the same number as SCENE_GUESS_MIN_PROB on purpose, not a new knob: that line already answers "when
+# is a second category worth listing a row under" for every people photo with a scene behind it, and has
+# shipped since the face rule. Measured on the 476 pinned segments of NSG_26 Part 2 (tests/test_segments.py):
+# under SigLIP 68 of the 458 filed segments gain at least one more category (14.8%, 78 tags, so 0.17 more per
+# segment), and the "other" bin stays at 18. The one axis with hand labels behind it is people: of the 17
+# segments filed under a scene that gain people or interview, 16 have a person in frame (94%), against 60% of
+# all 227 scene-filed segments, so the runner-up is information and not noise. At 0.20 it is 48 segments and
+# 11 of 11 people right; the two precisions cannot be told apart at that n, and 0.15 is the one with a
+# precedent. Under MobileCLIP the same rule tags 118 segments (125 tags; its softmax is flatter at its
+# temperature) with 20 of 20 people right against a 55% base rate.
+#
+# Rows the gates sent to "other" get no secondaries: their one guess already lists them under the category
+# they most resemble as less sure, and tagging them further would fill every tile's less sure band with
+# the frames the classifier could not read.
+SECOND_MIN_PROB = SCENE_GUESS_MIN_PROB
 
 CATEGORY_FAMILY = {"interview": "people"}
 # A pseudo-category, not one of CATEGORIES: it competes in the same softmax so things that look like
@@ -371,8 +390,9 @@ def _prompt_matrix(embedder) -> tuple[list[str], np.ndarray, list[int]]:
     return names, embedder.encode_text(texts), owner
 
 def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
-    """Per row of M: (category name or FALLBACK, softmax score, margin, guess, guess score, probs) after the
-    confidence gates. margin is the winner's lead over the best category of a DIFFERENT family
+    """Per row of M: (category name or FALLBACK, softmax score, margin, guess, guess score, probs, cleared) after
+    the confidence gates. cleared is every real category at SECOND_MIN_PROB or more whose own cosine clears
+    MIN_COSINE, the winner included: what also_of picks the secondaries from. margin is the winner's lead over the best category of a DIFFERENT family
     (CATEGORY_FAMILY: a sub-category does not compete with its parent for the margin gate; "__other__" is
     its own family). guess is the best REAL category and its probability whatever the gates decided, so a
     photo filed under "other" can still be shown under its guess as "less sure"; probs is every real
@@ -396,8 +416,19 @@ def _score(M: np.ndarray, T: np.ndarray, owner: np.ndarray, names: list[str]):
             cat = FALLBACK
         real = [i for i in order if names[i] != "__other__"]
         guess, guess_score = names[real[0]], float(probs[k, real[0]])
-        out.append((cat, score, margin, guess, guess_score, {names[i]: float(probs[k, i]) for i in real}))
+        cleared = {names[i]: float(probs[k, i]) for i in real
+                   if probs[k, i] >= SECOND_MIN_PROB and per_cat[k, i] >= MIN_COSINE}
+        out.append((cat, score, margin, guess, guess_score, {names[i]: float(probs[k, i]) for i in real}, cleared))
     return out
+
+def also_of(cat: str, guess: str | None, cleared: dict[str, float]) -> dict[str, float]:
+    """The secondaries of a row filed under cat: the categories in cleared it is not already listed under.
+    Not cat itself; not the guess of a people row (search.category_match lists a people row under its scene
+    already); nothing at all for a row filed under "other" (see SECOND_MIN_PROB)."""
+    if cat == FALLBACK:
+        return {}
+    skip = {cat} | ({guess} if cat == "people" and guess else set())
+    return {c: p for c, p in cleared.items() if c not in skip}
 
 def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict], list[dict]]:
     """(photo results, segment results). Photos and videos: rel, sibling, category, score, margin, n_faces,
@@ -421,7 +452,7 @@ def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict],
         r = rows.get(pid)
         if r is None:
             continue
-        cat, score, margin, guess, guess_score, probs = scored[k]
+        cat, score, margin, guess, guess_score, probs, cleared = scored[k]
         if r["kind"] == "video" and (r["duration"] or 0.0) >= INTERVIEW_MIN_DURATION_S and {cat, guess} & {"people", "interview"}:
             score = max(probs.get("people", 0.0), probs.get("interview", 0.0))
             cat, guess, guess_score = "interview", "interview", score
@@ -440,7 +471,8 @@ def _classify_all(root: Path, people_by_faces: bool = True) -> tuple[list[dict],
             cat, score = "people", 1.0
         photos.append(dict(id=pid, rel=r["rel"], sibling=r["sibling"], category=cat,
                            score=round(score, 4), margin=round(margin, 4), n_faces=r["n_faces"],
-                           guess=guess, guess_score=round(guess_score, 4)))
+                           guess=guess, guess_score=round(guess_score, 4),
+                           also={c: round(p, 4) for c, p in also_of(cat, guess, cleared).items()}))
     for k, sid in enumerate(seg_ids.tolist()):
         cat, score = scored[len(ids) + k][:2]
         segments.append(dict(id=sid, photo_id=seg_photo.get(sid), category=cat, score=round(score, 4)))
@@ -558,6 +590,7 @@ def classify_and_store(root: Path, people_by_faces: bool = True) -> dict[str, in
                       [(r["category"], r["score"], r["guess"], r["guess_score"], r["id"]) for r in results])
     conn.executemany("UPDATE segments SET category=?, category_score=? WHERE id=?",
                       [(r["category"], r["score"], r["id"]) for r in segs])
+    db.replace_photo_categories(conn, [(r["id"], c, p) for r in results for c, p in sorted(r["also"].items())])
     conn.commit()
     flag_aerial(root)
     classify_shot_size(root)

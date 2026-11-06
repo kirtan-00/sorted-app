@@ -81,6 +81,29 @@ def test_interview_segments_do_not_regress(stored):
     assert n >= floor, f"{CLIP_MODEL} files {n} of 476 segments as interview, below the floor of {floor}"
 
 
+def test_secondary_categories_on_the_stored_run(stored):
+    """Every category a frame fits, measured on the same 476 (classify.SECOND_MIN_PROB says why 0.15).
+
+    Pinned exactly, because the rule is deterministic over frozen vectors: a change to the floor or to
+    also_of shows up here as a number to read, not as drift. "other" never grows and never gains a tag.
+    The precision check is the one with hand labels behind it (segments-faces.npz, label_people): a scene
+    frame that also gets people or interview must nearly always have a person in it."""
+    names = list(stored["names"])
+    out = C._score(stored["M"].astype(np.float32), stored["T"].astype(np.float32), stored["owner"], names)
+    also = [C.also_of(o[0], o[3], o[6]) for o in out]
+    want = {"ViT-B-16-SigLIP": (68, 78, 18), "MobileCLIP-S1": (118, 125, 19)}[CLIP_MODEL]
+    got = (sum(1 for a in also if a), sum(len(a) for a in also), sum(1 for o in out if o[0] == C.FALLBACK))
+    assert got == want, f"{CLIP_MODEL}: (segments gaining a category, tags, other) = {got}, measured {want}"
+    assert not any(a for o, a in zip(out, also) if o[0] == C.FALLBACK)
+    faces = Path(__file__).parent / "fixtures" / "segments-faces.npz"
+    if faces.is_file():
+        with np.load(faces, allow_pickle=False) as f:
+            people = f["label_people"]
+        hits = [k for k, o in enumerate(out) if o[0] not in ("people", "interview", C.FALLBACK)
+                and {"people", "interview"} & set(also[k])]
+        assert len(hits) >= 15 and sum(people[k] > 0 for k in hits) / len(hits) >= 0.9
+
+
 def test_no_face_rule_or_duration_rule_reaches_a_segment():
     """Segments are the bare softmax, which is why the prompts carry all the weight here.
 

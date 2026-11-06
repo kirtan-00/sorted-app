@@ -128,11 +128,78 @@ def _subifd_size(path: Path, offsets) -> tuple[int, int] | None:
     except Exception:
         return None
 
+# ===== camera settings: what the camera recorded about the exposure, from the standard EXIF sub-IFD only =====
+# Both readers fill the same keys. MakerNote (drive mode, Sony's bracket step, focus distance) is NOT read: exifread
+# with details=True costs 220 to 415 ms on a 61 MP Sony JPG (measured on nine ILCE-7RM5 frames), against about
+# 83 ms for everything else a photo costs at index time, and Sony keeps drive mode in enciphered tags anyway.
+# ExposureMode is the standard tag and its value 2 is the camera's own "auto bracket" flag; that is the one drive
+# hint there is. lens is '' when the file was read and names no lens, so "never read" (NULL) stays tellable apart.
+# flash is the raw EXIF Flash value, bit 0 meaning it fired; -1 when the file was read and has no such tag, NULL when
+# never read. A radio trigger can leave bit 0 clear on a frame the strobe lit, so clear means "none recorded", no more.
+SETTING_KEYS = ("exposure_s", "fnumber", "iso", "ev_bias", "focal_mm", "lens", "exp_mode", "subsec", "flash")
+
+def _pos(x) -> float | None:
+    v = _rational(x)
+    return v if v is not None and math.isfinite(v) and v > 0 else None
+
+def _subsec(x) -> float | None:
+    """SubSecTimeOriginal ("400", "21") as a fraction of a second: the digits are decimal places."""
+    d = "".join(ch for ch in str(x or "") if ch.isdigit())
+    return float("0." + d) if d else None
+
+def _settings_from_pil(exif_ifd, out: dict) -> None:
+    try:
+        g = exif_ifd.get
+        out["exposure_s"] = _pos(g(0x829A)); out["fnumber"] = _pos(g(0x829D))
+        iso = g(0x8827)
+        iso = iso[0] if isinstance(iso, (tuple, list)) and iso else iso
+        out["iso"] = int(iso) if isinstance(iso, (int, float)) and iso > 0 else None
+        b = _rational(g(0x9204)) if g(0x9204) is not None else None
+        out["ev_bias"] = round(b, 2) if b is not None and math.isfinite(b) else None
+        out["focal_mm"] = _pos(g(0xA405)) or _pos(g(0x920A))      # the 35 mm equivalent when the camera wrote one
+        out["lens"] = _clean(g(0xA434)) or ""
+        m = g(0xA402)
+        out["exp_mode"] = int(m) if isinstance(m, int) else None
+        out["subsec"] = _subsec(g(0x9291))
+        fl = g(0x9209)
+        out["flash"] = int(fl) if isinstance(fl, int) else None
+    except Exception:
+        pass
+
+def _settings_from_exifread(tags, out: dict) -> None:
+    def first(key):
+        v = tags.get(key)
+        return v.values[0] if v is not None and getattr(v, "values", None) else None
+    try:
+        if out["exposure_s"] is None: out["exposure_s"] = _pos(first("EXIF ExposureTime"))
+        if out["fnumber"] is None: out["fnumber"] = _pos(first("EXIF FNumber"))
+        if out["iso"] is None:
+            iso = first("EXIF ISOSpeedRatings")
+            out["iso"] = int(iso) if isinstance(iso, int) and iso > 0 else None
+        if out["ev_bias"] is None:
+            b = _rational(first("EXIF ExposureBiasValue"))
+            out["ev_bias"] = round(b, 2) if b is not None and math.isfinite(b) else None
+        if out["focal_mm"] is None:
+            out["focal_mm"] = _pos(first("EXIF FocalLengthIn35mmFilm")) or _pos(first("EXIF FocalLength"))
+        if not out["lens"]:
+            out["lens"] = _clean(tags.get("EXIF LensModel")) or ""
+        if out["exp_mode"] is None:
+            m = first("EXIF ExposureMode")
+            out["exp_mode"] = int(m) if isinstance(m, int) else None
+        if out["subsec"] is None:
+            out["subsec"] = _subsec(tags.get("EXIF SubSecTimeOriginal"))
+        if out["flash"] is None:
+            fl = first("EXIF Flash")
+            out["flash"] = int(fl) if isinstance(fl, int) else None
+    except Exception:
+        pass
+# ===== end camera settings =====
+
 def exif_info(path: Path) -> dict:
     """taken_at, camera, width, height, lat, lon from EXIF (PIL first, exifread as the fallback for what PIL
     cannot read), plus aerial: a DJI Make (Exif.Image.Make) or a DJI_ filename, deterministic, no model."""
     out = {"taken_at": None, "camera": None, "width": None, "height": None, "lat": None, "lon": None,
-           "aerial": Path(path).name.upper().startswith("DJI_")}
+           "aerial": Path(path).name.upper().startswith("DJI_"), **{k: None for k in SETTING_KEYS}}
     try:
         with Image.open(path) as im:
             out["width"], out["height"] = im.size
@@ -151,6 +218,7 @@ def exif_info(path: Path) -> dict:
                 out["taken_at"] = d.replace(":", "-") + "T" + t
             make, model = _clean(ex.get(0x010F)), _clean(ex.get(0x0110))
             out["camera"] = _camera(make, model)
+            _settings_from_pil(ex.get_ifd(0x8769), out)
             if make and make.upper().startswith("DJI"):
                 out["aerial"] = True
             # GPS IFD (0x8825): tag 1 is the latitude ref (N/S) and 2 its degrees, minutes, seconds,
@@ -164,6 +232,8 @@ def exif_info(path: Path) -> dict:
                 pass
     except Exception:
         _exif_fallback(path, out)
+    if out["flash"] is None:
+        out["flash"] = -1
     return out
 
 def _exif_fallback(path: Path, out: dict) -> None:
@@ -189,6 +259,7 @@ def _exif_fallback(path: Path, out: dict) -> None:
         make, model = text("Image Make"), text("Image Model")
         if out["camera"] is None:
             out["camera"] = _camera(make, model)
+        _settings_from_exifread(tags, out)
         if make and make.upper().startswith("DJI"):
             out["aerial"] = True
         if out["lat"] is None:

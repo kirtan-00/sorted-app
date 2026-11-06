@@ -10,6 +10,7 @@
 <link rel="icon" href="/ui/favicon-32.png" type="image/png" sizes="32x32">
 <link rel="apple-touch-icon" href="/ui/favicon-180.png">
 <link rel="stylesheet" href="/ui/style.css">
+<link rel="stylesheet" href="/ui/scene.css">
 </head>
 <body>
 <header>
@@ -80,6 +81,12 @@
     <button type="button" data-view="places" title="where the shoot was shot">
       <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M1.7 8h12.6"/><path d="M8 1.7c1.8 2 2.7 4 2.7 6.3s-.9 4.3-2.7 6.3c-1.8-2-2.7-4-2.7-6.3S6.2 3.7 8 1.7z"/></svg><span>Places</span><span id="nav-place-count" class="nav-count"></span>
     </button>
+    <button type="button" id="nav-live" title="open the live view: shots land here as the camera takes them, for you and a TV">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="9" rx="1.5"/><path d="M5.5 14.5h5"/><circle cx="8" cy="7.5" r="2"/></svg><span>Live</span>
+    </button>
+    <button type="button" data-view="products" title="a product shoot: each product, its colours and its angles">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l5.8 3.1v6.8L8 14.5l-5.8-3.1V4.6z"/><path d="M2.2 4.6L8 7.7l5.8-3.1M8 7.7v6.8"/></svg><span>Products</span><span id="nav-product-count" class="nav-count"></span>
+    </button>
     <button type="button" data-view="index" title="scan this folder, save or open the project file">
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 9.5v3a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-3"/><path d="M8 1.5v8M5 6.5l3 3 3-3"/></svg><span>Scan</span>
     </button>
@@ -113,12 +120,47 @@
       <label class="check nav-row" title="only clips shot in S-Log: flat on purpose, they need grading before anyone sees them"><input type="checkbox" name="look" value="log" form="q" data-pick="look"> Log, needs grading <span class="nav-sub" data-count="log"></span></label>
       <label class="check nav-row" title="only clips the camera says were shot in Rec.709 or another ready to watch profile"><input type="checkbox" name="look" value="standard" form="q" data-pick="look"> Rec.709 and others <span class="nav-sub" data-count="standard"></span></label>
     </div>
+    <div class="pick-group" id="flicker-group" hidden>
+      <div class="nav-label" title="light flicker from LED or tube lights on mains power, measured from a few seconds of each clip">Light flicker</div>
+      <label class="check nav-row" title="only clips where the brightness pulses from frame to frame"><input type="checkbox" name="flicker" value="pulsing" form="q" data-pick="flicker"> Pulsing <span class="nav-sub" data-count="pulsing"></span></label>
+      <label class="check nav-row" title="only clips with bands rolling through the picture"><input type="checkbox" name="flicker" value="banding" form="q" data-pick="flicker"> Banding <span class="nav-sub" data-count="banding"></span></label>
+      <label class="check nav-row" title="only clips checked and found clean"><input type="checkbox" name="flicker" value="none" form="q" data-pick="flicker"> Clean <span class="nav-sub" data-count="none"></span></label>
+    </div>
+    <div class="focus-line nav-row" id="flicker-line" hidden>
+      <span id="flicker-status">clips not checked for flicker</span>
+      <button type="button" id="flicker-read" class="link small" title="decode a few seconds of each clip; needs the disk">Check for flicker</button>
+    </div>
     <div class="pick-group" id="camera-group" hidden>
       <div class="nav-label">Camera</div>
       <select id="camera-select" name="camera" form="q" class="nav-row" data-pick="camera" title="only what one camera body shot, photos and clips">
         <option value="">Any camera</option>
       </select>
     </div>
+    <!-- ===== shoot modes: sequences (bursts, brackets, copies) and the camera's own settings ===== -->
+    <div class="pick-group" id="grp-group" hidden>
+      <div class="nav-label" title="frames the camera shot as one set: a burst holds its exposure, a bracket steps it">Sequences</div>
+      <label class="check nav-row" title="only frames shot as a burst: consecutive frames, a second or less apart, the same view"><input type="checkbox" name="group" value="burst" form="q" data-pick="grp"> Bursts <span class="nav-sub" data-count="burst"></span></label>
+      <label class="check nav-row" title="only exposure brackets: the same view shot at stepped exposures"><input type="checkbox" name="group" value="bracket" form="q" data-pick="grp"> Brackets <span class="nav-sub" data-count="bracket"></span></label>
+      <label class="check nav-row" title="only files that are on the disk more than once"><input type="checkbox" name="group" value="copies" form="q" data-pick="grp"> Copies <span class="nav-sub" data-count="copies"></span></label>
+      <div class="keep-best nav-row">
+        <button type="button" id="keep-burst" class="link small" title="put the sharpest frame of every burst the filters show into the pile; when every frame has a face, the sharpest eyes win">Keep the best of each burst</button>
+        <button type="button" id="keep-bracket" class="link small" title="put the middle exposure of every bracket the filters show into the pile">Keep the middle of each bracket</button>
+      </div>
+    </div>
+    <div class="pick-group" id="exif-group" hidden>
+      <div class="nav-label" title="what the camera wrote into each photo; unknown is a photo that says nothing">Camera settings</div>
+      <select id="lens-select" name="lens" form="q" class="nav-row" data-pick="lens" title="only what one lens shot"><option value="">Any lens</option></select>
+      <select id="focal-select" name="focal" form="q" class="nav-row" data-pick="focal" title="focal length, as on a full frame body"><option value="">Any focal length</option></select>
+      <select id="shutter-select" name="shutter" form="q" class="nav-row" data-pick="shutter" title="shutter speed"><option value="">Any shutter</option></select>
+      <select id="aperture-select" name="aperture" form="q" class="nav-row" data-pick="aperture" title="aperture"><option value="">Any aperture</option></select>
+      <select id="flash-select" name="flash" form="q" class="nav-row" data-pick="flash" title="what the camera recorded; a radio trigger can light a frame the camera calls no flash"><option value="">Flash or not</option></select>
+      <select id="iso-select" name="iso" form="q" class="nav-row" data-pick="iso" title="ISO"><option value="">Any ISO</option></select>
+    </div>
+    <div class="focus-line nav-row" id="camread-line" hidden>
+      <span id="camread-status" title="photos scanned before sorted kept the camera settings">camera settings not read</span>
+      <button type="button" id="camread" class="link small" title="read shutter, aperture, ISO, focal length, lens and flash from each photo's header; needs the disk, decodes nothing">Read camera settings</button>
+    </div>
+    <!-- ===== end shoot modes ===== -->
     <div class="focus-line nav-row" id="clipfaces-line" hidden>
       <span id="clipfaces-status" title="clips whose frames have not been checked for faces yet">clips not checked for faces</span>
       <button type="button" id="clipfaces-find" class="link small" title="look for faces in the frames already saved on this Mac; the disk can stay unplugged">Find faces</button>
@@ -178,10 +220,17 @@
           <span class="t"><span class="l">Open a project file</span>
           <span class="s">A sorted_&lt;shoot&gt;.sorted from any Mac. The shoot opens in seconds, already sorted.</span></span>
         </button>
+        <button type="button" id="welcome-live" class="btn welcome-btn" title="tether a camera and sort each shot as it lands">
+          <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h3.2L8.8 5h6.4l1.6 2.5H20a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9A1.5 1.5 0 0 1 4 7.5z"/><circle cx="12" cy="13" r="3.6"/></svg>
+          <span class="t"><span class="l">Start a live shoot</span>
+          <span class="s">Tether the camera. Each shot is checked, sorted and copied to your drive as it lands.</span></span>
+        </button>
       </div>
       <div class="welcome-under">
         <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="welcome-faces" checked> Detect faces on photos</label>
         <p class="welcome-note">Faces can be added later from the People tab.</p>
+        <label class="check" title="find products while scanning; leave it off to scan faster and find them later"><input type="checkbox" id="welcome-products"> Find products</label>
+        <p class="welcome-note">Products can be found later from the Products tab.</p>
       </div>
       <div id="welcome-recent" class="welcome-recent" hidden><span class="welcome-recent-label">Recent</span></div>
       <button type="button" id="welcome-help" class="link welcome-help" title="how sorted works, section by section">How it works</button>
@@ -214,6 +263,9 @@
       <input type="hidden" name="cluster" id="cluster-filter" value="">
       <input type="hidden" name="day" id="day-filter" value="">
       <input type="hidden" name="bbox" id="bbox-filter" value="">
+      <input type="hidden" name="pile" id="pile-filter" value="">
+      <input type="hidden" name="product" id="product-filter" value="">
+      <input type="hidden" name="variant" id="variant-filter" value="">
       <span class="spring"></span>
       <button type="button" id="selectall-top" class="link" hidden title="select every card shown (command-A)">Select all shown</button>
     </form>
@@ -242,10 +294,12 @@
     <footer id="selbar" class="actionbar" hidden>
       <span id="selcount"></span>
       <button type="button" id="selectall" class="link" title="select every card shown (command-A)">Select all shown</button>
-      <button type="button" id="clearsel" class="link" title="deselect everything">Clear</button>
+      <button type="button" id="pile-show" class="link" hidden title="only what is in the pile, in the grid on its own">Show the pile</button>
+      <button type="button" id="clearsel" class="link" title="empty the pile">Clear</button>
       <button type="button" id="reveal-sel" class="link" title="open the selected files in the Finder, highlighted (command shift R)">Show in Finder</button>
       <button type="button" id="xmp-sel" class="link" title="an .xmp sidecar for each selected item that has a flag, stars or a label, in the export folder; nothing is written to the shoot">Write XMP</button>
       <span class="spring"></span>
+      <span id="export-plan" class="export-plan" hidden aria-live="polite"></span>
       <span class="sel-export export-group">
         <fieldset class="seg dest" title="where the files go: onto this Mac or a plugged-in disk, or up into a Google Drive folder">
           <label><input type="radio" name="dest-sel" value="mac" checked><span>This Mac</span></label>
@@ -401,11 +455,85 @@
     </div>
   </section>
 
+  <!-- ===== shoot modes: products, their colours and their angles (photosort/products.py) ===== -->
+  <section id="view-products" hidden>
+    <div class="subbar">
+      <button type="button" id="products-find" class="btn" title="group the photos into products, then each product into its colours; uses the thumbnails on this Mac, the disk can be unplugged">Find products</button>
+      <fieldset id="products-scope" class="seg" title="which photos to look through">
+        <label><input type="radio" name="products-scope" value="all" checked><span>Whole shoot</span></label>
+        <label><input type="radio" name="products-scope" value="search"><span>What Search shows</span></label>
+      </fieldset>
+      <span id="products-progress" class="sub"></span>
+      <!-- ===== client pick: the mode switch ===== -->
+      <span class="spring"></span>
+      <fieldset id="products-mode-switch" class="seg" title="see the products and their colours, or cut the shoot down to the picks for the client">
+        <label><input type="radio" name="products-view" value="groups" checked><span>Products</span></label>
+        <label><input type="radio" name="products-view" value="cull"><span>Client pick</span></label>
+      </fieldset>
+      <!-- ===== end client pick ===== -->
+    </div>
+    <div id="products-empty" class="empty-note" hidden>
+      <p>Nothing grouped yet. Find products looks at every photo, groups the ones of the same product, and splits each product by colour. A different angle of the same colour stays with its colour.</p>
+      <p>On a shoot that is not all products, filter Search down to the product shots first and pick What Search shows.</p>
+    </div>
+    <div id="product-list" class="product-list"></div>
+    <div id="products-export-row" class="actionbar" hidden>
+      <span id="products-summary" class="sub"></span>
+      <span class="spring"></span>
+      <span class="export-group">
+        <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="products-raw"> RAW</label>
+        <select id="products-mode" title="copy the files or link to them">
+          <option value="copy">Copy</option>
+          <option value="symlink">Links (need the disk plugged in)</option>
+        </select>
+        <button type="button" id="products-export" class="btn" title="one folder per product and colour, named like bottle red">Export one folder per colour</button>
+      </span>
+    </div>
+    <!-- ===== client pick (photosort/cull.py): picks per product, rejects folded with their reason ===== -->
+    <div id="cull" hidden>
+      <div class="cull-head">
+        <div class="cull-count">
+          <p id="cull-total" class="cull-total"></p>
+          <p id="cull-left" class="cull-left"></p>
+        </div>
+        <div class="cull-target">
+          <fieldset id="cull-target-kind" class="seg" title="a number for every product, or one number for the whole shoot split by how many colours each product has">
+            <label><input type="radio" name="cull-kind" value="per" checked><span>Each product</span></label>
+            <label><input type="radio" name="cull-kind" value="total"><span>In all</span></label>
+          </fieldset>
+          <input type="number" id="cull-n" class="cull-n" min="1" max="100000" value="10" aria-label="how many picks">
+          <button type="button" id="cull-run" class="btn primary">Pick the best</button>
+        </div>
+      </div>
+      <p id="cull-progress" class="sub cull-progress" hidden></p>
+      <div id="cull-empty" class="empty-note" hidden>
+        <p>Client pick goes through every product you found, sets aside the frames a client should never see and keeps the best of the rest: every colour first, then every angle, one frame of each retake.</p>
+        <p>Each frame left out says why: soft on the product, motion blur, cut off by the frame edge, blown out, crushed to black, or a retake of an angle already kept. You can swap any pick for another frame of the same colour and angle.</p>
+      </div>
+      <div id="cull-list" class="cull-list"></div>
+      <div id="cull-actions" class="actionbar" hidden>
+        <button type="button" id="cull-pile" class="btn" title="put every pick in the pile, to look at them in Search or export them your own way">Send picks to the pile</button>
+        <span class="spring"></span>
+        <span class="export-group">
+          <label class="check" title="also export the RAW next to each JPEG"><input type="checkbox" id="cull-raw"> RAW</label>
+          <select id="cull-mode" title="copy the files or link to them">
+            <option value="copy">Copy</option>
+            <option value="symlink">Links (need the disk plugged in)</option>
+          </select>
+          <button type="button" id="cull-export" class="btn primary" title="a folder per product with a folder per colour inside, and a spreadsheet of every frame, picked or left out and why">Export for the client</button>
+        </span>
+      </div>
+    </div>
+    <!-- ===== end client pick ===== -->
+  </section>
+  <!-- ===== end shoot modes ===== -->
+
   <section id="view-index" hidden>
     <div class="subbar">
       <button type="button" id="start-index" class="btn" title="scan every photo and clip in this folder">Scan this folder</button>
       <button type="button" id="scan-another" class="link" title="pick another folder and start scanning it now; this shoot stays scanned and can be opened again from the shoots menu">Scan another folder…</button>
       <label class="check" title="find faces while scanning; untick to scan faster and add faces later"><input type="checkbox" id="faces" checked> Detect faces (People tab)</label>
+      <label class="check" title="find products while scanning; leave it off to scan faster and find them later"><input type="checkbox" id="scan-products"> Find products</label>
       <label class="check" title="try again on files that failed last time"><input type="checkbox" id="retry-errors"> Retry failed files</label>
       <span class="spring"></span>
       <button type="button" id="bundle-import" class="btn" title="open a sorted project file made on this or another Mac">Open project…</button>
@@ -437,6 +565,7 @@
           <p id="scan-resume-text" class="scan-resume-text"></p>
           <button type="button" id="scan-continue" class="btn primary" title="scan what is still missing; nothing already scanned is read again">Continue scan</button>
         </div>
+        <div id="finder-scene" class="finder-scene" hidden aria-hidden="true"></div>
         <pre id="progress"></pre>
         <p id="progress-current" class="scan-current" hidden></p>
         <p id="scan-awake" class="hint scan-awake" hidden>Keeping the Mac awake until this finishes. Closing the lid still puts it to sleep.</p>
@@ -528,11 +657,17 @@
         <p>Arrow down in the search field lists the last 20 searches on this shoot, with the filters they ran with. The star keeps one as a chip in the sidebar.</p>
         <p>"Show in Finder" (in the inspector, on the selection bar, or command shift R) opens the file's own folder with it highlighted, the way an editor reveals a clip. Up to 20 at a time.</p>
         <p>A file that is on the disk twice is one tile marked x2; a burst is one tile marked "burst of 12". The inspector shows the copies, or picks the sharpest frame. Export follows what is shown.</p>
+        <p>An exposure bracket (the same view at stepped exposures, read from what the camera wrote) is one tile marked "bracket -2 0 +2", showing the middle exposure. Sequences in the sidebar filters bursts, brackets and copies, and puts the best frame of each into the pile in one click.</p>
+        <p>Camera settings filters by lens, focal length, shutter, aperture and ISO, as each photo recorded them. A photo that says nothing counts as unknown.</p>
+        <p>Products groups a product shoot by product, then by colour; another angle of the same colour stays with its colour. Click a colour to see it in Search, or export one folder per colour.</p>
         <p>The Sharp slider hides the soft ones.</p>
         <p>Sort puts the grid in order: oldest or newest first, biggest or smallest file, by name, longest clip first. The tile shows whatever it is being sorted on. A search always comes back best match first, so the control greys out until you clear it.</p>
         <p>Days in the sidebar breaks the shoot into the days it was shot on. Click one to see just that day. A file with no capture time counts on the day it was written, so nothing falls out of the list.</p>
         <p>Click selects. Shift-click takes a range, ⌘-click toggles one, ⌘A takes everything on screen.</p>
         <p>"Select all matching" takes every result, not just the 200 on screen.</p>
+        <p>What you select is the pile. It stays while you search again, and the next time the shoot opens. "Show the pile" puts it in the grid on its own; Clear empties it. The line above Export says how many files, how big, where they go and roughly how long.</p>
+        <p>The numbers beside the filters are what each one would leave with the others on, so "wide", then "videos", then a camera narrows the shoot one count at a time.</p>
+        <p>A clip can be in more than one category: an interview that is also people shows under both, the second time in the less sure band.</p>
         <p>Enter or a double-click opens a shot. ← → step through, Esc closes.</p>
       </div>
     </div>
@@ -660,6 +795,8 @@
   </div>
 </dialog>
 
+<script type="module" src="/ui/liquid-glass.es.js"></script>
 <script src="/ui/app.js"></script>
+<script src="/ui/scene.js"></script>
 </body>
 </html>

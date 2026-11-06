@@ -114,6 +114,7 @@ def test_per_render_counts_walk_covering_indexes_and_wide_reads_still_scan(tmp_p
         "SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel",
         "SELECT COALESCE(shot_size, 'unscored') AS s, COUNT(*) FROM photos WHERE status='ok' GROUP BY s",
         "SELECT SUM(fps >= 100.0), SUM(fps IS NOT NULL AND fps < 100.0), SUM(fps IS NULL) FROM photos WHERE status='ok' AND kind='video'",
+        db.CATEGORY_ALSO_COUNTS_SQL,
     ]
     for q in counts:
         plan = _plan(conn, q)

@@ -24,11 +24,15 @@ from . import classify as classify_mod
 from . import focus as focus_mod
 from . import index
 from . import places as places_mod
+from . import pile
 from . import settings
 from . import version as version_mod
-from .config import DB_NAME, ANGLE_WINDOW_S, app_home, export_root, shoot_slug
+from .config import DB_NAME, ANGLE_WINDOW_S, STD_EXTS, app_home, export_root, shoot_slug
 from .classify import SHOT_SIZE_NAMES
-from .search import Index, Filters, SORTS, angles, LOOKS, DURATION_KEYS
+from .search import Index, Filters, SORTS, angles, LOOKS, DURATION_KEYS, GROUP_KINDS, CAMERA_AXES
+from .config import CAMERA_BUCKETS
+from . import products as products_mod
+from . import cull as cull_mod                      # ===== client pick =====
 from .export import export_ids, export_bytes, ids_jobs, jobs_bytes
 
 UI = Path(__file__).parent / "ui"
@@ -58,9 +62,42 @@ class ExportPrefsReq(BaseModel):
 class NameReq(BaseModel):
     name: str
 
+# ===== shoot modes =====
+class ProductsReq(BaseModel):
+    ids: list[int] | None = None           # the photos on screen; None for every still in the shoot
+
+class ProductsExportReq(BaseModel):
+    mode: str = "copy"
+    include_raw: bool = False
+    only: list[list[int]] | None = None    # [[product, variant], ...]; None for every variant
+# ===== end shoot modes =====
+
+# ===== client pick =====
+class CullReq(BaseModel):
+    per_product: int | None = None         # picks a product; or
+    total: int | None = None               # picks across the shoot, split by how many colours each product has
+
+class CullIdReq(BaseModel):
+    id: int
+    on: bool = True
+
+class CullMergeReq(BaseModel):
+    product: int
+    into: int
+
+class CullExportReq(BaseModel):
+    mode: str = "copy"
+    include_raw: bool = False
+# ===== end client pick =====
+
 
 class SavedReq(BaseModel):
     saved: bool = True
+
+
+class PileReq(BaseModel):
+    add: list[int] = []
+    remove: list[int] = []
 
 
 class UpdateCheckReq(BaseModel):
@@ -88,6 +125,7 @@ class RejectReq(BaseModel):
 
 class IndexReq(BaseModel):
     faces: bool = True
+    products: bool = False        # Find products once the scan is done; left off, the Products tab does it later
     retry_errors: bool = False
     resume: bool = False          # Continue scan: faces as the interrupted scan had it (meta scan_faces), not the box
 
@@ -95,6 +133,7 @@ class IndexReq(BaseModel):
 class IndexAtReq(BaseModel):
     path: str                     # the folder the project file goes in, when the shoot folder cannot hold it
     faces: bool = True
+    products: bool = False
     retry_errors: bool = False
     resume: bool = False
 
@@ -282,6 +321,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         "places": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "fps": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
         "clipfaces": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "flicker": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "camera": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},     # ===== shoot modes =====
+        "products": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},
+        "cull": {"running": False, "done": 0, "total": 0, "counts": {}, "error": None},       # ===== client pick =====
         "export": {"running": False, "done": 0, "total": 0, "failed": 0, "skipped": 0, "path": None, "error": None},
         "export_req": None,        # {route, body, root} of the running export, for the export history row at the end
         # Where exports land instead of export_root() (another disk), or None for the default.
@@ -293,6 +336,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         "places_lock": threading.Lock(),
         "fps_lock": threading.Lock(),
         "clipfaces_lock": threading.Lock(),
+        "camera_lock": threading.Lock(),
+        "products_lock": threading.Lock(),
+        "cull_lock": threading.Lock(),                                                          # ===== client pick =====
     }
     app.state.photosort = state
 
@@ -414,6 +460,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         _log_folder_open()
         return _public_folder_info()
 
+    from . import live
+    live.install(app, _switch_root)
+
     def _auto_classify(root_at_start: Path, stats: dict) -> None:
         """Categorise at the end of an index run that changed something. A classify failure is
         recorded on state["classify"] and never marks the index run itself as failed."""
@@ -441,6 +490,22 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         usage.log("classify_done", auto=auto, seconds=round(time.time() - t0, 1), counts=c["counts"],
                   discovered=len(c["discovered"] or {}), error=c["error"])
 
+    def _auto_products(root_at_start: Path, stats: dict) -> None:
+        """Find products at the end of a scan that asked for it. Like _auto_classify, a failure here never fails the
+        scan: it is recorded on state["products"], and the Products tab can run it again."""
+        if not state.get("scan_products"):
+            return
+        total = stats.get("total", 0)
+        state["progress"] = {"stage": "products", "done": 0, "total": total, "stage_started": time.time()}
+        def prog(done, n):
+            state["progress"] = dict(state["progress"], done=done, total=n)
+        try:
+            state["products"]["counts"] = products_mod.find_products(root_at_start, progress=prog)
+        except Exception as e:
+            state["products"]["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            state["progress"] = {"stage": "done", "done": total, "total": total, "stage_started": time.time()}
+
     def _run(root_at_start: Path, faces: bool, retry_errors: bool):
         from .index import index_folder
         def prog(d):
@@ -451,6 +516,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             with awake.hold():
                 stats = index_folder(root_at_start, faces=faces, progress=prog, retry_errors=retry_errors)
                 _auto_classify(root_at_start, stats)
+                _auto_products(root_at_start, stats)
                 saved = _autosave_project(root_at_start, stats.get("total", 0))
         except SourceUnavailable as e:
             # The disk went away: not a failure, a pause. What was scanned is kept; Continue does the rest
@@ -581,7 +647,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         p = UI / name
         if not p.is_file():
             raise HTTPException(404)
-        return FileResponse(p)
+        return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/folder")
     def get_folder():
@@ -760,6 +826,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         if state["clipfaces"]["running"]:
             raise HTTPException(409, "cannot scan while faces in clips are being found")
         faces = req.faces
+        state["scan_products"] = req.products
         if req.resume:
             # Continue scan: the interrupted scan's own faces choice, so a scan started with faces off does
             # not grow a faces pass (and one started with faces on does not lose it) on the way back.
@@ -854,9 +921,46 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         sub-stage, see index.embed_eta) come with the embed stage only, and are None everywhere else."""
         return dict(PROGRESS_DEFAULTS, **state["progress"], running=state["running"], awake=awake.held())
 
+    # ===== the scan desktop: the Scan tab's Finder scene polls this beside /api/progress =====
+    @app.get("/api/scan/sample")
+    def scan_sample(since: int = 0, n: int = 120, ids: str = "", folders: int = 1):
+        """A fixed sample of the shoot's files for the cards on the Scan tab, and the true per-folder counts
+        (db.scan_sample has the shape), plus shoot (the folder's name, the Stack's label) and disk (the volume under /Volumes, else None).
+        since pages forward through the sample; ids asks again about cards still waiting for a thumb or a folder;
+        folders=0 skips counting the folders (the scene asks only until it has them, and never while reading).
+        folders stays empty while a scan is still reading or categorising, so a rescan never shows last time's
+        folders before this pass has decided them. Opens its own connection, like the other status reads."""
+        r = state["root"]
+        if r is None:
+            return {"total": 0, "photos": 0, "videos": 0, "since": max(0, since), "max_id": max(0, since),
+                    "rows": [], "updates": [], "folders": [], "shoot": None, "disk": None}
+        try:
+            want = [int(x) for x in ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "ids must be numbers")
+        conn = db.connect(r)
+        try:
+            stage = (state["progress"] or {}).get("stage")
+            hold = (state["running"] and stage not in ("done", "save")) or state["classify"]["running"]
+            out = db.scan_sample(conn, n=n, since=since, ids=want, folders=bool(folders) and not hold)
+        finally:
+            conn.close()
+        out["shoot"] = r.name or str(r)
+        out["disk"] = r.parts[2] if len(r.parts) >= 3 and r.parts[:2] == ("/", "Volumes") else None
+        return out
+    # ===== end the scan desktop =====
+
+    # live.html's demo plays a scripted shoot from the landing page's photos when run from the repo
+    @app.get("/site/img/{name}")
+    def site_img(name: str):
+        p = UI.parent.parent / "site" / "img" / Path(name).name
+        if not p.is_file():
+            raise HTTPException(404, "no such image")
+        return FileResponse(p)
+
     def _filters(sharp, faces, person, taken_from, taken_to, category, kind=None, cluster=None, sure_only=0, aerial=0,
                  hide_bad=0, hide_soft=0, fold=0, day=None, bbox=None, shot_size=None, slowmo=0,
-                 camera=None, look=None, duration=None) -> Filters:
+                 camera=None, look=None, duration=None, pile=0) -> Filters:
         if kind not in (None, "", "photos", "videos"):
             raise HTTPException(400, "kind must be photos or videos")
         if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
@@ -875,7 +979,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                        cluster=cluster or None, sure_only=bool(sure_only), aerial=True if aerial else None,
                        shot_size=shot_size or None, slowmo=True if slowmo else None,
                        camera=camera or None, look=look or None, duration=duration or None,
-                       hide_bad=bool(hide_bad), hide_soft=bool(hide_soft), fold=bool(fold))
+                       hide_bad=bool(hide_bad), hide_soft=bool(hide_soft), fold=bool(fold), pile=bool(pile))
 
     # ===== marks: the flag / stars / label filters, laid over whatever _filters built =====
     def _with_marks(f: Filters, flag: str | None = None, stars: int | None = None, label: str | None = None) -> Filters:
@@ -888,6 +992,31 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         f.flag = flag or None; f.stars_min = stars; f.label = label or None
         return f
     # ===== end marks =====
+
+    # ===== shoot modes: the group, camera and product filters, read off the query string and laid over _filters =====
+    def _with_shoot(f: Filters, request: Request) -> Filters:
+        q = request.query_params
+        g = q.get("group") or None
+        if g not in (None, *GROUP_KINDS):
+            raise HTTPException(400, f"group must be one of {', '.join(GROUP_KINDS)}")
+        f.group = g
+        f.lens = q.get("lens") or None
+        f.flicker = q.get("flicker") or None
+        if f.flicker not in (None, "pulsing", "banding", "none"):
+            raise HTTPException(400, "flicker must be pulsing, banding or none")
+        for axis in CAMERA_AXES:
+            v = q.get(axis) or None
+            if v not in (None, "unknown", *(k for k, _, _ in CAMERA_BUCKETS[axis])):
+                raise HTTPException(400, f"{axis} is not one of its buckets")
+            setattr(f, axis, v)
+        for key in ("product", "variant"):
+            v = q.get(key)
+            try:
+                setattr(f, key, int(v) if v not in (None, "") else None)
+            except ValueError:
+                raise HTTPException(400, f"{key} must be a number")
+        return f
+    # ===== end shoot modes =====
 
     def _bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
         """south,west,north,east as the map hands it over. A box may cross the date line (west > east), which
@@ -915,9 +1044,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
                aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
                bbox: str | None = None, shot_size: str | None = None, slowmo: int = 0,
-               camera: str | None = None, look: str | None = None, duration: str | None = None,
+               camera: str | None = None, look: str | None = None, duration: str | None = None, pile: int = 0,
                sort: str | None = None, limit: int = 200, offset: int = 0,
-               flag: str | None = None, stars: int | None = None, label: str | None = None):
+               flag: str | None = None, stars: int | None = None, label: str | None = None, request: Request = None):
         """Each result carries kind, duration and aerial, sure and confidence, and focus (None until the focus
         pass ran, else ok / soft / bad); with a category or cluster filter the sure ones come first, then the
         "less sure" band by confidence. sure_only=1 drops the band (the per-tile export uses it).
@@ -932,7 +1061,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         limit = max(1, min(limit, 1000)); offset = max(0, offset)
         t0 = time.time()
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration), flag=flag, stars=stars, label=label), sort=sort)
+            rows = ix().query(text=q or None, image_id=image_id, filters=_with_shoot(_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration, pile), flag=flag, stars=stars, label=label), request), sort=sort)
         except LookupError as e:
             raise HTTPException(404, str(e))
         # The usage log keeps the query's length and first characters plus which filters were on; an empty
@@ -995,15 +1124,64 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                    category: str | None = None, kind: str | None = None, cluster: str | None = None, sure_only: int = 0,
                    aerial: int = 0, hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
                    bbox: str | None = None, shot_size: str | None = None, slowmo: int = 0,
-                   camera: str | None = None, look: str | None = None, duration: str | None = None, sort: str | None = None,
-                   flag: str | None = None, stars: int | None = None, label: str | None = None):
+                   camera: str | None = None, look: str | None = None, duration: str | None = None, pile: int = 0, sort: str | None = None,
+                   flag: str | None = None, stars: int | None = None, label: str | None = None, request: Request = None):
         if state["root"] is None:
             return {"ids": [], "total": 0}
         try:
-            rows = ix().query(text=q or None, image_id=image_id, filters=_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration), flag=flag, stars=stars, label=label), sort=_sort(sort))
+            rows = ix().query(text=q or None, image_id=image_id, filters=_with_shoot(_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial, hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration, pile), flag=flag, stars=stars, label=label), request), sort=_sort(sort))
         except LookupError as e:
             raise HTTPException(404, str(e))
         return {"ids": [p["id"] for p in rows], "total": len(rows)}
+
+    @app.get("/api/search/facets")
+    def search_facets(sharp: float | None = None, faces: str | None = None, person: int | None = None,
+                      taken_from: str | None = None, taken_to: str | None = None, category: str | None = None,
+                      kind: str | None = None, cluster: str | None = None, sure_only: int = 0, aerial: int = 0,
+                      hide_bad: int = 0, hide_soft: int = 0, fold: int = 0, day: str | None = None,
+                      bbox: str | None = None, shot_size: str | None = None, slowmo: int = 0,
+                      camera: str | None = None, look: str | None = None, duration: str | None = None, pile: int = 0,
+                      flag: str | None = None, stars: int | None = None, label: str | None = None, request: Request = None):
+        """The facet rail's live numbers for the filters in force (search.Index.facet_counts): total is what
+        /api/search would count, and each axis is counted with every filter on but its own. A query's text
+        does not change these: a query ranks the rows that pass, it never drops one."""
+        if state["root"] is None:
+            return {"total": 0}
+        return ix().facet_counts(_with_shoot(_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, kind, cluster, sure_only, aerial,
+                                                      hide_bad, hide_soft, fold, day, bbox, shot_size, slowmo, camera, look, duration, pile),
+                                             flag=flag, stars=stars, label=label), request))
+
+    # ===== the pile: what the editor has picked on this shoot, in the index (photosort.pile) =====
+    _EMPTY_PILE = {"ids": [], "n": 0, "photos": 0, "videos": 0, "bytes": 0}
+
+    @app.get("/api/pile")
+    def get_pile():
+        """{ids, n, photos, videos, bytes}: the picked rows still in the shoot, in picking order."""
+        if state["root"] is None:
+            return dict(_EMPTY_PILE)
+        return pile.summary(db.connect(state["root"]))
+
+    @app.post("/api/pile")
+    def change_pile(req: PileReq):
+        """Takes out req.remove, then puts in req.add (so a row in both ends up picked), and answers with the
+        pile as it now is. One call per click or per select all, never per tile."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        conn = db.connect(state["root"])
+        if req.remove:
+            pile.remove(conn, req.remove)
+        if req.add:
+            pile.add(conn, req.add)
+        return pile.summary(conn)
+
+    @app.delete("/api/pile")
+    def clear_pile():
+        if state["root"] is None:
+            return dict(_EMPTY_PILE)
+        conn = db.connect(state["root"])
+        pile.clear(conn)
+        return pile.summary(conn)
+    # ===== end the pile =====
 
     # ===== search by an image that is not in the shoot: the file is dropped on the window, not indexed =====
 
@@ -1354,11 +1532,13 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def categories():
         """fixed: the CATEGORIES counts (plus "other" and "unclassified"); discovered: the k-means
         clusters named from the vocabulary, largest first, empty until Categorise has run; drone: how many
-        rows are flagged aerial (a flag across categories, the last tile of the fixed row)."""
+        rows are flagged aerial (a flag across categories, the last tile of the fixed row); also: how many of
+        each fixed tile's rows are there as a secondary (filed elsewhere, fits here too; classify.SECOND_MIN_PROB)."""
         if state["root"] is None:
-            return {"fixed": {}, "discovered": {}, "drone": 0}
+            return {"fixed": {}, "discovered": {}, "drone": 0, "also": {}}
         conn = db.connect(state["root"])
-        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn)}
+        return {"fixed": _fixed_order(db.category_counts(conn)), "discovered": db.cluster_counts(conn), "drone": db.aerial_count(conn),
+                "also": db.category_also_counts(conn)}
 
     @app.get("/api/facets")
     def facets():
@@ -1384,7 +1564,12 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         read = index.clip_info_status(state["root"])
         return {"shot_size": db.shot_size_counts(conn), "slowmo": db.slowmo_counts(conn), "fps_read": read,
                 "cameras": db.camera_counts(conn), "look": db.look_counts(conn), "duration": db.duration_counts(conn),
-                "clip_read": read, "clip_faces": index.clip_faces_status(state["root"])}
+                "clip_read": read, "clip_faces": index.clip_faces_status(state["root"]),
+                # ===== shoot modes: the whole shoot's sequence and camera axes, and whether settings are still unread =====
+                "shoot": {k: v for k, v in ix().facet_counts(Filters()).items()
+                          if k in ("groups", "group_sets", "lens", "focal", "iso", "shutter", "aperture", "flash")},
+                "flicker": ix().facet_counts(Filters()).get("flicker", {}), "flicker_read": index.flicker_status(state["root"]),
+                "camera_read": index.camera_info_status(state["root"])}
 
     # ===== marks: flags, stars and colour labels, set from the grid's keys and the inspector =====
     @app.post("/api/marks")
@@ -1494,6 +1679,435 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     def fps_progress():
         """{running, done, total, counts, error, awake}; counts is {found, read, missing} once it ended."""
         return dict(state["fps"], awake=awake.held())
+
+    # ===== shoot modes: camera settings catch-up, best of each burst, products =====
+    def _busy(what: str) -> None:
+        """409 while anything else holds the index or the disk, the way every pass here refuses to overlap."""
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        for key, label in (("classify", "categorising"), ("focus", "the focus pass is running"), ("places", "locations are being read"),
+                           ("export", "an export is running"), ("clipfaces", "faces in clips are being found"),
+                           ("fps", "clip details are being read"), ("camera", "camera settings are being read"),
+                           ("products", "products are being found"), ("flicker", "clips are being checked for flicker"),
+                           ("cull", "Client pick is measuring")):                       # ===== client pick =====
+            if key != what and state[key]["running"]:
+                raise HTTPException(409, f"cannot start while {label}")
+        if state["running"]:
+            raise HTTPException(409, "cannot start while scanning")
+
+    @app.get("/api/camera/status")
+    def camera_status():
+        """{photos, known, unknown, read_at} (index.camera_info_status): how many stills have shutter, aperture and the rest."""
+        if state["root"] is None:
+            return {"photos": 0, "known": 0, "unknown": 0, "read_at": None}
+        return index.camera_info_status(state["root"])
+
+    @app.post("/api/camera/read")
+    def start_camera_read():
+        """Read the exposure settings off every still that has none (index.read_camera_info): needs the shoot disk,
+        reads the EXIF header only, writes nothing there. {"started": true, "total": n}."""
+        _busy("camera")
+        with state["camera_lock"]:
+            if state["camera"]["running"]:
+                raise HTTPException(409, "already reading camera settings")
+            root_at_start = state["root"]
+            total = index.camera_info_status(root_at_start)["unknown"]
+            state["camera"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def prog(d):
+            state["camera"].update(done=d.get("done", 0), total=d.get("total", total))
+
+        t0 = time.time()
+
+        def _run():
+            try:
+                with awake.hold():
+                    state["camera"]["counts"] = index.read_camera_info(root_at_start, progress=prog)
+            except Exception as e:
+                state["camera"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["camera"]["running"] = False
+                c = state["camera"]["counts"] or {}
+                usage.log("camera_read", found=c.get("found", 0), read=c.get("read", 0), missing=c.get("missing", 0),
+                          seconds=round(time.time() - t0, 1), error=state["camera"]["error"])
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.post("/api/flicker/read")
+    def start_flicker_read():
+        """Check every clip scanned before flicker detection (index.read_flicker): needs the disk, writes nothing there."""
+        _busy("flicker")
+        if state["flicker"]["running"]:
+            raise HTTPException(409, "already checking for flicker")
+        root_at_start = state["root"]
+        total = index.flicker_status(root_at_start)["unchecked"]
+        state["flicker"] = {"running": True, "done": 0, "total": total, "counts": {}, "error": None}
+
+        def _run():
+            try:
+                with awake.hold():
+                    state["flicker"]["counts"] = index.read_flicker(root_at_start, progress=lambda d: state["flicker"].update(done=d["done"], total=d["total"]))
+            except Exception as e:
+                state["flicker"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["flicker"]["running"] = False
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True, "total": total}
+
+    @app.get("/api/flicker/progress")
+    def flicker_progress():
+        return dict(state["flicker"], awake=awake.held())
+
+    @app.get("/api/camera/progress")
+    def camera_progress():
+        return dict(state["camera"], awake=awake.held())
+
+    @app.post("/api/groups/best")
+    def keep_best(request: Request, kind: str = "burst", sharp: float | None = None, faces: str | None = None,
+                  person: int | None = None, taken_from: str | None = None, taken_to: str | None = None,
+                  category: str | None = None, cluster: str | None = None, sure_only: int = 0, aerial: int = 0,
+                  hide_bad: int = 0, hide_soft: int = 0, day: str | None = None, bbox: str | None = None,
+                  shot_size: str | None = None, slowmo: int = 0, camera: str | None = None, look: str | None = None,
+                  duration: str | None = None, pile: int = 0,
+                  flag: str | None = None, stars: int | None = None, label: str | None = None):
+        """Put the best frame of every burst (the sharpest; the eyes decide when every frame has a face) or of every
+        bracket (its middle exposure) among the rows the filters leave into the pile. Answers with the pile and
+        {sets, added}. The search's own kind (photos/videos) never matters here: only stills burst."""
+        if kind not in ("burst", "bracket"):
+            raise HTTPException(400, "kind must be burst or bracket")
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        f = _with_shoot(_with_marks(_filters(sharp, faces, person, taken_from, taken_to, category, None, cluster, sure_only, aerial,
+                                             hide_bad, hide_soft, 0, day, bbox, shot_size, slowmo, camera, look, duration, pile),
+                                    flag=flag, stars=stars, label=label), request)
+        f.group = kind
+        rows = ix().query(filters=f)
+        best: dict[int, int] = {}
+        for r in rows:
+            g = r.get("group")
+            if g and g["kind"] == kind:
+                best[id(g)] = g["base"] if kind == "bracket" else g["sharpest"]
+        from . import pile as pile_mod                 # the pile query parameter shadows the module in here
+        conn = db.connect(state["root"])
+        before = set(pile_mod.ids(conn))
+        ids = list(dict.fromkeys(best.values()))
+        pile_mod.add(conn, ids)
+        usage.log("keep_best", kind=kind, sets=len(ids))
+        return dict(pile_mod.summary(conn), sets=len(ids), added=len([i for i in ids if i not in before]))
+
+    @app.get("/api/products")
+    def get_products():
+        """[{product, name, named, n, variants: [{variant, colour, hex, n, views, cover}]}] from the last find."""
+        if state["root"] is None:
+            return {"products": []}
+        return {"products": products_mod.list_products(db.connect(state["root"]))}
+
+    @app.post("/api/products/find")
+    def start_products(req: ProductsReq):
+        """Group the stills (or req.ids) into products and colour variants (products.find_products). Reads the grid
+        thumbs on this Mac; the disk can be unplugged. One encode per still, about 47 ms each on an M1."""
+        _busy("products")
+        with state["products_lock"]:
+            if state["products"]["running"]:
+                raise HTTPException(409, "already finding products")
+            root_at_start = state["root"]
+            state["products"] = {"running": True, "done": 0, "total": len(req.ids) if req.ids is not None else 0, "counts": {}, "error": None}
+
+        def prog(done, total):
+            state["products"].update(done=done, total=total)
+
+        t0 = time.time()
+
+        def _run():
+            try:
+                with awake.hold():
+                    state["products"]["counts"] = products_mod.find_products(root_at_start, req.ids, progress=prog)
+            except Exception as e:
+                state["products"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["stale"] = True
+                state["products"]["running"] = False
+                c = state["products"]["counts"] or {}
+                usage.log("products_found", products=c.get("products", 0), variants=c.get("variants", 0),
+                          photos=c.get("photos", 0), seconds=round(time.time() - t0, 1), error=state["products"]["error"])
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True}
+
+    @app.get("/api/products/progress")
+    def products_progress():
+        return dict(state["products"], awake=awake.held())
+
+    @app.post("/api/products/{product}/name")
+    def name_product(product: int, req: NameReq):
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        name = (req.name or "").strip()
+        if not name or len(name) > 80:
+            raise HTTPException(400, "a name, up to 80 characters")
+        if not products_mod.rename(db.connect(state["root"]), product, name):
+            raise HTTPException(404, "no such product")
+        return {"product": product, "name": name}
+
+    @app.post("/api/export/products")
+    def export_products_api(req: ProductsExportReq):
+        """One folder per product and colour, "<product> <colour>", under <destination>/<shoot>/products/. Same job
+        machinery as the category export: one export at a time, a free space check for copies."""
+        from .export import export_folders, folders_bytes, export_dir
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            conn = db.connect(root_at_start)
+            want = {tuple(x) for x in req.only} if req.only else None
+            folders: dict[str, list[int]] = {}
+            for pr in products_mod.list_products(conn):
+                for v in pr["variants"]:
+                    if want is not None and (pr["product"], v["variant"]) not in want:
+                        continue
+                    key = stem = f"{pr['name']} {v['colour']}"
+                    nth = 2
+                    while key in folders:            # two variants one colour name apart: "mug blue", "mug blue 2"
+                        key = f"{stem} {nth}"; nth += 1
+                    folders[key] = [r[0] for r in conn.execute("SELECT photo_id FROM products WHERE product=? AND variant=? ORDER BY photo_id",
+                                                              (pr["product"], v["variant"]))]
+            if not folders:
+                raise HTTPException(400, "no products found yet")
+            base = _resolve_base()
+            if req.mode == "copy":
+                _check_free(folders_bytes(root_at_start, folders, req.include_raw), base)
+            try:
+                export_dir(root_at_start, "products", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            n = sum(len(v) for v in folders.values())
+            state["export"] = {"running": True, "done": 0, "total": n, "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("products", "local", n, route="/api/export/products", body=req.model_dump(), mode=req.mode,
+                             folders=len(folders), include_raw=req.include_raw)
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                with awake.hold():
+                    state["export"]["path"] = str(export_folders(root_at_start, "products", folders, req.mode, req.include_raw,
+                                                                 base=base, progress=prog))
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+                _export_finished("products", "local", t0)
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n, "folders": sorted(folders)}
+    # ===== end shoot modes =====
+
+    # ===== client pick (photosort/cull.py): the product shoot cut down to what the client sees =====
+    def _cull_conn():
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        conn = db.connect(state["root"])
+        cull_mod._ensure(conn)
+        return conn
+
+    def _cull_target(req) -> dict:
+        if req.total is not None:
+            if not 1 <= req.total <= 100000:
+                raise HTTPException(400, "a total from 1 to 100,000")
+            return {"total": req.total}
+        n = req.per_product if req.per_product is not None else cull_mod.DEFAULT_PER_PRODUCT
+        if not 1 <= n <= 500:
+            raise HTTPException(400, "a target from 1 to 500 a product")
+        return {"per_product": n}
+
+    @app.get("/api/cull")
+    def get_cull():
+        """Everything the Client pick view draws (cull.listing): the running count, then per product its picks,
+        the frames that were fine but not needed, and the rejects with their reason in words."""
+        if state["root"] is None:
+            return {"photos": 0, "picked": 0, "products": [], "rejected": {}, "target": {"per_product": cull_mod.DEFAULT_PER_PRODUCT}}
+        return cull_mod.listing(_cull_conn())
+
+    @app.post("/api/cull/run")
+    def start_cull(req: CullReq):
+        """Measure every product frame on its thumb (what is not measured yet), give each reject its reason and pick
+        to the target. Needs Find products first. Reads thumbs on this Mac only. {"started": true}."""
+        _busy("cull")
+        target = _cull_target(req)
+        conn = _cull_conn()
+        if not conn.execute("SELECT 1 FROM products LIMIT 1").fetchone():
+            raise HTTPException(400, "find products first")
+        with state["cull_lock"]:
+            if state["cull"]["running"]:
+                raise HTTPException(409, "already picking")
+            root_at_start = state["root"]
+            state["cull"] = {"running": True, "done": 0, "total": 0, "counts": {}, "error": None}
+        cull_mod.set_target(conn, **target)
+
+        def prog(done, total):
+            state["cull"].update(done=done, total=total)
+
+        t0 = time.time()
+
+        def _run():
+            try:
+                with awake.hold():
+                    state["cull"]["counts"] = cull_mod.run(root_at_start, progress=prog)
+            except Exception as e:
+                state["cull"]["error"] = f"{type(e).__name__}: {e}"
+            finally:
+                state["cull"]["running"] = False
+                c = state["cull"]["counts"] or {}
+                usage.log("client_pick", photos=c.get("photos", 0), picked=c.get("picked", 0), products=c.get("products", 0),
+                          seconds=round(time.time() - t0, 1), error=state["cull"]["error"])
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"started": True}
+
+    @app.get("/api/cull/progress")
+    def cull_progress():
+        return dict(state["cull"], awake=awake.held())
+
+    @app.post("/api/cull/target")
+    def cull_target(req: CullReq):
+        """A new target, picked again from the stored reasons in a moment (nothing measured again)."""
+        if state["cull"]["running"]:
+            raise HTTPException(409, "still picking")
+        target = _cull_target(req)
+        conn = _cull_conn()
+        if not conn.execute("SELECT 1 FROM cull LIMIT 1").fetchone():
+            raise HTTPException(400, "run Client pick first")
+        cull_mod.repick(conn, **target)
+        return cull_mod.listing(conn)
+
+    @app.post("/api/cull/swap")
+    def cull_swap(req: CullIdReq):
+        """Swap a pick for the next frame of the same colour and angle. {out, in}; in is null when there is none."""
+        try:
+            return cull_mod.swap(_cull_conn(), req.id)
+        except KeyError:
+            raise HTTPException(404, "that photo is not a pick")
+
+    @app.post("/api/cull/pick")
+    def cull_pick(req: CullIdReq):
+        """Pick a frame by hand (on) or drop a pick (off)."""
+        if not cull_mod.set_pick(_cull_conn(), req.id, req.on):
+            raise HTTPException(404, "that photo is not in Client pick")
+        return {"id": req.id, "pick": req.on}
+
+    @app.post("/api/cull/merge")
+    def cull_merge(req: CullMergeReq):
+        """Two products that are one (detail shots Find products split off): fold product into into, colour by colour,
+        and judge again from the stored measurements."""
+        _busy("cull")
+        conn = _cull_conn()
+        with state["cull_lock"]:
+            if state["cull"]["running"]:
+                raise HTTPException(409, "still picking")
+            state["cull"]["running"] = True
+        try:
+            try:
+                cull_mod.merge_products(conn, req.product, req.into)
+            except KeyError as e:
+                raise HTTPException(404, str(e))
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            with awake.hold():
+                cull_mod.run(state["root"])
+        finally:
+            state["cull"]["running"] = False
+        state["stale"] = True
+        return cull_mod.listing(conn)
+
+    @app.post("/api/cull/pile")
+    def cull_to_pile():
+        """Every pick into the pile, product by product. Answers with the pile and {added}."""
+        from . import pile as pile_mod
+        conn = _cull_conn()
+        ids = [f["id"] for p in cull_mod.listing(conn)["products"] for f in p["picks"]]
+        before = set(pile_mod.ids(conn))
+        pile_mod.add(conn, ids)
+        usage.log("client_pick_pile", n=len(ids))
+        return dict(pile_mod.summary(conn), added=len([i for i in ids if i not in before]))
+
+    @app.post("/api/export/cull")
+    def export_cull(req: CullExportReq):
+        """The picks, one folder per product with one folder per colour inside, under
+        <destination>/<shoot>/client pick/, and client pick.csv beside them: product, colour, angle, file, status and
+        the reason for every frame left out."""
+        from .export import export_dir, rows_for_ids, _place, transfer_files
+        import csv as csv_mod
+        if req.mode not in ("copy", "symlink"):
+            raise HTTPException(400, "mode must be copy or symlink")
+        with state["export_lock"]:
+            root_at_start = state["root"]
+            if root_at_start is None:
+                raise HTTPException(400, "no folder open")
+            if state["export"]["running"]:
+                raise HTTPException(409, "an export is already running")
+            conn = db.connect(root_at_start); cull_mod._ensure(conn)
+            folders, rows = cull_mod.export_plan(conn)
+            if not folders:
+                raise HTTPException(400, "nothing is picked yet")
+            base = _resolve_base()
+            try:
+                out = export_dir(root_at_start, "client pick", base)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            jobs: list = []
+            for sub, ids in folders.items():
+                for r in rows_for_ids(root_at_start, ids):
+                    _place(jobs, r, sub, req.include_raw)
+            if req.mode == "copy":
+                need = 0
+                for _, rel, _ in jobs:
+                    try:
+                        need += (Path(root_at_start) / rel).stat().st_size
+                    except OSError:
+                        pass
+                _check_free(need, base)
+            n = len(jobs)
+            state["export"] = {"running": True, "done": 0, "total": n, "failed": 0, "skipped": 0, "path": None, "error": None}
+        t0 = _export_started("client_pick", "local", n, route="/api/export/cull", body=req.model_dump(), mode=req.mode,
+                             folders=len(folders), include_raw=req.include_raw)
+
+        def prog(d):
+            state["export"].update(d)
+
+        def _run_export():
+            try:
+                with awake.hold():
+                    out.mkdir(parents=True, exist_ok=True)
+                    for sub in folders:
+                        (out / sub).mkdir(parents=True, exist_ok=True)
+                    transfer_files(root_at_start, [(pid, rel, out / sub) for pid, rel, sub in jobs], req.mode,
+                                   out / "failed.txt", prog)
+                    def cell(x):                    # a spreadsheet must never read a file name as a formula
+                        x = str(x)
+                        return "'" + x if x[:1] in ("=", "+", "-", "@") else x
+                    with open(out / "client pick.csv", "w", newline="") as fh:
+                        w = csv_mod.writer(fh)
+                        w.writerow(["product", "colour", "angle", "file", "status", "reason"])
+                        w.writerows([[cell(x) for x in r] for r in rows])
+                    state["export"]["path"] = str(out)
+            except Exception as e:
+                state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+            finally:
+                state["export"]["running"] = False
+                _export_finished("client_pick", "local", t0)
+
+        threading.Thread(target=_run_export, daemon=True).start()
+        return {"started": True, "total": n, "folders": sorted(folders)}
+    # ===== end client pick =====
 
     @app.post("/api/clipfaces/find")
     def start_clip_faces():
@@ -1848,6 +2462,58 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 usage.log("api_error", route=req["route"], what="record_export", error=str(e))
         # ===== end export history =====
 
+    # ===== export summary: what is about to happen, before the button (Q4) =====
+    def _record_export_rate(root: Path, req: ExportReq, nbytes: int | None, t0: float) -> None:
+        """Time a finished selection copy for the next summary (export.record_rate). Only a clean run says
+        anything: a skipped file was never read and a failed one may have stopped half way. A web-size run is
+        timed per photo only when every file in it was a photo re-encoded (no clips, no RAW riding along)."""
+        from . import export as export_mod
+        ex = state["export"]
+        if req.mode != "copy" or ex.get("failed") or ex.get("skipped"):
+            return
+        conn = db.connect(root)
+        seconds = time.time() - t0
+        if req.web_size:
+            kinds = export_mod.rows_for_ids(root, req.ids)
+            if req.include_raw or any(Path(r["rel"]).suffix.lower() not in STD_EXTS for r in kinds):
+                return
+            export_mod.record_rate(conn, 0, seconds, int(ex.get("done") or 0), web=True)
+        elif nbytes:
+            export_mod.record_rate(conn, nbytes, seconds, int(ex.get("done") or 0), web=False)
+
+    @app.post("/api/export/plan")
+    def export_plan(req: ExportReq):
+        """The line above the Export button: {n, photos, videos, files, web, bytes, dest, dest_error, free, fits,
+        seconds, basis}. files counts RAW siblings when include_raw; web is how many photos a web size would
+        re-encode; bytes is what is read off the shoot disk; basis is "measured" when the time comes from this
+        shoot's own last export, "estimate" when it is the conservative constant (export.COPY_BPS). Writes
+        nothing and creates no folder (the default destination excepted, as every export creates it)."""
+        from . import export as export_mod
+        if state["root"] is None:
+            raise HTTPException(400, "no folder open")
+        root = state["root"]
+        rows = export_mod.rows_for_ids(root, req.ids)
+        raws = [r["sibling"] for r in rows if req.include_raw and req.mode == "copy" and r["sibling"]]
+        main = sum(int(r["size"] or 0) for r in rows)
+        sibling = export_mod.jobs_bytes(root, [(0, rel, "") for rel in raws])      # RAW sizes are not in the index
+        resized = [r for r in rows if req.mode == "copy" and req.web_size and Path(r["rel"]).suffix.lower() in STD_EXTS]
+        videos = sum(1 for r in rows if r["kind"] == "video")
+        out = {"n": len(rows), "photos": len(rows) - videos, "videos": videos, "files": len(rows) + len(raws), "web": len(resized),
+               "bytes": main + sibling, "dest": None, "dest_error": None, "free": None, "fits": None}
+        try:
+            base = _resolve_base()
+            out["dest"] = str(export_mod.export_dir(root, req.name or "export", base))
+            out["free"] = shutil.disk_usage(base).free
+            out["fits"] = req.mode != "copy" or out["bytes"] + EXPORT_HEADROOM <= out["free"]
+        except HTTPException as e:
+            out["dest_error"] = e.detail
+        except ValueError as e:
+            out["dest_error"] = str(e)
+        copied = main + sibling - sum(int(r["size"] or 0) for r in resized)
+        out["seconds"], out["basis"] = export_mod.estimate_seconds(db.connect(root), req.mode, copied, len(resized))
+        return out
+    # ===== end export summary =====
+
     @app.post("/api/export")
     def export(req: ExportReq):
         """The selection under <destination>/<shoot>/<name>. mode copy, symlink or csv; web_size (copies only)
@@ -1887,6 +2553,10 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 with awake.hold():
                     state["export"]["path"] = str(export_ids(root_at_start, req.ids, req.name, req.mode, progress=prog, base=base,
                                                              include_raw=req.include_raw, web_size=req.web_size))
+                try:
+                    _record_export_rate(root_at_start, req, nbytes, t0)
+                except Exception as e:                 # a timing that cannot be kept never fails the export
+                    usage.log("api_error", route="/api/export", what="record_rate", error=str(e))
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:

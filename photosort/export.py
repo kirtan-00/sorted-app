@@ -256,7 +256,8 @@ def category_rows(root: Path, categories: list[str] | None, include_unsure: bool
     category being the folder the row lands in. None means every category that has a photo; "unclassified"
     (category NULL) only when named explicitly. Placement follows search.category_match: a row filed under
     X, and a row filed under "other" whose best guess was X (that one, and a row under X with a score below
-    SURE_MIN, is "less sure" and only included with include_unsure). A row can land in two folders.
+    SURE_MIN, is "less sure" and only included with include_unsure, as is a row that fits X as a secondary,
+    photo_categories). A row can land in two folders.
     hide_bad leaves out rows the focus pass labelled bad (unchecked rows stay)."""
     from .search import category_match
     conn = db.connect(Path(root))
@@ -267,10 +268,13 @@ def category_rows(root: Path, categories: list[str] | None, include_unsure: bool
     out: list[dict] = []
     if names:
         q = ",".join("?" * len(names))
+        # A secondary (photo_categories) is never sure, so it is only fetched when the less sure are wanted.
+        also_sql = f" OR id IN (SELECT photo_id FROM photo_categories WHERE category IN ({q}))" if include_unsure else ""
         rows = conn.execute(f"SELECT id, rel, sibling, size, category, category_score, category_guess, category_guess_score, kind, duration FROM photos "
-                            f"WHERE status='ok' {bad}AND (category IN ({q}) OR (category IN (?, 'people') AND category_guess IN ({q}))) ORDER BY id",
-                            names + [CATEGORY_FALLBACK] + names).fetchall()
-        rows = [dict(r) for r in rows]
+                            f"WHERE status='ok' {bad}AND (category IN ({q}) OR (category IN (?, 'people') AND category_guess IN ({q})){also_sql}) ORDER BY id",
+                            names + [CATEGORY_FALLBACK] + names + (names if include_unsure else [])).fetchall()
+        also = db.load_photo_categories(conn) if include_unsure else {}
+        rows = [dict(r, also=also.get(r["id"], {})) for r in rows]
         for cat in names:
             for r in rows:
                 m = category_match(r, cat)
@@ -527,11 +531,11 @@ def export_categories(root: Path, categories: list[str] | None, mode: str = "cop
     return out
 
 def rows_for_ids(root: Path, ids: list[int]) -> list:
-    """status='ok' rows (id, rel, sibling, size) for these ids, in id order. Chunked: SQLite caps bound variables."""
+    """status='ok' rows (id, rel, sibling, size, kind) for these ids, in id order. Chunked: SQLite caps bound variables."""
     conn = db.connect(Path(root)); rows = []
     for i in range(0, len(ids), 900):
         chunk = ids[i:i + 900]; q = ",".join("?" * len(chunk))
-        rows += conn.execute(f"SELECT id, rel, sibling, size FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
+        rows += conn.execute(f"SELECT id, rel, sibling, size, kind FROM photos WHERE id IN ({q}) AND status='ok' ORDER BY id", chunk).fetchall()
     return rows
 
 def folders_bytes(root: Path, folders: dict[str, list[int]], include_raw: bool = False) -> int:
@@ -545,6 +549,70 @@ def folders_bytes(root: Path, folders: dict[str, list[int]], include_raw: bool =
                 try: total += os.stat(root / r["sibling"]).st_size
                 except OSError: pass
     return int(total)
+
+# ===== how long an export will take, said before the button (Q4, backlog item 13) =====
+# Two costs, timed apart because they are different kinds of cost: a plain copy is bytes off the shoot disk,
+# a web-size copy is a JPEG decoded, resized and encoded again, which is CPU per photo whatever its size.
+#
+# Until this shoot has exported something big enough to time, the estimate is a constant, and the summary
+# says "estimate" rather than pretending. COPY_BPS is not measured on any disk: 50 MB/s is about half of
+# what a USB 3 portable drive or a UHS-I card reader reads sequentially, kept low because a shoot is many
+# files, not one stream, and the slowest disk in the chain sets the pace. WEB_SECONDS_PER_PHOTO is measured
+# in part: web_copy to 2048 px took 0.16 s on a 24 MP JPEG and 0.26 s on a 61 MP one on an M-series Mac with
+# the file already on its SSD; 0.75 s adds reading that 25 MB file at the COPY_BPS above, so it is the worst
+# common case, not the average.
+COPY_BPS = 50_000_000
+WEB_SECONDS_PER_PHOTO = 0.75
+# A copy shorter than this is mostly opening and closing files, so it says nothing about the disk's speed.
+RATE_MIN_BYTES = 200_000_000
+RATE_MIN_SECONDS = 3.0
+RATE_MIN_WEB_FILES = 20
+_RATE_KEYS = {"copy": "export_copy_bps", "web": "export_web_spf"}
+
+def record_rate(conn, nbytes: int, seconds: float, files: int, web: bool) -> None:
+    """Keep what a finished export measured, in the shoot's meta: bytes a second for a plain copy, seconds a
+    photo for a web-size one. The last one big enough to say anything wins (the disk it came off is this
+    shoot's, which is the half of the pair that rarely changes)."""
+    import json, time as _t
+    if seconds <= 0 or seconds < RATE_MIN_SECONDS:
+        return
+    if web:
+        if files < max(RATE_MIN_WEB_FILES, 1):
+            return
+        db.set_meta(conn, _RATE_KEYS["web"], json.dumps({"value": seconds / files, "files": files, "seconds": seconds, "at": _t.time()}))
+    else:
+        if nbytes < max(RATE_MIN_BYTES, 1):
+            return
+        db.set_meta(conn, _RATE_KEYS["copy"], json.dumps({"value": nbytes / seconds, "bytes": nbytes, "seconds": seconds, "at": _t.time()}))
+
+def export_rates(conn) -> dict[str, float]:
+    """{"copy": bytes a second, "web": seconds a photo}, only the ones this shoot has measured."""
+    import json
+    out = {}
+    for k, key in _RATE_KEYS.items():
+        raw = db.get_meta(conn, key)
+        try:
+            v = float(json.loads(raw)["value"]) if raw else 0.0
+        except (ValueError, KeyError, TypeError):
+            v = 0.0
+        if v > 0:
+            out[k] = v
+    return out
+
+def estimate_seconds(conn, mode: str, copy_bytes: int, web_files: int) -> tuple[float, str]:
+    """(seconds, "measured" | "estimate") for an export that copies copy_bytes as they are and re-encodes
+    web_files photos. Links and a CSV write no file data: 0. "measured" only when every part of the sum
+    came off a measured rate."""
+    if mode != "copy":
+        return 0.0, "estimate"
+    rates = export_rates(conn)
+    seconds, measured = 0.0, True
+    if copy_bytes:
+        seconds += copy_bytes / rates.get("copy", COPY_BPS); measured &= "copy" in rates
+    if web_files:
+        seconds += web_files * rates.get("web", WEB_SECONDS_PER_PHOTO); measured &= "web" in rates
+    return seconds, ("measured" if measured and (copy_bytes or web_files) else "estimate")
+# ===== end how long =====
 
 def export_folders(root: Path, group: str, folders: dict[str, list[int]], mode: str = "copy", include_raw: bool = False,
                    base: Path | None = None, progress=None) -> Path:

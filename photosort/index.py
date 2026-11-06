@@ -8,7 +8,7 @@ from . import db
 from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, VIDEO_WORKERS, VIDEO_EXTS, EMBED_BATCH, YUNET_PATH, SFACE_PATH
 from .walk import find_images, quick_hash
 from .decode import load_preview
-from .features import phash, exif_info, sharpness_tiles, to_gray
+from .features import phash, exif_info, sharpness_tiles, to_gray, SETTING_KEYS
 from .places import READ_KEY as _PLACES_READ_KEY
 
 CURRENT_MAX = 120        # how much of the path in flight the progress payload carries
@@ -83,12 +83,13 @@ def _process_video(root: str, rel: str, out: dict, want_faces: bool = False) -> 
     sampled frames for the thumb, the grid, the sharpness and the embedding (done later, in the embed
     stage), one segment row per scene. With faces on, YuNet over those same frames gives the clip its head
     count and face size (clip_face_summary); n_faces stays 0 on a clip, see db.connect for why."""
-    from . import video
+    from . import flicker, video
     path = Path(root) / rel
     qh = quick_hash(path)
     info = video.probe(path)
     side = video.read_sidecar(path)
     frames, segs = video.sample_frames(path, info["duration"], key=(info["codec"], info["pix_fmt"]), fps=info["fps"])
+    light = flicker.check_clip(path, info["duration"], info["fps"])["flicker"]
     # A clip whose Sony sidecar says S-Log3 gets every sampled frame converted to Rec.709 before anything
     # is saved: thumb, grid and frames/ all show (and embed) a normal-contrast picture. Display only.
     if video.is_slog3(side["gamma"]):
@@ -117,7 +118,7 @@ def _process_video(root: str, rel: str, out: dict, want_faces: bool = False) -> 
         fps=info["fps"] or None,
         # '' rather than NULL: the sidecar was looked for and said nothing, so the catch-up pass has nothing
         # left to find here (see db.connect)
-        gamma=side["gamma"] or "", capture_fps=side["capture_fps"], people=people, face_h=face_h)
+        gamma=side["gamma"] or "", capture_fps=side["capture_fps"], people=people, face_h=face_h, flicker=light)
     out["segments"] = []
     for i, (a, b) in enumerate(segs):
         k = min(range(len(frames)), key=lambda k: abs(frames[k][0] - (a + b) / 2))
@@ -148,7 +149,8 @@ def process_one(args: tuple[str, str, bool]) -> dict:
             width=info["width"] or im.width, height=info["height"] or im.height, taken_at=info["taken_at"],
             camera=info["camera"], phash=phash(im), sharp_tile=p90, sharp_max=mx, sharp_eye=eye,
             sharp=eye if eye is not None else p90, n_faces=len(faces) if want_faces else None, status="ok", kind="photo",
-            aerial=int(info["aerial"]), lat=info["lat"], lon=info["lon"])
+            aerial=int(info["aerial"]), lat=info["lat"], lon=info["lon"],
+            **{k: info[k] for k in SETTING_KEYS})
         out["faces"] = [dict(x=f.x, y=f.y, w=f.w, h=f.h, score=f.score, landmarks=json.dumps(f.landmarks.tolist()),
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
     except Exception as e:
@@ -380,6 +382,86 @@ def read_clip_info(root: Path, progress: Callable[[dict], None] | None = None) -
 # The names this pass shipped under in v0.4.0, when it read the frame rate alone.
 fps_status = clip_info_status
 read_fps = read_clip_info
+
+# ===== camera settings catch-up: shutter, aperture, ISO, EV, focal length and lens for stills indexed before v0.7 =====
+CAMERA_READ_KEY = "camera_info_read_at"
+
+def flicker_status(root: Path) -> dict:
+    """{clips, unchecked}: ok clips, and those no flicker pass has looked at (a shoot scanned before the column)."""
+    conn = db.connect(Path(root))
+    r = conn.execute("SELECT COUNT(*), SUM(flicker IS NULL) FROM photos WHERE status='ok' AND kind='video'").fetchone()
+    return {"clips": int(r[0] or 0), "unchecked": int(r[1] or 0)}
+
+def read_flicker(root: Path, progress: Callable[[dict], None] | None = None) -> dict:
+    """Run flicker.check_clip over every ok clip not checked yet. Needs the shoot disk, decodes a few seconds of each
+    clip and writes nothing under the shoot root. A clip not on the disk stays NULL. Returns {read, found, missing}."""
+    from . import flicker
+    root = Path(root); conn = db.connect(root)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, rel, duration, fps FROM photos WHERE status='ok' AND kind='video' AND flicker IS NULL ORDER BY id")]
+    emit = progress or (lambda d: None)
+    found = missing = 0
+    for i, r in enumerate(rows, 1):
+        path = root / r["rel"]
+        if not path.is_file():
+            missing += 1
+        else:
+            v = flicker.check_clip(path, r["duration"] or 0.0, r["fps"] or 0.0)["flicker"]
+            conn.execute("UPDATE photos SET flicker=? WHERE id=?", (v, r["id"]))
+            conn.commit()
+            found += int(v in ("pulsing", "banding"))
+        emit({"stage": "flicker", "done": i, "total": len(rows)})
+    return {"read": len(rows), "found": found, "missing": missing}
+
+def camera_info_status(root: Path) -> dict:
+    """{photos, known, unknown, read_at}: stills whose exposure settings have been read (lens not NULL) and the
+    rest. read_at is null until the catch-up pass has run once; the rail hangs its button on it."""
+    conn = db.connect(Path(root))
+    r = conn.execute("SELECT COUNT(*), SUM(lens IS NOT NULL AND flash IS NOT NULL) FROM photos WHERE status='ok' AND kind!='video'").fetchone()
+    n, known = int(r[0] or 0), int(r[1] or 0)
+    return {"photos": n, "known": known, "unknown": n - known, "read_at": db.get_meta(conn, CAMERA_READ_KEY)}
+
+def read_camera_info(root: Path, progress: Callable[[dict], None] | None = None) -> dict:
+    """Read the exposure settings (features.SETTING_KEYS) off every ok still that has never had them read. Needs the
+    shoot disk; reads the EXIF header only (2 ms a 61 MP Sony JPG, measured), decodes no picture and writes nothing
+    under the shoot root. A file not on the disk now is counted missing and left NULL, so the pass is safe to run
+    half mounted and again later. Same job row and 2 s progress cadence as read_clip_info. Returns {read, found, missing}."""
+    root = Path(root); conn = db.connect(root)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, rel FROM photos WHERE status='ok' AND kind!='video' AND (lens IS NULL OR flash IS NULL) ORDER BY id")]
+    total = len(rows)
+    emit = progress or (lambda d: None)
+    job = db.start_job(conn, "camera", {"stage": "camera", "done": 0, "total": total})
+    found = missing = 0
+    written = 0.0
+    cols = ", ".join(f"{k}=?" for k in SETTING_KEYS)
+    try:
+        emit({"stage": "camera", "done": 0, "total": total})
+        for i, r in enumerate(rows, 1):
+            path = root / r["rel"]
+            if not path.is_file():
+                missing += 1
+            else:
+                info = exif_info(path)
+                info["lens"] = info["lens"] or ""
+                conn.execute(f"UPDATE photos SET {cols} WHERE id=?", [info[k] for k in SETTING_KEYS] + [r["id"]])
+                found += int(info["exposure_s"] is not None)
+            if i % 200 == 0 or i == total:
+                conn.commit()
+            now = time.time()
+            if now - written >= 2.0 or i == total:
+                written = now
+                emit({"stage": "camera", "done": i, "total": total})
+                db.job_progress(conn, job, {"stage": "camera", "done": i, "total": total})
+        conn.commit()
+    except BaseException as e:
+        db.finish_job(conn, job, "failed", error=f"{type(e).__name__}: {e}")
+        raise
+    if not (total and missing == total):
+        db.set_meta(conn, CAMERA_READ_KEY, time.strftime("%Y-%m-%d %H:%M:%S"))
+    db.finish_job(conn, job, "done")
+    return {"read": total, "found": found, "missing": missing}
+# ===== end camera settings catch-up =====
 
 def clip_faces_status(root: Path) -> dict:
     """{clips, scanned, pending}: clips whose frames have been through face detection, and clips not yet."""

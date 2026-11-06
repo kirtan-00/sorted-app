@@ -96,6 +96,26 @@ def test_category_search_puts_sure_first_then_less_sure_by_confidence(tmp_path):
     assert [r["rel"] for r in other] == ["c.jpg", "d.jpg", "e.jpg", "g.jpg"] and all(r["sure"] for r in other)
     assert all(r["sure"] and r["confidence"] == 1.0 for r in ix.search())
 
+def test_a_row_shows_under_every_category_it_fits(tmp_path):
+    """A clip filed as interview at 0.55 with people at 0.41 is under both tiles: first among the interviews,
+    and in the people grid's less sure band at its own people probability (a runner-up is never sure: the
+    winner already took more of the softmax). Nothing else is listed under people because of it."""
+    _shoot_with_scores(tmp_path, [
+        ("int.jpg", "interview", 0.55, "interview", 0.55, None, None),
+        ("ppl.jpg", "people", 0.9, "people", 0.9, None, None),
+        ("bch.jpg", "beach", 0.9, "beach", 0.9, None, None),
+    ])
+    conn = db.connect(tmp_path)
+    pid = conn.execute("SELECT id FROM photos WHERE rel='int.jpg'").fetchone()[0]
+    db.replace_photo_categories(conn, [(pid, "people", 0.41)])
+    ix = Index(tmp_path)
+    got = ix.search(filters=Filters(category="people"))
+    assert [(r["rel"], r["sure"], r["confidence"]) for r in got] == [("ppl.jpg", True, 0.9), ("int.jpg", False, 0.41)]
+    assert [r["rel"] for r in ix.search(filters=Filters(category="interview"))] == ["int.jpg"]
+    assert [r["rel"] for r in ix.search(filters=Filters(category="beach"))] == ["bch.jpg"]
+    assert [r["rel"] for r in ix.search(filters=Filters(category="people", sure_only=True))] == ["ppl.jpg"]
+    assert next(r for r in got if r["rel"] == "int.jpg")["also"] == {"people": 0.41}
+
 def test_cluster_search_uses_cluster_score_for_the_divider(tmp_path):
     _shoot_with_scores(tmp_path, [
         ("a.jpg", None, None, None, None, "excavator", 0.2),
@@ -468,3 +488,47 @@ def test_the_faces_filter_counts_people_in_a_clip_and_skips_clips_never_looked_a
     assert sorted(r["rel"] for r in ix.search(filters=Filters(faces="two"))) == ["709.mp4", "still.jpg"]
     row = next(r for r in ix.search() if r["rel"] == "709.mp4")
     assert (row["people"], row["gamma"], row["capture_fps"]) == (2, "rec709", 100.0)
+
+
+# ===== what each filter would leave: live counts for the facet rail (Q4) =====
+
+def test_facet_counts_with_nothing_on_are_the_shoot(tmp_path):
+    ix = _clip_shoot(tmp_path)
+    f = ix.facet_counts(Filters())
+    assert f["total"] == 5
+    assert f["kind"] == {"photos": 1, "videos": 4}
+    assert f["faces"] == {"none": 1, "one": 1, "two": 2}            # old.mp4 was never looked at: in none of them
+    assert f["cameras"] == {"SONY ILCE-7SM3": 3, "Apple iPhone 15 Pro": 1}
+    assert f["duration"] == {"lt10": 1, "10to30": 1, "30to120": 1, "gt120": 1}
+    assert f["slowmo"] == {"slow": 1, "normal": 2}
+    assert f["look"] == {"log": 1, "standard": 1}
+    assert sum(f["days"].values()) == 5 and f["drone"] == 0
+
+
+def test_each_facet_is_counted_under_every_filter_but_its_own(tmp_path):
+    """With videos and the Sony on, the camera list still offers the iPhone with what it would show (counted
+    under videos alone), the kind segments say what the Sony shot of each kind, and every other axis counts
+    what is on screen. That is what lets an editor learn the shoot by narrowing it."""
+    ix = _clip_shoot(tmp_path)
+    f = ix.facet_counts(Filters(kind="videos", camera="SONY ILCE-7SM3"))
+    assert f["total"] == 2 == len(ix.query(filters=Filters(kind="videos", camera="SONY ILCE-7SM3")))
+    assert f["cameras"] == {"SONY ILCE-7SM3": 2, "Apple iPhone 15 Pro": 1}
+    assert f["kind"] == {"photos": 1, "videos": 2}
+    assert f["duration"] == {"lt10": 1, "10to30": 1}
+    assert f["faces"] == {"one": 1, "two": 1}
+    g = ix.facet_counts(Filters(faces="two"))
+    assert g["total"] == 2 and g["faces"] == {"none": 1, "one": 1, "two": 2} and g["kind"] == {"photos": 1, "videos": 1}
+
+
+def test_facet_counts_list_a_row_under_every_category_it_fits(tmp_path):
+    _shoot_with_scores(tmp_path, [
+        ("int.jpg", "interview", 0.55, "interview", 0.55, None, None),
+        ("bch.jpg", "people", 1.0, "beach", 0.4, None, None),
+        ("oth.jpg", "other", 0.3, "office", 0.3, None, None),
+    ])
+    conn = db.connect(tmp_path)
+    pid = conn.execute("SELECT id FROM photos WHERE rel='int.jpg'").fetchone()[0]
+    db.replace_photo_categories(conn, [(pid, "people", 0.41)])
+    f = Index(tmp_path).facet_counts(Filters(category="people"))
+    assert f["categories"] == {"interview": 1, "people": 2, "beach": 1, "other": 1, "office": 1}
+    assert f["total"] == 2

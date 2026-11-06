@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live shoot</title>
+<link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/scene.css">
+<link rel="stylesheet" href="/ui/live.css">
+</head>
+<body class="live">
+
+<header class="top">
+  <h1 class="title" id="title">Live shoot</h1>
+  <dl class="tally">
+    <div><dd id="n-shots">0</dd><dt id="w-shots">shots</dt></div>
+    <div><dd id="n-sharp">0</dd><dt>sharp</dt></div>
+    <div><dd id="n-soft">0</dd><dt>soft</dt></div>
+    <div><dd id="n-flash">0</dd><dt>flash</dt></div>
+  </dl>
+  <p id="queue" class="queue" role="status" hidden></p>
+  <p id="drive-line" class="drive-line" role="status" hidden></p>
+  <p class="state" role="status"><i id="state-dot" class="dot"></i><span id="state-text">Connecting to the Mac</span></p>
+  <button type="button" class="btn" id="panel-toggle" aria-controls="rail" aria-expanded="true">Hide panel</button>
+</header>
+
+<div class="alarms" id="alarms">
+  <p class="alarm" id="drive-alarm" role="alert" hidden></p>
+  <div class="offer" id="client-back" hidden>
+    <span>The client's screen is gone.</span>
+    <button type="button" class="btn" id="client-back-btn">Put client view back</button>
+  </div>
+</div>
+
+<main class="stage" id="stage">
+  <div class="frame" id="frame"></div>
+  <div class="empty" id="empty">
+    <p class="empty-lead" id="empty-lead"></p>
+    <p class="empty-sub" id="empty-sub"></p>
+  </div>
+  <div class="side" id="side" hidden>
+    <div class="verdict" id="verdict" aria-live="polite"></div>
+    <ul class="alerts" id="alerts" aria-live="polite"></ul>
+    <div class="group-note" id="group-note"></div>
+    <div class="caption">
+      <p class="caption-file" id="caption"></p>
+      <p class="caption-dest" id="caption-dest"></p>
+    </div>
+    <p class="side-state" id="side-state" hidden></p>
+    <div class="side-tools">
+      <p class="held" id="held" role="status" hidden></p>
+      <button type="button" class="btn" id="zoom" title="Z">Zoom to 100%</button>
+      <button type="button" class="btn" id="compare" title="Hold C">Compare with previous</button>
+      <button type="button" class="btn" id="hide" aria-pressed="false">Hide from client</button>
+    </div>
+  </div>
+  <div class="scene-view" id="scene-view" hidden>
+    <div id="finder-scene" class="finder-scene" hidden aria-hidden="true"></div>
+  </div>
+</main>
+
+<aside class="rail" id="rail" aria-label="Sorted shots">
+  <div class="tabs" role="tablist" aria-label="Category">
+    <button type="button" role="tab" id="tab-products" aria-controls="piles" aria-selected="true"><span>Products</span><b id="tab-products-n">0</b></button>
+    <button type="button" role="tab" id="tab-models" aria-controls="piles-models" aria-selected="false" tabindex="-1"><span>Models</span><b id="tab-models-n">0</b></button>
+  </div>
+  <div class="tab-body" role="tabpanel" aria-labelledby="tab-products" id="panel-products">
+    <ol class="piles" id="piles"></ol>
+    <p class="piles-empty" id="products-empty">Shots of products land here, one pile for each product.</p>
+  </div>
+  <div class="tab-body" role="tabpanel" aria-labelledby="tab-models" id="panel-models" hidden>
+    <ol class="piles" id="piles-models"></ol>
+    <p class="piles-empty" id="models-empty">Shots of people land here, one pile for each model. Type a model name below to start one.</p>
+  </div>
+  <div class="soft-slot" id="soft-slot"></div>
+</aside>
+
+<footer class="bar">
+  <div class="bar-group grow">
+    <label class="scan"><span>Product</span><input type="text" id="product" spellcheck="false" autocomplete="off"></label>
+    <label class="scan"><span>Model</span><input type="text" id="model" spellcheck="false" autocomplete="off"></label>
+  </div>
+  <div class="bar-group">
+    <div class="seg" role="group" aria-label="View">
+      <button type="button" id="view-picture" aria-pressed="true">Picture</button>
+      <button type="button" id="view-desktop" aria-pressed="false">Desktop</button>
+    </div>
+    <button type="button" class="btn" id="pause" title="Space">Pause</button>
+    <button type="button" class="btn" id="full" title="F">Fullscreen</button>
+    <button type="button" class="btn" id="client-open">Open client window</button>
+    <button type="button" class="btn" id="export" disabled>Export for store</button>
+    <button type="button" class="btn" id="stop" hidden>Stop</button>
+    <button type="button" class="btn primary" id="new-shoot" hidden>New shoot</button>
+  </div>
+  <p class="note" id="note" role="status" hidden></p>
+</footer>
+
+<section class="setup" id="setup" aria-labelledby="setup-title" hidden>
+  <form class="setup-form" id="setup-form" novalidate>
+    <div class="setup-brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="4" y="4" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="4" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36.6" y="3.4" width="24" height="24" rx="5" fill="#f3c8d0" transform="rotate(12 48.6 15.4)"/></svg>
+      <h1 id="setup-title">Start a live shoot</h1>
+    </div>
+
+    <ol class="steps">
+      <li class="step">
+        <h2><label for="folder">Where the camera app saves</label></h2>
+        <p class="step-help">The folder your tether app writes to. Nothing in it is moved or changed.</p>
+        <div class="step-row">
+          <input type="text" id="folder" class="path" placeholder="Pick the folder or type its path" spellcheck="false" autocomplete="off">
+          <button type="button" class="btn" id="pick">Choose folder</button>
+        </div>
+        <div class="flash-row">
+          <span id="flash-label">Flash</span>
+          <div class="seg" role="group" aria-labelledby="flash-label">
+            <button type="button" id="flash-unknown" aria-pressed="true" title="Read it from each file">Read from the file</button>
+            <button type="button" id="flash-strobe" aria-pressed="false" title="Radio triggers often leave no flash mark in the file. This counts every frame as flash.">Strobes</button>
+            <button type="button" id="flash-none" aria-pressed="false" title="Count every frame without a flash mark as no flash">No flash</button>
+          </div>
+        </div>
+      </li>
+      <li class="step">
+        <h2 id="drive-title">Where to keep the sorted photos</h2>
+        <p class="step-help">Connect the SSD or hard disk now. Each shot is copied there, sorted, as it lands.</p>
+        <div class="drives" id="drives" role="radiogroup" aria-labelledby="drive-title"></div>
+        <p class="step-warn" id="drive-warn" hidden></p>
+      </li>
+      <li class="step">
+        <h2><label for="shoot">Shoot name</label></h2>
+        <p class="step-help">The sorted photos go in a folder with this name.</p>
+        <div class="step-row"><input type="text" id="shoot" spellcheck="false" autocomplete="off"></div>
+        <div class="finds">
+          <label class="tick"><input type="checkbox" id="find-people" checked> Find people</label>
+          <label class="tick"><input type="checkbox" id="find-products" checked> Find products</label>
+        </div>
+        <p class="step-help">Both can be run later from the People and Products tabs.</p>
+      </li>
+    </ol>
+
+    <p class="setup-error" id="setup-error" role="alert" hidden></p>
+    <div class="setup-go">
+      <button type="submit" class="btn primary" id="start" disabled>Start</button>
+      <button type="button" class="btn quiet" id="setup-back" hidden>Back to the last shoot</button>
+    </div>
+  </form>
+</section>
+
+<div class="client" id="client" hidden>
+  <svg class="client-mark" id="client-mark" viewBox="0 0 64 64" aria-hidden="true"><rect x="4" y="4" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="4" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36" y="36" width="24" height="24" rx="5" fill="#e6e6e6"/><rect x="36.6" y="3.4" width="24" height="24" rx="5" fill="#f3c8d0" transform="rotate(12 48.6 15.4)"/></svg>
+  <img id="client-a" alt="">
+  <img id="client-b" alt="">
+</div>
+
+<script type="module" src="/ui/liquid-glass.es.js"></script>
+<script src="/ui/scene.js"></script>
+<script src="/ui/live.js"></script>
+</body>
+</html>
