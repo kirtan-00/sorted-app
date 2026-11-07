@@ -56,6 +56,17 @@ def app_build() -> str | None:
         return None
 
 
+def stamp() -> tuple[str, str]:
+    """(VERSION, BUILD) as they are on disk right now, with no git call: /api/health compares this against what it
+    read at start to tell an update happened, and must answer without waiting on anything."""
+    def read(p: Path) -> str:
+        try:
+            return p.read_text().strip()
+        except OSError:
+            return ""
+    return read(VERSION_FILE), read(BUILD_FILE)
+
+
 def version_string() -> str:
     b = app_build()
     return f"{app_version()} ({b})" if b else app_version()

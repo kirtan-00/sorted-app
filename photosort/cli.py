@@ -9,8 +9,11 @@ def _progress(d):
         sys.stderr.write("\n")
 
 def cmd_index(a):
-    from .index import index_folder
-    s = index_folder(Path(a.folder), faces=not a.no_faces, workers=a.workers, progress=_progress, retry_errors=a.retry_errors)
+    from .index import DiskFull, index_folder
+    try:
+        s = index_folder(Path(a.folder), faces=not a.no_faces, workers=a.workers, progress=_progress, retry_errors=a.retry_errors)
+    except DiskFull as e:
+        sys.exit(str(e))
     print(f"indexed {s['indexed']}  skipped {s['skipped']}  errors {s['errors']}  embedded {s['embedded']}  in {s['seconds']}s")
 
 def cmd_bench(a):

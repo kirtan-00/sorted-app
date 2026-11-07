@@ -2,7 +2,8 @@
 
 sorted indexes a shoot (photos, RAW, videos) on your Mac and lets you search it in plain words,
 find every photo of a person, split it into categories, flag the out-of-focus ones and export
-the picks. Everything runs on the Mac, nothing is uploaded, and the shoot disk is never written to.
+the picks. Everything runs on the Mac, nothing is uploaded, and the photos and clips on the shoot disk
+are only ever read (a scan adds one project file beside them; see Privacy).
 
 ## Install
 

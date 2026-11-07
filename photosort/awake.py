@@ -74,3 +74,28 @@ class hold:
     def __exit__(self, *exc):
         release()
         return False
+
+
+# ===== a Live shoot also keeps the display on: the client's TV goes black when the Mac's display sleeps. Its own
+# caffeinate, so a scan's hold never turns the screen on and a shoot's end never drops a scan's hold. =====
+DISPLAY_CMD: list[str] = ["caffeinate", "-d", "-i", "-w", "{pid}"]
+_display: subprocess.Popen | None = None
+
+
+def display_on() -> None:
+    global _display
+    with _lock:
+        if _display is None or _display.poll() is not None:
+            cmd = [a.replace("{pid}", str(os.getpid())) for a in DISPLAY_CMD]
+            try:
+                _display = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (FileNotFoundError, PermissionError, OSError):
+                _display = None
+
+
+def display_off() -> None:
+    global _display
+    with _lock:
+        _stop(_display)
+        _display = None
+# ===== end display =====

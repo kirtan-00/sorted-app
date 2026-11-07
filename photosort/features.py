@@ -1,5 +1,5 @@
 from __future__ import annotations
-import math
+import io, math
 from pathlib import Path
 import cv2, imagehash, numpy as np
 import pillow_heif
@@ -200,8 +200,20 @@ def exif_info(path: Path) -> dict:
     cannot read), plus aerial: a DJI Make (Exif.Image.Make) or a DJI_ filename, deterministic, no model."""
     out = {"taken_at": None, "camera": None, "width": None, "height": None, "lat": None, "lon": None,
            "aerial": Path(path).name.upper().startswith("DJI_"), **{k: None for k in SETTING_KEYS}}
+    ext = Path(path).suffix.lower()
+    if ext == ".cr3" and _cr3_info(path, out):
+        if out["flash"] is None:
+            out["flash"] = -1
+        return out
     try:
-        with Image.open(path) as im:
+        if ext == ".raf":
+            # PIL and exifread both refuse a RAF; the JPEG inside it carries the camera's whole EXIF
+            from .rawmeta import raf_jpeg
+            data = raf_jpeg(path)
+            opened = Image.open(io.BytesIO(data)) if data else Image.open(path)
+        else:
+            opened = Image.open(path)
+        with opened as im:
             out["width"], out["height"] = im.size
             ex = im.getexif()
             # NewSubfileType bit 0 says IFD0 is a reduced-resolution copy (a DNG's preview), so im.size is
@@ -235,6 +247,34 @@ def exif_info(path: Path) -> dict:
     if out["flash"] is None:
         out["flash"] = -1
     return out
+
+def _cr3_info(path: Path, out: dict) -> bool:
+    """A CR3's EXIF from its CMT boxes (rawmeta.cr3_ifds) into out. False when the file is not a CR3 after all."""
+    from .rawmeta import cr3_ifds
+    got = cr3_ifds(path)
+    if not got:
+        return False
+    ifd0, exif, gps = got
+    try:
+        dt = exif.get(0x9003) or ifd0.get(0x0132)
+        if dt:
+            d, t = str(dt).split(" ", 1)
+            out["taken_at"] = d.replace(":", "-") + "T" + t
+    except ValueError:
+        pass
+    out["camera"] = _camera(_clean(ifd0.get(0x010F)), _clean(ifd0.get(0x0110)))
+    w, h = ifd0.get(0x0100), ifd0.get(0x0101)
+    if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+        out["width"], out["height"] = w, h
+    _settings_from_pil(exif, out)
+    if out["iso"] is None and isinstance(exif.get(0x8832), int) and exif[0x8832] > 0:
+        out["iso"] = int(exif[0x8832])          # RecommendedExposureIndex: Canon puts high ISOs there
+    try:
+        if gps:
+            out["lat"], out["lon"] = latlon_ok(_dms_to_deg(gps.get(2) or (), gps.get(1)), _dms_to_deg(gps.get(4) or (), gps.get(3)))
+    except Exception:
+        pass
+    return True
 
 def _exif_fallback(path: Path, out: dict) -> None:
     """Fill what PIL could not, with exifread (BSD), which walks the TIFF IFDs itself and so reads a file

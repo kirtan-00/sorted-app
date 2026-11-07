@@ -72,3 +72,15 @@ def test_one_list_in_the_words_and_no_second_way_out():
     assert "state.selected.clear" not in JS and "s.clear" not in JS    # nothing but the Clear button empties the list
     assert 'id="status-undo-link"' in HTML
     assert "the pile" not in _text(HTML).lower() and "selected" not in _text(HTML).lower()
+
+
+def test_the_keys_start_on_the_grid_and_the_ratings_button_is_there_once():
+    assert "autofocus" not in re.search(r'<input type="search"[^>]*>', HTML).group(0)
+    assert _text(HTML).count("Save ratings for Lightroom") == 2         # the button, and its line in How it works
+    assert 'id="xmp-sel"' not in HTML and "xmp-sel" not in JS
+
+
+def test_the_tiles_and_the_full_size_view_say_what_they_are():
+    assert 'id="grid" class="grid" role="listbox"' in HTML and '"role", "option"' in JS and 'tileLabel(r)' in JS
+    assert 'id="lightbox" role="dialog" aria-modal="true"' in HTML and "trapTab" in JS
+    assert 'src="/ui/loupe.js"' in HTML and HTML.index("/ui/loupe.js") < HTML.index("/ui/app.js")

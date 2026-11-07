@@ -23,6 +23,18 @@ def _fit(im: Image.Image, max_edge: int) -> Image.Image:
     return im
 
 def _load_raw(path: Path, max_edge: int) -> Image.Image:
+    """The camera's own preview through LibRaw, else a half-size decode. When LibRaw cannot open the file at all (a
+    CR3 or RAF from a body newer than this LibRaw), the JPEG the camera put in the container (rawmeta)."""
+    try:
+        return _load_raw_libraw(path, max_edge)
+    except Exception:
+        from .rawmeta import embedded_preview
+        im = embedded_preview(path)
+        if im is None:
+            raise
+        return _fit(im, max_edge)
+
+def _load_raw_libraw(path: Path, max_edge: int) -> Image.Image:
     import rawpy
     with rawpy.imread(str(path)) as raw:
         flip = raw.sizes.flip

@@ -158,6 +158,75 @@ def write_sidecars(root: Path, landed: list[tuple[int, Path]], log_dir: Path) ->
     return n
 # ===== end XMP sidecars on export =====
 
+# ===== before an export: what is already in the folder, so a repeat is a question and not "exported 0 of 3" =====
+def _long_edge(p: Path) -> int | None:
+    from PIL import Image
+    try:
+        import pillow_heif; pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+    try:
+        with Image.open(p) as im:
+            return max(im.size)
+    except Exception:
+        return None
+
+def _same_version(dst: Path, src: Path, mode: str, web_size: int | None) -> bool:
+    """dst is what this export would write for src: the link for a link, the original for a full-size copy, and for a
+    web size the same mtime AND the size asked for, or a full-size copy would pass as the web one it is not."""
+    if (mode == "symlink") != dst.is_symlink():
+        return False
+    web = bool(web_size) and mode == "copy" and src.suffix.lower() in STD_EXTS
+    if not _is_existing_copy(dst, src, web):
+        return False
+    if not web:
+        return True
+    edge, whole = _long_edge(dst), _long_edge(src)
+    return edge is not None and whole is not None and edge == min(whole, int(web_size))
+
+def _earlier_names(dst_dir: Path, pid: int, name: str) -> list[Path]:
+    """The names _resolve_destination gives this file, the plain one first, among those that exist."""
+    out = [dst_dir / name, dst_dir / f"{pid}_{name}"] + [dst_dir / f"{pid}_{i}_{name}" for i in range(2, 100)]
+    return [p for p in out if p.exists() or p.is_symlink()]
+
+def existing(root: Path, ids: list[int], out: Path, mode: str = "copy", web_size: int | None = None, include_raw: bool = False) -> dict:
+    """{missing, already, clash} for a selection about to go to the folder out: originals not there right now, files
+    this same export already put there, and names taken by something else. Reads only; a csv has nothing to compare."""
+    root = Path(root); n = {"missing": 0, "already": 0, "clash": 0}
+    if mode == "csv":
+        return n
+    for pid, rel, _ in ids_jobs(root, ids, include_raw):
+        src = root / rel
+        if not src.exists():
+            n["missing"] += 1; continue
+        taken = _earlier_names(out, pid, Path(rel).name) if out.is_dir() else []
+        if any(_same_version(p, src, mode, web_size) for p in taken):
+            n["already"] += 1
+        elif taken:
+            n["clash"] += 1
+    return n
+
+def free_folder(root: Path, name: str, base: Path | None = None) -> str:
+    """name, or "name 2", "name 3" and on: the first that is not a folder yet."""
+    for i in range(1, 1000):
+        cand = name if i == 1 else f"{name} {i}"
+        if not export_dir(root, cand, base).exists():
+            return cand
+    raise ValueError(f"no free folder name for {name!r}")
+
+def remove_earlier(root: Path, ids: list[int], out: Path, include_raw: bool = False) -> int:
+    """Takes out what an earlier export left under this selection's names, so the next one writes them fresh. Only
+    files directly in out (a link goes, never what it points at), and only when the original is there to copy again."""
+    root = Path(root); n = 0
+    for pid, rel, _ in ids_jobs(root, ids, include_raw):
+        if not (root / rel).exists():
+            continue
+        for p in _earlier_names(out, pid, Path(rel).name):
+            if p.is_symlink() or p.is_file():
+                p.unlink(); n += 1
+    return n
+# ===== end before an export =====
+
 def transfer_files(root: Path, jobs: list[tuple[int, str, Path]], mode: str, failed_file: Path, progress=None,
                    web_size: int | None = None, xmp: bool = True) -> list[str]:
     """The per-file loop every export shares. jobs are (photo id, rel, destination folder); each file

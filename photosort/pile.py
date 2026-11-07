@@ -33,6 +33,7 @@ def add(conn, ids: list[int]) -> list[int]:
     """Picks ids, in the order given; an id already in the pile keeps its place, one the shoot never had is ignored.
     A reject on one of them gives way to the pick. Returns the ids that were rejected until now, so a caller can
     offer to put them back."""
+    conn.execute("PRAGMA fullfsync=ON")          # db.durable: this module sits under db, so it cannot import it
     _ensure(conn)
     ids = list(dict.fromkeys(int(i) for i in ids))
     seq = conn.execute("SELECT COALESCE(MAX(seq), 0) FROM pile").fetchone()[0]
@@ -48,6 +49,7 @@ def add(conn, ids: list[int]) -> list[int]:
 
 def remove(conn, ids: list[int]) -> None:
     """Takes ids off the list. Their pick goes with them; a reject stays."""
+    conn.execute("PRAGMA fullfsync=ON")          # db.durable: this module sits under db, so it cannot import it
     _ensure(conn)
     ids = [int(i) for i in ids]
     conn.executemany("DELETE FROM pile WHERE photo_id=?", [(i,) for i in ids])
@@ -57,6 +59,7 @@ def remove(conn, ids: list[int]) -> None:
 
 def clear(conn) -> list[dict]:
     """Empties the list, a missing file's row included. Returns every row as it was, for restore()."""
+    conn.execute("PRAGMA fullfsync=ON")          # db.durable: this module sits under db, so it cannot import it
     _ensure(conn)
     rows = [{"id": r[0], "seq": r[1], "added_at": r[2], "flag": r[3]} for r in conn.execute(
         "SELECT pile.photo_id, pile.seq, pile.added_at, p.flag FROM pile JOIN photos p ON p.id = pile.photo_id ORDER BY pile.seq")]
@@ -68,6 +71,7 @@ def clear(conn) -> list[dict]:
 def restore(conn, rows: list[dict]) -> None:
     """Undoes clear(): the same rows in the same order with the flags they had, ahead of anything picked since. A row
     rejected since stays rejected and off the list, and one that has left the shoot is skipped."""
+    conn.execute("PRAGMA fullfsync=ON")          # db.durable: this module sits under db, so it cannot import it
     _ensure(conn)
     top = max((int(r["seq"]) for r in rows), default=0)
     conn.execute("UPDATE pile SET seq = seq + ?", (top,))

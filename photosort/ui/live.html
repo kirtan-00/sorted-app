@@ -27,6 +27,7 @@
 
 <div class="alarms" id="alarms">
   <p class="alarm" id="drive-alarm" role="alert" hidden></p>
+  <p class="alarm" id="camera-alarm" role="alert" hidden></p>
   <div class="offer" id="client-back" hidden>
     <span>The client's screen is gone.</span>
     <button type="button" class="btn" id="client-back-btn">Put client view back</button>
@@ -51,6 +52,7 @@
     <div class="side-tools">
       <p class="held" id="held" role="status" hidden></p>
       <button type="button" class="btn" id="hide" aria-pressed="false">Hide from client</button>
+      <button type="button" class="btn" id="not-model" hidden>Not a model</button>
       <p class="key-hint">Hold C to see the last shot</p>
     </div>
   </div>
@@ -81,7 +83,7 @@
   </div>
   <div class="tab-body" role="tabpanel" aria-labelledby="tab-models" id="panel-models" hidden>
     <ol class="piles" id="piles-models"></ol>
-    <p class="piles-empty" id="models-empty">Shots of people land here, one pile for each model. Type a model name below to start one.</p>
+    <p class="piles-empty" id="models-empty">Each new face opens a pile here by itself. Type a name below to give the next shots one.</p>
   </div>
   <div class="soft-slot" id="soft-slot"></div>
 </aside>
@@ -108,17 +110,41 @@
     </div>
 
     <div class="field">
-      <h2 id="folder-title">Where your shots land</h2>
-      <div class="field-row">
-        <p class="folder-show" id="folder-show"></p>
-        <input type="text" id="folder" class="path" aria-labelledby="folder-title" placeholder="Type the path of the folder" spellcheck="false" autocomplete="off" hidden>
-        <button type="button" class="btn" id="pick">Change</button>
+      <div class="field-head">
+        <h2 id="folder-title">Where your shots land</h2>
+        <div class="seg" role="group" aria-labelledby="folder-title">
+          <button type="button" id="src-folder" aria-pressed="true">Camera app folder</button>
+          <button type="button" id="src-wifi" aria-pressed="false">Straight from the camera (Wi-Fi)</button>
+        </div>
       </div>
-      <div class="found" id="found" hidden>
-        <span id="found-text"></span>
-        <button type="button" class="btn" id="found-use">Use this folder</button>
+      <div id="src-folder-body">
+        <div class="field-row">
+          <p class="folder-show" id="folder-show"></p>
+          <input type="text" id="folder" class="path" aria-labelledby="folder-title" placeholder="Type the path of the folder" spellcheck="false" autocomplete="off" hidden>
+          <button type="button" class="btn" id="pick">Change</button>
+        </div>
+        <div class="found" id="found" hidden>
+          <span id="found-text"></span>
+          <button type="button" class="btn" id="found-use">Use this folder</button>
+        </div>
+        <p class="field-help" id="folder-help">Take one test frame and sorted finds the folder</p>
       </div>
-      <p class="field-help" id="folder-help">Take one test frame and sorted finds the folder</p>
+      <div id="src-wifi-body" hidden>
+        <div class="cam-values" id="cam-values"></div>
+        <p class="field-warn" id="cam-warn" hidden></p>
+        <div class="cam-foot">
+          <details class="cam-steps">
+            <summary>Sony menu steps</summary>
+            <ol>
+              <li>Network, Wi-Fi: join the same network as this Mac.</li>
+              <li>Network, FTP Transfer Func., Server Setting, Server 1: enter the four values above. Secure Protocol Off.</li>
+              <li>Leave Specify Directory empty. Same File Name: Does Not Overwrite. Passive Mode On, if your body shows it.</li>
+              <li>Turn Auto FTP Transfer On, then FTP Function On. Press Start here and take a frame.</li>
+            </ol>
+          </details>
+          <button type="button" class="cam-reset" id="cam-reset">Reset login</button>
+        </div>
+      </div>
     </div>
 
     <div class="field">

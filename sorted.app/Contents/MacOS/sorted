@@ -18,12 +18,44 @@ if [ ! -x "$PY" ]; then
   osascript -e 'display dialog "sorted is not installed yet. Double-click \"Install sorted.command\" in the same folder first." buttons {"OK"} default button 1 with icon caution' >/dev/null 2>&1
   exit 1
 fi
-# A server from a previous launch of THIS copy may still own the port; replace it. Matched on the
-# full interpreter path so a second checkout (or a dev server started by hand) is left alone.
-for pid in $(ps -axo pid=,command= | grep -F -- "$PY -m photosort.cli serve" | grep -v grep | awk '{print $1}'); do
-  kill "$pid" 2>/dev/null
-done
-sleep 0.5
+# A server from a previous launch of THIS copy may still be running, maybe in the middle of a scan, an export or a Live
+# session. Clicking the icon again must not end that: if it answers /api/health, open the browser on it and stop here.
+# Only one that will not answer, or an idle one left over from before an update, is replaced. Matched on the full
+# interpreter path, and on the repo in the answer, so a second checkout (or a dev server started by hand) is left alone.
+PORT0="${SORTED_PORT:-7777}"
+REAL="$(pwd -P)"
+ours() { ps -axo pid=,command= | grep -F -- "$PY -m photosort.cli serve" | grep -v grep | awk '{print $1}'; }
+HEALTH=""; AT=""
+find_ours() {
+  for port in $(seq "$PORT0" "$((PORT0 + 9))"); do
+    local r
+    r=$(curl -s -m 2 --noproxy '*' "http://127.0.0.1:$port/api/health") || continue
+    if printf '%s' "$r" | grep -qF "\"repo\":\"$REAL\""; then HEALTH="$r"; AT="http://127.0.0.1:$port"; return 0; fi
+  done
+  return 1
+}
+open_url() { [ -z "${SORTED_NO_OPEN:-}" ] && { open -a "Google Chrome" "$1" 2>/dev/null || open "$1"; }; return 0; }
+OLD=$(ours)
+if [ -n "$OLD" ]; then
+  # Five tries: a server on its way up has not bound the port yet, and one deep in a scan can be slow to answer.
+  for i in 1 2 3 4 5; do find_ours && break; sleep 1; done
+  if [ -n "$AT" ]; then
+    if printf '%s' "$HEALTH" | grep -qF '"stale":false' || printf '%s' "$HEALTH" | grep -qF '"busy":true'; then
+      echo "[$(date)] already running at $AT, opening it" >> "$LOG"
+      if [ -n "${1:-}" ] && [ -f "$1" ]; then
+        curl -s -m 2 --noproxy '*' -o /dev/null -X POST -G --data-urlencode "path=$1" "$AT/api/launch"
+      fi
+      open_url "$AT"
+      exit 0
+    fi
+    echo "[$(date)] replacing the server at $AT: this copy was updated" >> "$LOG"
+  else
+    echo "[$(date)] replacing a server that does not answer" >> "$LOG"
+  fi
+  for pid in $OLD; do kill "$pid" 2>/dev/null; done
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -z "$(ours)" ] && break; sleep 0.5; done
+  for pid in $(ours); do kill -9 "$pid" 2>/dev/null; done
+fi
 # The CLI takes 7777, or the next free port (7778 and up) when something else holds it; the
 # "photosort serving ... at http://127.0.0.1:<port>" line below says which.
 PROJECT=()
@@ -36,7 +68,7 @@ fi
 MARK=$(wc -l < "$LOG")
 # arch -arm64: LaunchServices can start a script bundle under Rosetta; a universal interpreter then
 # loads as x86_64 and every arm64 wheel fails with "incompatible architecture".
-arch -arm64 "$PY" -m photosort.cli serve --port "${SORTED_PORT:-7777}" "${PROJECT[@]}" >> "$LOG" 2>&1 &
+arch -arm64 "$PY" -m photosort.cli serve --port "$PORT0" "${PROJECT[@]}" >> "$LOG" 2>&1 &
 SRV=$!
 # Wait for the "serving ... at http://127.0.0.1:<port>" line, then open it in Chrome (or the default browser).
 URL=""
@@ -46,7 +78,5 @@ for i in $(seq 1 90); do
   kill -0 "$SRV" 2>/dev/null || break
   sleep 1
 done
-if [ -n "$URL" ] && [ -z "${SORTED_NO_OPEN:-}" ]; then
-  open -a "Google Chrome" "$URL" 2>/dev/null || open "$URL"
-fi
+[ -n "$URL" ] && open_url "$URL"
 wait "$SRV"

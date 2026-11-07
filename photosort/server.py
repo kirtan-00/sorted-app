@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -25,9 +26,10 @@ from . import focus as focus_mod
 from . import index
 from . import places as places_mod
 from . import pile
+from . import fullsize
 from . import settings
 from . import version as version_mod
-from .config import DB_NAME, ANGLE_WINDOW_S, STD_EXTS, app_home, export_root, shoot_slug
+from .config import DB_NAME, ANGLE_WINDOW_S, LOCAL_HOSTNAMES, ROOT, STD_EXTS, app_home, export_root, shoot_slug
 from .classify import SHOT_SIZE_NAMES
 from .search import Index, Filters, SORTS, angles, LOOKS, DURATION_KEYS, GROUP_KINDS, CAMERA_AXES
 from .config import CAMERA_BUCKETS
@@ -42,6 +44,84 @@ RECENT_MAX = 8
 # as a full quality JPEG and a phone screenshot is under 5, so this takes anything a person would drag in
 # and refuses anything they would not have meant to.
 UPLOAD_MAX_BYTES = 40 * 1024 * 1024
+
+
+# ===== the server is this Mac's, not the web's =====
+# The server only listens on the loopback, but a web page in the same browser can still reach it: DNS rebinding
+# points evil.example.com at 127.0.0.1 and then reads everything as "same origin", originals included, and a POST
+# with no body needs no CORS preflight, so any open tab could press Undo. Three rules close that:
+#   Host: only localhost, 127.0.0.1 or [::1] on the port this server is on. A rebound name fails here.
+#   Origin and Referer: a state-changing request carrying either must carry this server's own origin. A browser
+#     always sends Origin on a POST, "null" included, so a page cannot strip it. curl and the launcher send
+#     neither and pass, which is fine: Host still has to be local, and they already run on this Mac as this person.
+#   Sec-Fetch-Site: nothing under /api/ is for another site, so an <img> on a web page cannot pull an original.
+#     /api/launch is the one GET that changes something, and this covers it too.
+# Plain ASGI rather than BaseHTTPMiddleware, which would sit between FileResponse and the socket on every clip.
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+SAME_SITE_FETCH = {"same-origin", "none"}
+_HOST_RE = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::([0-9]{1,5}))?")
+_DEFAULT_PORT = {"http": 80, "ws": 80, "https": 443, "wss": 443}
+
+
+def _host_port(value: str, scheme: str) -> tuple[str, int] | None:
+    """(name, port) of a Host header or the netloc of a URL, lowercased, or None when it is not that shape.
+    Strict on purpose: a user:pass@ or a stray character is never a page of ours."""
+    m = _HOST_RE.fullmatch(value.strip().lower())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)) if m.group(2) else _DEFAULT_PORT.get(scheme, 80)
+
+
+def _origin_of(url: str) -> tuple[str, str, int] | None:
+    """(scheme, name, port) of an Origin or Referer value; None for "null" and for anything that will not parse."""
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    where = _host_port(parts.netloc, parts.scheme.lower())
+    return (parts.scheme.lower(), *where) if where else None
+
+
+class LocalOnly:
+    """See the note above. Runs on every http and websocket connection, before any route."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def _refusal(self, scope) -> str | None:
+        headers: dict[bytes, list[str]] = {}
+        for k, v in scope["headers"]:
+            headers.setdefault(k.lower(), []).append(v.decode("latin-1"))
+        scheme = "http" if scope["type"] == "websocket" else scope.get("scheme", "http")
+        hosts = headers.get(b"host", [])
+        here = _host_port(hosts[0], scheme) if len(hosts) == 1 else None
+        server = scope.get("server")
+        if here is None or here[0] not in LOCAL_HOSTNAMES or (server and server[1] is not None and here[1] != server[1]):
+            return "this server only answers to localhost"
+        changes = scope["type"] == "websocket" or scope.get("method", "GET") not in SAFE_METHODS
+        if changes:
+            for name in (b"origin", b"referer"):
+                for value in headers.get(name, []):
+                    if _origin_of(value) != (scheme, *here):
+                        return "that request came from another site"
+        site = headers.get(b"sec-fetch-site", [])
+        if site and scope.get("path", "").startswith("/api/") and site[0].lower() not in SAME_SITE_FETCH:
+            return "that request came from another site"
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        why = self._refusal(scope)
+        if why is None:
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            return await send({"type": "websocket.close", "code": 1008})
+        body = json.dumps({"detail": why}).encode()
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+# ===== end the server is this Mac's =====
 
 
 class ExportReq(BaseModel):
@@ -313,8 +393,11 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     from GET /api/launch and runs the same load as the Open project button."""
     root = Path(root) if root is not None else None
     app = FastAPI(title="photosort")
+    app.add_middleware(LocalOnly)
+    opened_note = db.open_check(root) if root is not None else None      # before Index reads it
     state = {
         "root": root,
+        "index_note": opened_note,
         "open_file": str(open_file) if open_file else None,
         "index": Index(root) if root is not None else None,
         "progress": {"stage": "idle", "done": 0, "total": 0},
@@ -402,7 +485,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 "mounted": r.is_dir(), "disk": _disk_name(r), "scan": _scan_block(conn)}
 
     def _public_folder_info() -> dict:
-        return {k: v for k, v in _folder_info().items() if k != "items"}
+        # index_note: the index was damaged and a backup took over (db.open_check); said once, to the page.
+        note, state["index_note"] = state["index_note"], None
+        return {**{k: v for k, v in _folder_info().items() if k != "items"}, "index_note": note}
 
     # ===== resume: what the index says about its own scan, and the jobs cut short =====
     def _open_root(r: Path) -> None:
@@ -415,7 +500,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
 
     EMPTY_SCAN = dict(items=0, scanned=0, embedded=0, faced=0, errors=0, pending=0, pending_photos=0, pending_clips=0,
                       photos=0, clips=0, scanned_photos=0, scanned_clips=0, unembedded=0, complete=True,
-                      stale_embeds=0, embed_model=None, faces=True, interrupted=None)
+                      stale_embeds=0, embed_model=None, faces=True, interrupted=None, left_out=[])
 
     def _scan_block(conn) -> dict:
         """The scan: {items, scanned, embedded, faced, complete, ...counts, faces, interrupted}. faces is what
@@ -423,6 +508,12 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         that never finished, with its last progress, or None."""
         out = db.scan_counts(conn)
         out["faces"] = db.get_meta(conn, "scan_faces") != "0"
+        # left_out: [{why, n, examples}] of the camera files the last walk could not take, biggest first
+        try:
+            raw = json.loads(db.get_meta(conn, "scan_skipped") or "{}")
+            out["left_out"] = sorted(({"why": k, **v} for k, v in raw.items()), key=lambda x: -x["n"])
+        except (ValueError, TypeError):
+            out["left_out"] = []
         jobs = db.latest_jobs(conn)
         cut = [j for j in jobs.values() if j["state"] == "interrupted" and j["kind"] in ("scan", "focus")]
         # An interrupted scan whose work is all done by now (Continue ran, counts say complete) is history.
@@ -452,6 +543,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         with state["export_lock"]:
             if state["export"]["running"]:
                 raise HTTPException(409, "cannot switch folders while an export is running")
+            state["index_note"] = db.open_check(new_root)
             state["root"] = new_root
             state["index"] = Index(new_root)
             state["progress"] = {"stage": "idle", "done": 0, "total": 0}
@@ -514,7 +606,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         from .index import index_folder
         def prog(d):
             state["progress"] = d
-        from .index import SourceUnavailable
+        from .index import DiskFull, SourceUnavailable
         t0 = time.time(); stats = {}; err = None; saved = None
         try:
             with awake.hold():
@@ -522,16 +614,17 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
                 _auto_classify(root_at_start, stats)
                 _auto_products(root_at_start, stats)
                 saved = _autosave_project(root_at_start, stats.get("total", 0))
-        except SourceUnavailable as e:
-            # The disk went away: not a failure, a pause. What was scanned is kept; Continue does the rest
-            # once the disk is back (the UI reads mounted from /api/stats).
+        except (SourceUnavailable, DiskFull) as e:
+            # The disk went away or filled up: not a failure, a pause. What was scanned is kept; Continue does the
+            # rest once the disk is back (the UI reads mounted from /api/stats) or there is room.
             err = str(e)
             last = state["progress"] if isinstance(state["progress"], dict) else {}
             # Keep what the last emit carried (which step, which folder) and change only what the pause
             # changes: where the pass stopped is the useful thing to show, and a fresh stage_started so
             # the panel times the pause rather than the stage that was interrupted.
             state["progress"] = dict(last, stage="paused", error=err, stage_started=time.time(),
-                                     done=last.get("done", 0), total=last.get("total", 0))
+                                     done=last.get("done", 0), total=last.get("total", 0),
+                                     disk_full=isinstance(e, DiskFull))
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             err = msg
@@ -724,7 +817,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             videos=kinds["videos"],
             faces=n("SELECT count(*) FROM faces"),
             people=n("SELECT count(*) FROM people"),
-            errors=n("SELECT count(*) FROM photos WHERE status='error'"),
+            errors=n("SELECT count(*) FROM photos WHERE status='error' OR (status='ok' AND problem IS NOT NULL)"),
             last_index=last[0] if last else None,
             indexing=state["running"],
             faces_pending=n("SELECT count(*) FROM photos WHERE status='ok' AND n_faces IS NULL"),
@@ -791,7 +884,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         failing right now is live evidence the disk is playing up again, and is the earliest warning there
         is. New is indexed_at at or after the scan job's started, both written by datetime('now').
 
-        {errors: [{rel, indexed_at, new}], since, n_new, n_old, total, folders}. only=new or only=old
+        {errors: [{rel, indexed_at, new, problem}], since, n_new, n_old, total, folders}. only=new or only=old
         filters the list; the counts and since always describe the whole set, so a panel polling for new
         rows alone can still say how many are carried over. folders is the returned set counted by
         directory, biggest first: "1,904 in .../FINAL JPG" says more than 1,904 filenames."""
@@ -801,8 +894,9 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             return {"errors": [], "since": None, "n_new": 0, "n_old": 0, "total": 0, "folders": []}
         conn = db.connect(state["root"])
         since = (db.latest_jobs(conn).get("scan") or {}).get("started")
-        rows = [{"rel": r[0], "indexed_at": r[1], "new": bool(since and r[1] and r[1] >= since)}
-                for r in conn.execute("SELECT rel, indexed_at FROM photos WHERE status='error' ORDER BY rel")]
+        rows = [{"rel": r[0], "indexed_at": r[1], "new": bool(since and r[1] and r[1] >= since), "problem": r[2]}
+                for r in conn.execute("SELECT rel, indexed_at, problem FROM photos WHERE status='error' "
+                                      "OR (status='ok' AND problem IS NOT NULL) ORDER BY rel")]
         n_new = sum(1 for r in rows if r["new"])
         out = [r for r in rows if only not in ("new", "old") or r["new"] == (only == "new")]
         counts: dict[str, int] = {}
@@ -859,7 +953,38 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         if blocked:
             usage.log("index_blocked", reason=blocked["reason"])
             return {"started": False, "faces": faces, "blocked": blocked}
+        blocked = _index_disk_preflight(state["root"], dest)
+        if blocked:
+            usage.log("index_blocked", reason=blocked["reason"])
+            return {"started": False, "faces": faces, "blocked": blocked}
         return _launch_index(req, faces)
+
+    def _index_disk_preflight(root: Path, dest: Path) -> dict | None:
+        """The other disk a scan writes to: the previews and index under app_home, which are bigger than the project
+        file and usually on this Mac rather than the shoot disk. None when they fit, else a block with reason
+        "index_space". No folder to pick helps with this one, so the UI shows the message and starts nothing. The
+        project file counts here too when dest is on the same disk."""
+        from . import bundle
+        from .index import index_preflight
+        from .walk import find_images
+        try:
+            files = find_images(root)
+        except OSError:
+            return None
+        conn = db.connect(root)
+        try:
+            known = {**db.known_files(conn), **{r: m[:2] for r, m in db.missing_files(conn).items()}}
+        finally:
+            conn.close()
+        also = 0
+        try:
+            if os.stat(dest).st_dev == os.stat(db.index_dir(root)).st_dev:
+                videos = sum(1 for f in files if f.is_video)
+                also = bundle.estimate_bytes(len(files) - videos, videos)
+        except OSError:
+            pass
+        short = index_preflight(root, files, known, also)
+        return dict(short, reason="index_space", dir=None, detail=None) if short else None
 
     def _start_index_at(dest: Path, req) -> dict:
         """The picked place for the project file: checked the same way as the preflight (a real write, room for
@@ -878,7 +1003,7 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             bundle.bundle_path(root, p)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        blocked = _project_preflight(root, p)
+        blocked = _project_preflight(root, p) or _index_disk_preflight(root, p)
         if blocked:
             raise HTTPException(400, blocked["message"])
         try:
@@ -1312,10 +1437,13 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             raise HTTPException(404)
         return FileResponse(p, media_type="image/jpeg")
 
+    fullsize.attach(app, state)                         # the full-size view's picture (/api/full) and the export check
+
     # Videos: the original file for the lightbox player, and the per-scene breakdown with its frames.
 
     MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v",
-                   ".mts": "video/mp2t", ".avi": "video/x-msvideo"}
+                   ".mts": "video/mp2t", ".m2ts": "video/mp2t", ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
+                   ".webm": "video/webm", ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".3gp": "video/3gpp", ".mxf": "application/mxf"}
 
     @app.get("/api/media/{photo_id}")
     def media(photo_id: int):
@@ -1935,8 +2063,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished("products", "local", t0)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished("products", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n, "folders": sorted(folders)}
@@ -2134,8 +2262,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished("client_pick", "local", t0)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished("client_pick", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n, "folders": sorted(folders)}
@@ -2592,8 +2720,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished("selection", "local", t0, nbytes)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished("selection", "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(req.ids)}
@@ -2651,8 +2779,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished("categories", "local", t0)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished("categories", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
@@ -2701,8 +2829,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished("people", "local", t0)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished("people", "local", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_photos}
@@ -2937,8 +3065,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, (ValueError, drive_mod.NotSignedIn)) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished(req.what, "drive", t0)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished(req.what, "drive", t0)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": len(jobs)}
@@ -3088,8 +3216,8 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
             except Exception as e:
                 state["export"]["error"] = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             finally:
+                _export_finished(what, "local", t0, nbytes)           # the history row first, so a reader that sees the end also sees the row
                 state["export"]["running"] = False
-                _export_finished(what, "local", t0, nbytes)
 
         threading.Thread(target=_run_export, daemon=True).start()
         return {"started": True, "total": n_files, "dest": str(base)}
@@ -3234,6 +3362,15 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
         if path_str is None:
             return Response(status_code=204)
         return _start_bundle_export(Path(path_str))
+
+    @app.post("/api/launch")
+    def launch_hand_over(path: str):
+        """A second click on the icon with a project file in hand: the launcher found this server healthy, so it
+        leaves the file here and opens the browser, and the page collects it from GET /api/launch as on a fresh start."""
+        if not Path(path).is_file():
+            raise HTTPException(400, "no such file")
+        state["open_file"] = path
+        return {"ok": True}
 
     @app.get("/api/launch")
     def launch_request():
@@ -3453,6 +3590,21 @@ def create_app(root: Path | None = None, open_file: Path | None = None) -> FastA
     # ===== end usage log endpoints =====
 
     # ===== version and the opt-in update check (photosort/version.py) =====
+    started_as = version_mod.stamp()
+
+    @app.get("/api/health")
+    async def health():
+        """What the launcher asks before it touches a running server (sorted.app/Contents/MacOS/sorted). async, and
+        reading only memory and two tiny files, so it answers on the event loop even with every worker thread busy.
+        Not answering is what gets a server replaced, so this must never wait on the index or on a scan.
+        repo: which copy this is. stale: the files on disk are a newer version than this process loaded. busy: work
+        that replacing the server would throw away, Live included (a session holds state["running"])."""
+        hub = app.state.live
+        busy = state["running"] or hub.running() or hub.export["running"] or any(
+            state[k]["running"] for k in ("export", "classify", "focus", "places", "fps", "clipfaces", "flicker", "camera", "products", "cull"))
+        return {"app": "sorted", "repo": str(ROOT), "version": started_as[0], "pid": os.getpid(), "busy": bool(busy),
+                "stale": version_mod.stamp() != started_as}
+
     @app.get("/api/version")
     def version_info():
         """The version and build, whether the daily check is on, and what it last found. When the check is on

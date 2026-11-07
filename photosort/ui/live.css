@@ -72,6 +72,7 @@ body.live.no-panel { grid-template-columns: minmax(0, 1fr) 0; }
 
 /* the alarm line: state, not a toast, so it stays until the drive is back */
 .alarms { grid-area: alarms; min-width: 0; }
+#camera-alarm { background: var(--g100); box-shadow: inset 3px 0 0 var(--notice); font-size: calc(17 * var(--u)); font-weight: 500; }
 .alarm { padding: calc(10 * var(--u)) calc(24 * var(--u)); background: var(--red); color: var(--g900); font-size: calc(19 * var(--u)); font-weight: 600; line-height: 1.25; }
 .offer { display: flex; align-items: center; gap: calc(14 * var(--u)); padding: calc(8 * var(--u)) calc(24 * var(--u)); background: var(--g100); color: var(--g800); font-size: calc(16 * var(--u)); }
 
@@ -207,6 +208,19 @@ input[type="text"]:disabled { opacity: 0.5; }
 .setup-brand h1 { font-size: calc(26 * var(--u)); font-weight: 600; line-height: 1.15; color: var(--g900); }
 .field { padding: calc(12 * var(--u)) 0; box-shadow: 0 -1px 0 var(--g100); }
 .field h2 { font-size: calc(17 * var(--u)); font-weight: 600; line-height: 1.3; color: var(--g800); }
+.field-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: calc(6 * var(--u)) calc(12 * var(--u)); }
+.field-head .btn, .field-head .seg button { white-space: nowrap; }
+.cam-values { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1.25fr); gap: calc(8 * var(--u)); margin-top: calc(8 * var(--u)); }
+.cam-value { min-width: 0; padding: calc(5 * var(--u)) calc(10 * var(--u)); border: 0; border-radius: calc(6 * var(--u)); box-shadow: inset 0 0 0 1px var(--g200); background: none; text-align: left; transition: background-color 130ms ease-out; }
+.cam-value:hover { background: var(--g75); }
+.cam-value span { display: block; font-size: calc(13 * var(--u)); color: var(--g500); }
+.cam-value b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(16 * var(--u)); font-weight: 500; color: var(--g900); font-variant-numeric: tabular-nums; }
+.cam-foot { display: flex; align-items: flex-start; justify-content: space-between; gap: calc(12 * var(--u)); margin-top: calc(6 * var(--u)); }
+.cam-steps summary, .cam-reset { font-size: calc(15 * var(--u)); color: var(--g500); }
+.cam-steps summary:hover, .cam-reset:hover { color: var(--g800); }
+.cam-steps ol { margin: calc(6 * var(--u)) 0 0; padding-left: calc(18 * var(--u)); font-size: calc(15 * var(--u)); line-height: 1.35; color: var(--g700); }
+.cam-steps li + li { margin-top: calc(3 * var(--u)); }
+.cam-reset { flex: none; padding: 0; background: none; border: 0; }
 .field-row { display: flex; align-items: center; gap: calc(8 * var(--u)); margin-top: calc(8 * var(--u)); }
 .field-row input { flex: 1; min-width: 0; }
 .field input[type="text"], .field .btn, .setup-go .btn { height: calc(36 * var(--u)); }

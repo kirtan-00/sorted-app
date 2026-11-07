@@ -3,7 +3,7 @@ import hashlib, os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from .config import (IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, SKIP_DIRS, DEV_DIRS, SONY_CARD_DIRS,
+from .config import (IMAGE_EXTS, RAW_EXTS, VIDEO_EXTS, NOT_READ_EXTS, SKIP_DIRS, DEV_DIRS, SONY_CARD_DIRS,
                       SONY_CARD_ROOT, app_home)
 
 # ===== the whole Mac as the shoot: when the root is the disk itself or a home folder, the walk stays out of
@@ -34,6 +34,7 @@ PROJECT_SUFFIXES = (".sorted", ".photosort-index.zip", ".part")
 
 TS_PACKET = 188          # MPEG transport stream packet; an AVCHD .m2ts writes 4 extra bytes in front
 TS_SYNC = 0x47
+TS_STRIDES = ((0, 188), (4, 192), (4, 188))   # plain TS; AVCHD and Blu-ray (192-byte packets); a short header
 
 def looks_like_transport_stream(path: Path) -> bool:
     """True when a .mts really is an AVCHD clip. The extension is shared: TypeScript writes ES module
@@ -41,15 +42,14 @@ def looks_like_transport_stream(path: Path) -> bool:
     and the index records as an unreadable file. An MPEG transport stream is self announcing instead of
     guessed at: 0x47 at byte 0 (or byte 4 in the AVCHD variant) and again one packet later. Text cannot
     pass that by accident. Reads 200 bytes, no model, no ffprobe."""
+    # A real camcorder .MTS is the AVCHD shape: 192-byte packets, the sync byte at 4 and again at 196. Checking
+    # 188 after offset 4 alone turned every one of them away without a word (seen on a clip ffmpeg wrote in m2ts mode).
     try:
         with open(path, "rb") as fh:
-            head = fh.read(TS_PACKET + 8)
+            head = fh.read(200)
     except OSError:
         return False
-    for off in (0, 4):
-        if len(head) > off + TS_PACKET and head[off] == TS_SYNC and head[off + TS_PACKET] == TS_SYNC:
-            return True
-    return False
+    return any(len(head) > off + step and head[off] == TS_SYNC and head[off + step] == TS_SYNC for off, step in TS_STRIDES)
 
 @dataclass
 class ImageFile:
@@ -61,7 +61,18 @@ class ImageFile:
     sibling: str | None = None
     is_video: bool = False
 
-def find_images(root: Path) -> list[ImageFile]:
+def note_skip(skipped: dict | None, why: str, rel: str) -> None:
+    """Count a file the walk left out, with up to three examples, for the "skipped N files" line."""
+    if skipped is None:
+        return
+    s = skipped.setdefault(why, {"n": 0, "examples": []})
+    s["n"] += 1
+    if len(s["examples"]) < 3:
+        s["examples"].append(rel)
+
+def find_images(root: Path, skipped: dict | None = None) -> list[ImageFile]:
+    """Every photo and clip under root, a JPEG and its RAW as one. skipped, when given, collects the camera files
+    left out as {why: {n, examples}}: a format sorted cannot read, an empty file, one that could not be opened."""
     root = Path(root)
     found: dict[str, ImageFile] = {}
     for dirpath, dirnames, filenames in os.walk(root):
@@ -78,14 +89,18 @@ def find_images(root: Path) -> list[ImageFile]:
             p = Path(dirpath) / fn
             ext = p.suffix.lower()
             if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
+                if ext in NOT_READ_EXTS:
+                    note_skip(skipped, f"{NOT_READ_EXTS[ext]} ({ext[1:].upper()}), which sorted cannot read", str(p.relative_to(root)))
                 continue
             try:
                 st = p.stat()
             except OSError:
+                note_skip(skipped, "files that could not be opened", str(p.relative_to(root)))
                 continue   # vanished or unreadable mid-walk; skip it
             if st.st_size == 0:
+                note_skip(skipped, "empty files", str(p.relative_to(root)))
                 continue   # an empty file has nothing to read and would only ever be an error row
-            if ext == ".mts" and not looks_like_transport_stream(p):
+            if ext in (".mts", ".m2ts") and not looks_like_transport_stream(p):
                 continue   # a TypeScript .d.mts, not a camcorder clip; see the note on the function
             rel = str(p.relative_to(root))
             found[rel] = ImageFile(p, rel, st.st_size, st.st_mtime, ext in RAW_EXTS, is_video=ext in VIDEO_EXTS)

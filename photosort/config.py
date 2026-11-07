@@ -47,10 +47,25 @@ PREVIEW_EDGE = 1024
 GRID_EDGE = 320
 THUMB_QUALITY = 85
 
-STD_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"}
-RAW_EXTS = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2"}
+# .hif is the HEIF a Canon R, Sony or Fuji body writes in its 10-bit mode (pillow_heif reads it: tested on a 10-bit file
+# made with the same library, not on a camera's). .avif decodes through PIL's own plugin.
+STD_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".hif", ".avif", ".tif", ".tiff", ".webp"}
+# The first eight are proven on real files from those cameras. The rest are formats LibRaw 0.22 (rawpy) lists with the
+# bodies compiled into its tables (Pentax, Hasselblad and Phase One, Sigma X3F, Samsung, Epson, Mamiya, Kodak, Minolta,
+# Nikon's small RAW, Sony's older SR2), and LibRaw reads by content, not by name. None of them has been through sorted
+# with a real camera file; one that fails shows up in the list of files that could not be read, never silently.
+RAW_EXTS = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2",
+            ".pef", ".3fr", ".fff", ".iiq", ".x3f", ".srw", ".erf", ".mrw", ".kdc", ".dcr", ".nrw", ".sr2", ".srf",
+            ".mos", ".mef", ".rwl", ".crw", ".ori"}
 IMAGE_EXTS = STD_EXTS | RAW_EXTS
-VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".avi"}
+# Through ffmpeg, which reads every one of these: .m2ts and .mts, .mpg, .mkv, .webm and .3gp tested on clips ffmpeg made.
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mts", ".m2ts", ".avi", ".mxf", ".mpg", ".mpeg", ".mkv", ".webm", ".3gp"}
+# Camera files sorted cannot read, named so a scan can say it left them out instead of passing them by in silence.
+NOT_READ_EXTS = {".r3d": "RED clips", ".braw": "Blackmagic RAW clips", ".ari": "ARRIRAW frames", ".arx": "ARRIRAW frames",
+                 ".crm": "Canon Cinema RAW Light clips", ".nev": "Nikon N-RAW clips", ".cine": "Phantom clips",
+                 ".insv": "Insta360 clips", ".insp": "Insta360 photos", ".360": "GoPro 360 clips", ".gpr": "GoPro RAW photos",
+                 ".jxl": "JPEG XL photos", ".psd": "Photoshop files", ".vob": "DVD clips", ".wmv": "Windows Media clips",
+                 ".flv": "Flash clips"}
 # Folder names the walk never enters, wherever they sit: photosort-out is our own export folder when it
 # sits inside a shoot (dot-dirs are skipped too, in walk.py).
 SKIP_DIRS = {"photosort-out"}
@@ -69,6 +84,11 @@ SONY_CARD_ROOT = "M4ROOT"
 
 # Videos: no LLM, no faces. ffmpeg samples frames, CLIP embeds them, the clip's embedding is their mean.
 VIDEO_FRAMES = 6            # evenly spaced between 5% and 95% of the duration
+# The per-file watchdog (workers.supervised_map). Far above honest work, because the only cost of a generous limit is a
+# longer wait on a file that hung. A still takes under 2 s; a clip's ffmpeg runs are already capped one by one (video.py:
+# 900 s for the scene scan, 60 s a frame), so an hour is what several of those add up to on a slow disk.
+PHOTO_WATCHDOG_S = 300
+VIDEO_WATCHDOG_S = 3600
 VIDEO_WORKERS = 3           # each worker runs its own ffmpeg, which is multi-threaded already
 SCENE_THRESHOLD = 0.4       # ffmpeg scene score above which two keyframes are a cut
 SCENE_MIN_DURATION_S = 8.0  # shorter clips skip the scene pass and are one segment
@@ -200,6 +220,9 @@ FOCUS_BAD_PERCENTILE = 5
 FOCUS_BAD_ABS = 18.0
 FOCUS_BAD_MAX_ABS = 60.0
 FOCUS_FALLBACK_FRAMES = 3   # frames decoded from the clip when an index lost its frames/ (an imported bundle)
+
+# The only names the local server answers to (server.LocalOnly). The tests add TestClient's "testserver" in conftest.py.
+LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "[::1]"}
 
 def app_home() -> Path:
     return Path(os.environ.get("PHOTOSORT_HOME") or (Path.home() / "Library" / "Application Support" / "photosort"))

@@ -2,12 +2,12 @@
    copies it, sorted, to the drive, and this page shows the result.
 
    GET  /api/live/state              the whole session, drawn settled: what happened before you looked does not replay
-   GET  /api/live/events?after=seq   long poll: shot, shot_update, product_created, product_renamed, status
+   GET  /api/live/events?after=seq   long poll: shot, shot_update, product_created, product_renamed, model_created, model_renamed, status
    GET  /api/live/volumes?last=      the disks, and which one to pick without being asked
    GET  /api/live/ready?folder=      what the start screen says about this folder before Start is pressed
    GET  /api/live/recent?last=       folders an image just landed in: the test frame that finds the folder
    GET  /api/live/original/{id}
-   POST /api/live/start /stop /active /rename-product /export-store /pick /hide
+   POST /api/live/start /stop /active /rename-product /rename-model /assign /export-store /pick /hide
    GET  /api/export/destination      the app's export folder
 
    The latest shot holds the stage. When the next one is ready the shot on stage flies into its pile (its product, its
@@ -35,7 +35,7 @@
   const UNSORTED = "Unsorted"; // live.py's one pile when Find products is off
   const SOFT = "soft";
   const MODEL = "model:";      // a model's pile is keyed by name; products are keyed by id
-  const PANEL_KEY = "sorted.live.panel", TAB_KEY = "sorted.live.tab", FOLDER_KEY = "sorted.live.folder", SHOOT_KEY = "sorted.live.shoot", FIND_KEY = "sorted.live.find", DRIVE_KEY = "sorted.live.drive";
+  const PANEL_KEY = "sorted.live.panel", TAB_KEY = "sorted.live.tab", FOLDER_KEY = "sorted.live.folder", SHOOT_KEY = "sorted.live.shoot", FIND_KEY = "sorted.live.find", DRIVE_KEY = "sorted.live.drive", SOURCE_KEY = "sorted.live.source";
   /* per viewer conveniences: storage can throw or come back empty, and the page works the same without it */
   const remember = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* nothing kept */ } };
   const recall = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
@@ -126,6 +126,8 @@
   const pileIdOf = (s) => (s.verdict !== "sharp" ? SOFT : s.category === "model" && s.model ? MODEL + s.model : s.product);
   const isModelPile = (id) => typeof id === "string" && id.startsWith(MODEL);
   const pileNameOf = (s) => (s.verdict === "sharp" && !isModelPile(pileIdOf(s)) ? s.productName : null);
+  /* a model sorted only recognised under a typed product: the shot stays with the product and still counts for the model */
+  const heldPileOf = (s) => (s.verdict === "sharp" && s.model && s.category !== "model" ? MODEL + s.model : null);
 
   /* ---------- talking to the Mac ---------- */
   async function json(url, opts) {
@@ -151,6 +153,7 @@
     volumes: (last) => json("/api/live/volumes" + query("last", last), { cache: "no-store" }),
     ready: (folder) => json("/api/live/ready" + query("folder", folder), { cache: "no-store" }),
     recent: (last) => json("/api/live/recent" + query("last", last), { cache: "no-store" }),
+    camera: (shoot) => json("/api/live/camera" + query("shoot", shoot), { cache: "no-store" }),
     /* the main window, on this shoot: the index is already on this Mac, so opening the folder is all it takes */
     openMain: async (folder) => {
       const open = await json("/api/folder", { cache: "no-store" });
@@ -227,7 +230,7 @@
     if (!S.find.products) { ensurePile(NO_PRODUCT, null, false); seen.add(NO_PRODUCT); }
     S.piles.forEach((p, id) => { if (!seen.has(id)) { p.el.remove(); S.piles.delete(id); } });
     S.piles.forEach((p, id) => {
-      const mine = rows.filter((s) => s.verdict && pileIdOf(s) === id);
+      const mine = rows.filter((s) => s.verdict && (pileIdOf(s) === id || heldPileOf(s) === id));
       const given = id === SOFT ? S.counts.soft : named.has(id) ? named.get(id).count : undefined;
       p.count = given !== undefined ? given : mine.length;
       p.thumbs = mine.slice(-3).map((s) => s.small).filter(Boolean);
@@ -235,6 +238,10 @@
     });
   }
   function readStatus(st) {
+    if (st.camera !== undefined && !CLIENT) {
+      S.cameraOn = !!st.camera;
+      if (S.cameraOn && !S.cameraTimer) { S.cameraTimer = setInterval(loadCameraLine, 5000); loadCameraLine(); }
+    }
     if (st.state !== undefined) { S.phase = st.state; S.running = st.state === "live" || st.state === "starting"; }
     else if (st.running !== undefined) { S.running = !!st.running; S.phase = S.running ? "live" : "stopped"; }
     if (st.folder !== undefined && st.folder !== null) S.folder = st.folder;
@@ -266,6 +273,8 @@
     else if (type === "shot_update") { const u = e.shot || e; if (S.shots.has(u.id)) onShot(u); }
     else if (type === "product_created") { if (!CLIENT) ensurePile(body.id, body.name, true); }
     else if (type === "product_renamed") { renamePile(body.id, body.name); }
+    else if (type === "model_created") { if (!CLIENT) ensurePile(MODEL + body.name, body.name, true); }
+    else if (type === "model_renamed") { renameModel(body.old, body.name, body.merged); }
     else if (type === "status") {
       const was = S.running;
       readStatus(body);
@@ -273,6 +282,7 @@
       if (body.message && !CLIENT) say(body.message, true);
       paint();
     }
+    else if (type === "camera") { if (!CLIENT) loadCameraLine(); }
   }
 
   /* One shot: new, or more news about one already on screen */
@@ -283,10 +293,10 @@
     if (old) {
       const hadVerdict = old.verdict, hadFlash = old.flash, landed = old.landed;
       wasHidden = old.hidden;
-      const before = landed ? pileIdOf(old) : null;
+      const before = landed ? pileIdOf(old) : null, held = landed ? heldPileOf(old) : null;
       const setBefore = old.burst || old.bracket ? { burst: old.burst, bracket: old.bracket } : null;
       Object.assign(old, s, { landed: landed }, s.burst || s.bracket || !setBefore ? {} : setBefore);
-      if (before !== null && before !== pileIdOf(old) && !CLIENT) movePile(old, before);
+      if (landed && !CLIENT && (before !== pileIdOf(old) || held !== heldPileOf(old))) movePile(old, before, held);
       if (old.verdict && !hadVerdict) tallyVerdict(old);
       if (old.flash && !hadFlash) S.counts.flash++;
     } else {
@@ -305,10 +315,16 @@
     pump(); paint();
   }
   /* a landed shot the server reassigned: it changes piles with no flight */
-  function movePile(s, from) {
-    const a = S.piles.get(from), b = ensurePile(pileIdOf(s), pileNameOf(s), false);
-    if (a) { a.count = Math.max(0, a.count - 1); paintPile(a, false); }
-    b.count++; paintPile(b, false); paintTabs();
+  function movePile(s, from, held) {
+    const shift = (out, into, name) => {
+      if (out === into) return;
+      const a = out && S.piles.get(out), b = into && ensurePile(into, name, false);
+      if (a) { a.count = Math.max(0, a.count - 1); paintPile(a, false); }
+      if (b) { b.count++; paintPile(b, false); }
+    };
+    shift(from, pileIdOf(s), pileNameOf(s));
+    shift(held, heldPileOf(s), null);
+    paintTabs();
   }
   function tallyVerdict(s) { if (s.verdict === "sharp") S.counts.sharp++; else S.counts.soft++; }
 
@@ -466,6 +482,7 @@
     $("caption").textContent = s.file;
     $("caption-dest").textContent = destOf(g);
     const hidden = g.frames.every((f) => f.hidden);
+    $("not-model").hidden = !g.frames.some((f) => f.model);
     const hide = $("hide");
     hide.textContent = hidden ? "Show to client" : "Hide from client";
     hide.setAttribute("aria-pressed", String(hidden));
@@ -539,6 +556,13 @@
     if (s.small) { p.thumbs.push(s.small); if (p.thumbs.length > 3) p.thumbs.shift(); }
     p.incoming = false;
     paintPile(p, animate && !reduced());
+    const held = heldPileOf(s);
+    if (held) {
+      const m = ensurePile(held, null, true);
+      m.count++;
+      if (s.small) { m.thumbs.push(s.small); if (m.thumbs.length > 3) m.thumbs.shift(); }
+      paintPile(m, animate && !reduced());
+    }
     paintTabs();
   }
 
@@ -566,15 +590,15 @@
     return p;
   }
   function paintLabel(p) {
-    const editable = p.id !== SOFT && p.id !== NO_PRODUCT && !isModelPile(p.id) && p.name !== UNSORTED;
+    const model = isModelPile(p.id), editable = p.id !== SOFT && p.id !== NO_PRODUCT && (!model || S.find.faces) && p.name !== UNSORTED;
     const n = document.createElement(editable ? "button" : "span");
     n.className = "pile-name"; n.textContent = p.name;
-    if (editable) { n.type = "button"; n.title = "Rename this product"; n.addEventListener("click", () => editPile(p)); }
+    if (editable) { n.type = "button"; n.title = model ? "Rename this model. A name already here joins the two" : "Rename this product"; n.addEventListener("click", () => editPile(p)); }
     p.labelEl.replaceChildren(n);
   }
   function editPile(p) {
     const box = document.createElement("input");
-    box.type = "text"; box.className = "pile-edit"; box.value = p.name; box.setAttribute("aria-label", "Product name"); box.spellcheck = false;
+    box.type = "text"; box.className = "pile-edit"; box.value = p.name; box.setAttribute("aria-label", isModelPile(p.id) ? "Model name" : "Product name"); box.spellcheck = false;
     p.labelEl.replaceChildren(box);
     box.focus(); box.select();
     let closed = false;
@@ -584,6 +608,11 @@
       const name = box.value.trim();
       paintLabel(p);
       if (!save || !name || name === p.name) return;
+      if (isModelPile(p.id)) {                           // the server's model_renamed moves the pile: this may be a merge
+        try { await api.post("rename-model", { model: p.name, name: name }); }
+        catch (e) { say("Could not rename it. " + e.message, true); }
+        return;
+      }
       const before = p.name;
       renamePile(p.id, name);
       try { await api.post("rename-product", { product: p.id, name: name }); }
@@ -604,6 +633,25 @@
     const open = p.labelEl.querySelector("input");
     if (!open) paintLabel(p);
     paintStrip();
+  }
+  /* A model's pile goes by its name, so a rename moves the key, and a name already taken folds one pile into the other */
+  function renameModel(old, name, merged) {
+    S.shots.forEach((s) => { if (s.model === old) { s.model = name; s.raw.model = name; } });
+    if (CLIENT) return;
+    const from = S.piles.get(MODEL + old), into = S.piles.get(MODEL + name);
+    S.piles.delete(MODEL + old);
+    if (from && into) {
+      into.count += from.count;
+      into.thumbs = into.thumbs.concat(from.thumbs).slice(-3);
+      from.el.remove();
+      paintPile(into, !reduced());
+    } else if (from) {
+      from.id = MODEL + name; from.name = name;
+      S.piles.set(from.id, from);
+      if (!from.labelEl.querySelector("input")) paintLabel(from);
+    }
+    if (merged) say(old + " joined " + name);
+    paintTabs(); paintStrip();
   }
   const pileTab = (id) => (id === SOFT ? null : isModelPile(id) ? "models" : "products");
   /* A pile with nothing in it only shows while it is the one being shot, so a product opened for a shot that went to a
@@ -694,7 +742,10 @@
     $("state-dot").className = "dot" + (!S.online ? " lost" : S.running ? " on" : "");
     const word = !S.online ? (S.connected ? "Reconnecting" : "Connecting to the Mac") : saving ? "Saving the shoot" : S.phase === "starting" ? "Starting" : S.running ? "Ready for shots" : "Stopped";
     const drive = paintDrive();
-    $("state-text").textContent = [word, waiting ? shotWord(waiting) + " being checked" : "", drive].filter(Boolean).join(", ");
+    const line = S.running && S.cameraOn && S.camera ? S.camera.line : null;
+    $("state-text").textContent = [word, waiting ? shotWord(waiting) + " being checked" : "", line ? line.text : "", drive].filter(Boolean).join(", ");
+    $("camera-alarm").hidden = !(line && line.warn);
+    if (line && line.warn) $("camera-alarm").textContent = line.warn;
     $("status-line").title = S.drive && S.drive.path || "";
     $("title").textContent = S.shoot || (S.folder ? folderName() : "Live shoot");
 
@@ -709,6 +760,12 @@
       $("empty-lead").textContent = !S.online ? "Connecting to the Mac" : S.running ? "Waiting for the first shot" : "No shots in this shoot";
       $("empty-sub").textContent = S.online && S.running ? "Each new file in the folder appears here and gets checked for focus." : "";
     }
+  }
+  /* The camera's part of the status line. Asked for on a timer as well as on its events, because a silence has no event */
+  async function loadCameraLine() {
+    if (CLIENT || !S.cameraOn) return;
+    try { S.camera = await api.camera(); } catch (e) { return; }
+    paint();
   }
   /* The drive's part of the status line, and the alarm when the drive stops taking files. Both only read what the server says */
   function paintDrive() {
@@ -748,7 +805,8 @@
   }
 
   /* ---------- the start screen: where the shots land, where the sorted photos go, what the shoot is called ---------- */
-  const setup = { volumes: [], volumesKey: "", drive: null, custom: null, touched: false, flash: "unknown", timer: 0, typing: 0, shown: false, ready: null, readyFor: null, found: null, here: false };
+  const setup = { volumes: [], volumesKey: "", drive: null, custom: null, touched: false, flash: "unknown", timer: 0, typing: 0, shown: false, ready: null, readyFor: null, found: null, here: false,
+    source: "folder", cam: null, chosen: "", resetting: false };
   const MAC = "mac";
   const freeText = (n) => {
     if (n === null || n === undefined) return "";
@@ -842,7 +900,59 @@
     setup.here = list.some((f) => f.path === folder);
     paint();
   }
-  function setupTick() { loadVolumes(); loadReady(); loadFound(); }
+  function setupTick() { loadVolumes(); if (setup.source === "wifi") loadCamera(); else { loadReady(); loadFound(); } }
+  /* Straight from the camera: the server names the folder, so the rest of the screen reads it like any other */
+  async function loadCamera() {
+    const shoot = $("shoot").value.trim();
+    let c = null;
+    try { c = await api.camera(shoot); } catch (e) { return; }
+    if ($("shoot").value.trim() !== shoot) return;
+    setup.cam = c;
+    if (setup.source === "wifi" && c.folder && $("folder").value !== c.folder) $("folder").value = c.folder;
+    paintCamValues();
+    loadReady();
+  }
+  function setSource(v) {
+    if (v === setup.source) return;
+    if (v === "wifi") setup.chosen = $("folder").value; else $("folder").value = setup.chosen;
+    setup.source = v; setup.ready = null; setup.readyFor = null;
+    remember(SOURCE_KEY, v);
+    if (v === "wifi") loadCamera(); else { loadReady(); loadFound(); }
+    paint();
+  }
+  async function copyValue(b, text) {
+    const label = b.querySelector("span"), was = label.dataset.name;
+    try { await navigator.clipboard.writeText(text); label.textContent = "Copied"; }
+    catch (e) { const r = document.createRange(); r.selectNodeContents(b.querySelector("b")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+    setTimeout(() => { label.textContent = was; }, 1200);
+  }
+  function paintCamValues() {
+    const c = setup.cam, box = $("cam-values"), rows = c ? [["Host", c.host || "No network"], ["Port", String(c.port)], ["User", c.user], ["Password", c.password]] : [];
+    const id = rows.join("|");
+    if (box.dataset.id !== id) {
+      box.dataset.id = id;
+      box.replaceChildren(...rows.map(([name, value]) => {
+        const b = document.createElement("button"), l = document.createElement("span"), v = document.createElement("b");
+        b.type = "button"; b.className = "cam-value"; b.title = "Copy " + name.toLowerCase();
+        l.textContent = name; l.dataset.name = name; v.textContent = value;
+        b.append(l, v);
+        b.addEventListener("click", () => copyValue(b, value));
+        return b;
+      }));
+    }
+    const m = c && c.moved, warn = $("cam-warn");
+    const text = !c ? "" : !c.host ? "This Mac is on no network. Join the same Wi-Fi as the camera." : m && m.now ? "This Mac's address changed. The camera still has " + m.was + ": set its Host to " + m.now + "."
+      : c.block_all ? "This Mac's firewall blocks all incoming connections, so the camera cannot reach it. Turn that off in System Settings, Network, Firewall." : "";
+    warn.hidden = !text; warn.textContent = text;
+    $("cam-reset").textContent = setup.resetting ? "Reset: the camera must be set up again" : "Reset login";
+  }
+  async function resetLogin() {
+    if (!setup.resetting) { setup.resetting = true; paintCamValues(); setTimeout(() => { setup.resetting = false; paintCamValues(); }, 4000); return; }
+    setup.resetting = false;
+    try { setup.cam = Object.assign(setup.cam || {}, await api.post("camera/reset")); }
+    catch (e) { setupError(e.message); }
+    paintCamValues();
+  }
   function setFlash(v) {
     setup.flash = v;
     [["flash-unknown", "unknown"], ["flash-strobe", "strobe"], ["flash-none", "none"]].forEach(([id, k]) => $(id).setAttribute("aria-pressed", String(k === v)));
@@ -854,11 +964,12 @@
   /* Why Start cannot be pressed, in words, or nothing when it can */
   function startBlock() {
     const folder = $("folder").value.trim(), r = setup.readyFor === folder ? setup.ready : null;
+    const wifi = setup.source === "wifi";
     if (r && r.busy) return r.busy;
-    if (!folder) return "Pick the folder your shots land in, or take a test frame.";
-    if (!r) return "Looking at the folder.";
-    if (!r.exists) return "That folder is not there. Plug its disk in, or pick another.";
     if (!$("shoot").value.trim()) return "Give the shoot a name.";
+    if (!folder) return wifi ? "Getting the camera details." : "Pick the folder your shots land in, or take a test frame.";
+    if (!r) return "Looking at the folder.";
+    if (!r.exists && !wifi) return "That folder is not there. Plug its disk in, or pick another.";
     if (!setup.drive) return "Pick where to copy the sorted photos.";
     return "";
   }
@@ -870,6 +981,7 @@
       setup.shown = true;
       if (!$("folder").value) $("folder").value = S.folder || recall(FOLDER_KEY) || "";
       $("shoot").value = defaultShootName();
+      if (recall(SOURCE_KEY) === "wifi") { setup.chosen = recall(FOLDER_KEY) || ""; setup.source = "wifi"; }
       $("find-people").checked = S.find.faces; $("find-products").checked = S.find.products;
       setupError("");
       setupTick();
@@ -878,6 +990,9 @@
     if (!show && setup.shown) { setup.shown = false; clearInterval(setup.timer); }
     if (!show) return;
     const folder = $("folder").value.trim(), typing = !$("folder").hidden, r = setup.readyFor === folder ? setup.ready : null;
+    const wifi = setup.source === "wifi";
+    $("src-folder").setAttribute("aria-pressed", String(!wifi)); $("src-wifi").setAttribute("aria-pressed", String(wifi));
+    $("src-folder-body").hidden = wifi; $("src-wifi-body").hidden = !wifi;
     const shown = $("folder-show");
     shown.hidden = typing; shown.textContent = folder || "No folder yet"; shown.title = folder; shown.classList.toggle("none", !folder);
     $("pick").textContent = folder ? "Change" : "Choose";
@@ -932,9 +1047,11 @@
     if (startBlock() || S.running) return;
     const find = { faces: $("find-people").checked, products: $("find-products").checked };
     const drive = setup.drive && setup.drive !== MAC ? setup.drive : null;
+    const wifi = setup.source === "wifi";
     S.find = find;
-    if (!await begin({ folder: folder, strobe: setup.flash === "strobe", no_flash: setup.flash === "none", drive: drive, shoot: shoot, faces: find.faces, products: find.products, mode: mode })) return;
-    remember(FOLDER_KEY, folder); remember(SHOOT_KEY, shoot);
+    if (!await begin({ folder: folder, camera: wifi ? "wifi" : null, strobe: setup.flash === "strobe", no_flash: setup.flash === "none", drive: drive, shoot: shoot, faces: find.faces, products: find.products, mode: mode })) return;
+    if (!wifi) remember(FOLDER_KEY, folder);
+    remember(SHOOT_KEY, shoot);
     remember(FIND_KEY, JSON.stringify(find));
     if (drive) remember(DRIVE_KEY, drive);
     paint();
@@ -978,7 +1095,8 @@
       : n ? "Copying " + shotWord(n) + " to " + name + ". Leave the drive plugged in."
       : "Copied to " + name + (failed ? ". " + shotWord(failed) + " could not be copied" : "");
     where.classList.toggle("bad", !!stuck || failed > 0);
-    $("finish-source").textContent = d && d.state !== "off" ? "The originals stay in " + S.folder : "";
+    const kept = S.cameraOn && S.camera ? Number(S.camera.kept) || 0 : 0;
+    $("finish-source").textContent = [d && d.state !== "off" ? "The originals stay in " + S.folder : "", kept ? (kept === 1 ? "1 upload" : kept + " uploads") + " from the camera did not finish, and never reached the folder. Those frames are still on the card." : ""].filter(Boolean).join(". ");
     $("finish-project").textContent = S.project ? "Project file: " + S.project : "";
     const x = S.exporting, exp = $("export");
     exp.disabled = !S.counts.sharp || !S.online || !!x || saving;
@@ -988,10 +1106,12 @@
   }
   async function stop() {
     $("stop").disabled = true;
+    setTimeout(loadCameraLine, 300);     // Finish waits for a frame still arriving: say so now, not at the next tick
     if (S.holds.pause) setPaused(false);
     if (Z.open) zoomOut();
     try { readStatus(await api.post("stop")); }
     catch (e) { say("Could not stop. " + e.message, true); }
+    loadCameraLine();
     paint();
   }
   function resetSession(folder) {
@@ -1141,6 +1261,14 @@
     set(on); paintStrip();
     try { await Promise.all(g.frames.map((f) => api.post("hide", { id: f.id, hidden: on }))); }
     catch (e) { set(!on); paintStrip(); say("Could not change that. " + e.message, true); }
+  }
+
+  /* ---------- not a model: what is on stage goes back to its product, here only when the Mac says so ---------- */
+  async function notModel() {
+    const g = S.current;
+    if (!g) return;
+    try { await Promise.all(g.frames.filter((f) => f.model).map((f) => api.post("assign", { id: f.id, model: null }))); }
+    catch (e) { say("Could not change that. " + e.message, true); }
   }
 
   /* ---------- the client window. getScreenDetails can put it on the second screen; only a key or click there can make it
@@ -1420,6 +1548,7 @@
         if (e.type === "shot_update" && shots.has(e.id)) { const u = Object.assign({}, e); delete u.seq; delete u.type; Object.assign(shots.get(e.id), u); }
         if (e.type === "product_created") products.set(e.id, { id: e.id, name: e.name, n: 0 });
         if (e.type === "product_renamed" && products.has(e.id)) products.get(e.id).name = e.name;
+        if (e.type === "model_renamed") shots.forEach((s) => { if (s.model === e.old) s.model = e.name; });
       });
       const models = new Map();
       shots.forEach((s) => { if (s.category === "model" && s.model) models.set(s.model, (models.get(s.model) || 0) + 1); });
@@ -1469,6 +1598,8 @@
         }
         if (path === "active") { active = Object.assign({}, active, body); return active; }
         if (path === "rename-product") { emit({ type: "product_renamed", id: body.product, name: body.name }); return {}; }
+        if (path === "rename-model") { emit({ type: "model_renamed", old: body.model, name: body.name, merged: false }); return {}; }
+        if (path === "assign") { emit({ type: "shot_update", id: body.id, model: null, category: "product" }); return {}; }
         if (path === "hide") { emit({ type: "shot_update", id: body.id, hidden: !!body.hidden }); return {}; }
         if (path === "pick") return { path: body.purpose === "drive" ? "/Volumes/Archive/Shoots" : folder };
         if (path === "export-store") {
@@ -1481,6 +1612,7 @@
       pick: (purpose) => api.post("pick", { purpose: purpose }),
       volumes: async (last) => ({ volumes: VOLUMES, best: VOLUMES.some((v) => v.path === last) ? last : VOLUMES.slice().sort((a, b) => b.free - a.free)[0].path }),
       ready: async (at) => ({ busy: Q.get("busy") === "1" ? "sorted is scanning a folder. Start works again when the scan ends." : null, exists: !!at, photos: Number(Q.get("photos")) || 0, whole: true, last: null, waiting: 0 }),
+      camera: async () => ({ host: "192.168.1.20", port: 2121, user: "camdemo", password: "demodemo42", folder: folder, moved: null, running: phase === "running", kept: 0, line: { text: "Camera connected", warn: null } }),
       recent: async () => ({ folders: Q.get("found") === "1" ? [{ path: folder, name: "Tether", photos: 1, newest: Date.now() / 1000 }] : [] }),
       openMain: async () => { say("In the app this opens the main window on this shoot."); },
       original: original,
@@ -1514,7 +1646,10 @@
       $("found-use").addEventListener("click", () => { if (setup.found) setFolder(setup.found.path); });
       $("setup-form").addEventListener("submit", (e) => { e.preventDefault(); start("new_only"); });
       $("start-all").addEventListener("click", () => start("everything"));
-      $("shoot").addEventListener("input", paint);
+      $("shoot").addEventListener("input", () => { paint(); if (setup.source === "wifi") { clearTimeout(setup.typing); setup.typing = setTimeout(loadCamera, 400); } });
+      $("src-folder").addEventListener("click", () => setSource("folder"));
+      $("src-wifi").addEventListener("click", () => setSource("wifi"));
+      $("cam-reset").addEventListener("click", resetLogin);
       $("folder").addEventListener("input", () => { paint(); clearTimeout(setup.typing); setup.typing = setTimeout(loadReady, 400); });
       [["flash-unknown", "unknown"], ["flash-strobe", "strobe"], ["flash-none", "none"]].forEach(([id, v]) => $(id).addEventListener("click", () => setFlash(v)));
       $("drives").addEventListener("keydown", (e) => {
@@ -1536,6 +1671,7 @@
       });
       $("frame").addEventListener("click", (e) => { if (e.target === heroImg) zoomIn(e); });
       $("hide").addEventListener("click", toggleHide);
+      $("not-model").addEventListener("click", notModel);
       $("client-open").addEventListener("click", openClient);
       $("client-back-btn").addEventListener("click", putClientBack);
       $("stop").addEventListener("click", stop);

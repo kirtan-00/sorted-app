@@ -476,7 +476,7 @@ def _measure_all(root: Path, conn, rows: list[tuple[int, str]], progress) -> dic
 
 def run(root: Path, progress: Callable[[int, int], None] | None = None) -> dict:
     """Measure (what is not measured yet), judge and pick the shoot's products from the last Find products. Rewrites
-    table cull; keeps nothing a person chose by hand (a new run is a fresh pick). Returns summary(conn)."""
+    table cull, keeping what a person chose by hand on every frame that is still in it. Returns summary(conn)."""
     from .products import load_grey
     from .search import framing_field
     root = Path(root); conn = db.connect(root); _ensure(conn)
@@ -551,7 +551,6 @@ def run(root: Path, progress: Callable[[int, int], None] | None = None) -> dict:
     for p, (k, v) in home.items():
         frames_by[k].append({"id": p, "variant": v, "m": meas.get(p), "field": framing_field(grid / f"{qh[p]}.jpg") if p in qh else None,
                              "attached": p in attached})
-    conn.execute("DELETE FROM cull")
     target = get_target(conn)
     judged = {k: judge(fs) for k, fs in frames_by.items()}
     if unmatched:
@@ -584,7 +583,9 @@ def _cands(fs: list[dict]) -> list[dict]:
     return [{"id": f["id"], "variant": f["variant"], "angle": f["angle"], "score": f["score"]} for f in fs if f["reason"] is None]
 
 
-def _store_and_pick(conn, judged: dict[int, list[dict]], target: dict, attached: set[int]) -> None:
+def _store_and_pick(conn, judged: dict[int, list[dict]], target: dict, attached: set[int], keep_hand: bool = True) -> None:
+    """Replace table cull in one transaction. A hand choice survives on any frame still judged, unless keep_hand is off."""
+    hand = {r[0]: r[1] for r in conn.execute("SELECT photo_id, pick FROM cull WHERE manual=1")} if keep_hand else {}
     caps = {k: len(_cands(fs)) for k, fs in judged.items()}
     if "total" in target:
         weights = {k: len({f["variant"] for f in fs}) for k, fs in judged.items()}
@@ -598,8 +599,10 @@ def _store_and_pick(conn, judged: dict[int, list[dict]], target: dict, attached:
             num = lambda x: None if x is None else int(x)
             rows.append((int(f["id"]), int(k), int(f["variant"]), num(f.get("angle")), num(f.get("retake")), float(f.get("score", 0.0)), f["reason"],
                          int(f["id"] in chosen), int(f["id"] in attached)))
+    conn.execute("DELETE FROM cull")
     conn.executemany("INSERT OR REPLACE INTO cull(photo_id, product, variant, angle, retake, score, reason, pick, attached) "
                      "VALUES(?,?,?,?,?,?,?,?,?)", rows)
+    conn.executemany("UPDATE cull SET pick=?, manual=1 WHERE photo_id=?", [(p, i) for i, p in hand.items()])
     conn.commit()
 
 
@@ -612,8 +615,7 @@ def repick(conn, per_product: int | None = None, total: int | None = None) -> di
         judged[r[1]].append({"id": r[0], "variant": r[2], "angle": r[3], "retake": r[4], "score": r[5], "reason": r[6]})
     attached = {r[0] for r in conn.execute("SELECT photo_id FROM cull WHERE attached=1")}
     if judged:
-        conn.execute("DELETE FROM cull")
-        _store_and_pick(conn, judged, target, attached)
+        _store_and_pick(conn, judged, target, attached, keep_hand=False)    # a new target asked for is a fresh pick
     return summary(conn)
 
 
@@ -639,6 +641,7 @@ def swap(conn, photo_id: int) -> dict:
     nxt = next((ids[(k + j) % len(ids)] for j in range(1, len(ids)) if not dict((x[0], x[3]) for x in ring)[ids[(k + j) % len(ids)]]), None)
     if nxt is None:
         return {"out": photo_id, "in": None}
+    db.durable(conn)
     conn.execute("UPDATE cull SET pick=0, manual=1 WHERE photo_id=?", (photo_id,))
     conn.execute("UPDATE cull SET pick=1, manual=1 WHERE photo_id=?", (nxt,))
     conn.commit()
@@ -647,6 +650,7 @@ def swap(conn, photo_id: int) -> dict:
 
 def set_pick(conn, photo_id: int, on: bool) -> bool:
     _ensure(conn)
+    db.durable(conn)
     n = conn.execute("UPDATE cull SET pick=?, manual=1 WHERE photo_id=?", (int(bool(on)), photo_id)).rowcount
     conn.commit()
     return bool(n)

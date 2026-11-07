@@ -1,14 +1,14 @@
 """Live shoot: a tethered camera writes into a folder, and every frame gets a verdict while the shoot is still on.
 
-The tether app (Sony Imaging Edge Remote, EOS Utility, Lightroom) owns the folder. We only ever read it: a polling
-watcher finds files that have stopped growing, one worker thread runs each through the same per-file path a scan uses
+The tether app (Sony Imaging Edge Remote, EOS Utility, Lightroom) owns the folder, or, straight from the camera over Wi-Fi, our
+own FTP receiver (tether.py) does. Either way this side only ever reads it: a polling watcher finds files that have stopped growing, one worker thread runs each through the same per-file path a scan uses
 (index.process_one, the db upserts, the shared encoder), and an ordered event log feeds the screen on the set.
 
 Nothing whole-shoot runs per frame. The verdict is absolute (the config floors, not a percentile of a shoot that is
-still growing), products are running centroids of grey embeddings, and bursts and brackets are the rules in search.py
-applied to the last few frames. The project file is saved once, on stop, and never into the watched folder.
+still growing), products are running centroids of grey embeddings, models are running centroids of the main face's
+SFace embedding, and bursts and brackets are the rules in search.py applied to the last few frames. The project file is saved once, on stop, and never into the watched folder.
 
-Tags live in live_products and live_tags inside the shoot's index.db, so they travel in the project file and a session
+Tags live in live_products, live_models and live_tags inside the shoot's index.db, so they travel in the project file and a session
 restarted on the same folder carries on from them.
 
 With a drive picked, every frame also goes into a persistent queue (live_copies) and a thread of its own copies it to
@@ -32,9 +32,9 @@ from fastapi import APIRouter, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
-from . import awake, bundle, db, index
-from .config import (DEV_DIRS, EMBED_DIM, FACE_CLUSTER_MIN_EYE_SHARP, FOCUS_BAD_ABS, FOCUS_BAD_MAX_ABS, IMAGE_EXTS, MODEL_TAG,
-                     RAW_EXTS, SHARP_TILE_GRID, SKIP_DIRS, app_home, export_root, shoot_slug)
+from . import awake, bundle, db, index, tether
+from .config import (DEV_DIRS, EMBED_DIM, FACE_CLUSTER_MIN_EYE_SHARP, FACE_MATCH_MIN_SIM, FACE_REF_MIN_EDGE, FOCUS_BAD_ABS, FOCUS_BAD_MAX_ABS,
+                     IMAGE_EXTS, MODEL_TAG, RAW_EXTS, SHARP_TILE_GRID, SKIP_DIRS, app_home, export_root, shoot_slug)
 from .decode import DecodeError, load_preview
 from .export import safe_segment
 from .features import to_gray
@@ -57,6 +57,7 @@ ORIGINAL_EDGE = 1 << 15   # no camera reaches this: the 100% view is never scale
 # of them is a shot, so a watch on ~/Pictures never goes in.
 PACKAGE_SUFFIXES = (PHOTOS_LIBRARY_SUFFIX, ".photolibrary", ".migratedphotolibrary", ".aplibrary", ".cocatalog", ".lrlibrary", ".lrdata",
                     ".fcpbundle", ".imovielibrary", ".tvlibrary", ".app", ".bundle", ".framework", ".plugin", ".pkg")
+OTHER = "other"           # the name of a product only model shots sit in, until a shot shows it
 COUNT_MAX_S = 1.5         # the start screen's count of a folder stops here and says "more than"
 
 SCHEMA = """
@@ -66,14 +67,16 @@ CREATE TABLE IF NOT EXISTS live_tags(
   photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   product INTEGER REFERENCES live_products(id), model TEXT, tagged INTEGER NOT NULL DEFAULT 0,
   verdict TEXT, reason TEXT, kind TEXT, flash TEXT, burst INTEGER, bracket INTEGER, ev REAL, ms REAL, grey BLOB,
-  alerts TEXT, level REAL, hidden INTEGER NOT NULL DEFAULT 0);
+  alerts TEXT, level REAL, hidden INTEGER NOT NULL DEFAULT 0, face BLOB, model_auto INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS live_models(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, auto INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS live_copies(
   rel TEXT PRIMARY KEY, photo_id INTEGER, src_size INTEGER, src_mtime REAL, state TEXT NOT NULL DEFAULT 'queued',
   dest TEXT, hash TEXT, verified INTEGER NOT NULL DEFAULT 0, stale INTEGER NOT NULL DEFAULT 0,
   tries INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS live_skipped(rel TEXT PRIMARY KEY, size INTEGER, mtime REAL);
 """
-SHOOT_TABLES = ("live_tags", "live_products", "live_copies", "live_skipped")    # children first: live_tags points at live_products
+SHOOT_TABLES = ("live_tags", "live_products", "live_models", "live_copies", "live_skipped")    # children first: live_tags points at live_products
 ACTIVE_KEY = "live_active"      # meta: the active product and model, cleared by a clean stop so a crash can restore them
 UNSORTED = "Unsorted"           # the one pile of a session that does not sort into products
 DRIVE_KEY = "live_drive"        # meta: the drive this shoot copies to, its shoot name and the id of the marker on it
@@ -88,7 +91,8 @@ _STOP = object()
 def ensure_tables(conn) -> None:
     conn.executescript(SCHEMA)
     have = {r[1] for r in conn.execute("PRAGMA table_info(live_tags)")}     # a shoot from before these columns
-    for col, typ in (("alerts", "TEXT"), ("level", "REAL"), ("hidden", "INTEGER NOT NULL DEFAULT 0")):
+    for col, typ in (("alerts", "TEXT"), ("level", "REAL"), ("hidden", "INTEGER NOT NULL DEFAULT 0"), ("face", "BLOB"),
+                     ("model_auto", "INTEGER NOT NULL DEFAULT 0")):
         if col not in have:
             conn.execute(f"ALTER TABLE live_tags ADD COLUMN {col} {typ}")
 
@@ -293,6 +297,37 @@ def light_alerts(cur: dict, recent, strobe: bool = False, clip: float | None = N
 # ===== end light alerts =====
 
 
+# ===== which face is the model =====
+# Measured on the 23 people in site/img: 1,076 faces, the same person cropped, flipped, relit, turned, shrunk and blurred, and
+# the two people who appear in two different photos. That is small and mostly synthetic. Numbers in docs/live-shoot.md.
+FACE_DIM = 128                    # what SFace gives
+MODEL_SIM = FACE_MATCH_MIN_SIM    # joins a model. The closest two different people came was 0.53 in 543,117 pairs; 5% of one person's two photos fall under this
+MODEL_OPEN_SIM = 0.40             # opens one only below this. Between the two the frame stays where it was: one cut split 5.1% of people, this gap 0.9%, merging none
+MODEL_MIN_FACE = 0.08             # of the long edge. A full length model comes to about 0.09, faces behind the subject to 0.04 to 0.07
+MODEL_MIN_SCORE = 0.8             # above FACE_SCORE_MIN: the two things YuNet took for a face in site/img (a chart, a hand) scored 0.71 and 0.75
+
+
+def main_face(faces: list[dict], size: tuple[int, int]) -> dict | None:
+    """The one face that speaks for the frame, or None. The largest, so two equal faces go with whichever is a pixel
+    bigger. Too small or too doubtful and the frame has no main face at all, whoever else is in it."""
+    if not faces:
+        return None
+    f = max(faces, key=lambda x: x["w"] * x["h"])
+    if max(f["w"], f["h"]) < max(MODEL_MIN_FACE * max(size), FACE_REF_MIN_EDGE) or f["score"] < MODEL_MIN_SCORE:
+        return None
+    return f
+
+
+def _is_other(name: str) -> bool:
+    return re.fullmatch(OTHER + r" \d+", name) is not None
+
+
+def _unnamed(m: dict) -> bool:
+    """Still the name sorted gave it."""
+    return bool(m["auto"]) and re.fullmatch(r"model \d+", m["name"]) is not None
+# ===== end which face =====
+
+
 # ===== bursts and brackets, live =====
 class _Window(Index):
     """search.Index's own burst and bracket rules over the last WINDOW frames instead of a whole shoot. No refresh, no
@@ -387,8 +422,8 @@ class _Item:
 
 
 # ===== the copy to the drive =====
-# <drive>/<shoot>/products/<product>/<file>, models/<model>/<file> when the shot has a model name, a soft/ folder inside
-# either, unsorted/<file> for the pile of a session without products, and unread/<file> for what we could not decode. live_copies is the queue, on the Mac, and one thread owns the
+# <drive>/<shoot>/products/<product>/<file>, models/<model>/<file> when the shot has a model (_held says when it does not
+# count), a soft/ folder inside either, unsorted/<file> for the pile of a session without products, and unread/<file> for what we could not decode. live_copies is the queue, on the Mac, and one thread owns the
 # drive: it copies, moves and reads back, so nothing on the drive ever has two writers. A row names no folder until the
 # moment it is copied, which is why a rename costs a queued frame nothing.
 MARKER = ".sorted-shoot"      # names this shoot on the disk. A path alone cannot tell the drive from a stale mount point or another card
@@ -407,7 +442,19 @@ PICK_PROMPTS = {"watch": "Pick the folder your shots land in", "drive": "Pick wh
                 "export": "Pick where the store copies go"}
 
 
-def _category(kind: str | None, model: str | None) -> str:
+def _shown_as_product(model: str | None, auto, tagged) -> bool:
+    """Whether a shot sits in its product's pile. One in a model's pile opens a product too, but nobody sees it."""
+    return not model or _held(model, auto, tagged)
+
+
+def _held(model: str | None, auto, tagged) -> bool:
+    """A typed product keeps a shot whose model sorted only recognised: the model is recorded, the folder is the product's."""
+    return bool(model and auto and tagged)
+
+
+def _category(kind: str | None, model: str | None, auto: bool = False, tagged: bool = False) -> str:
+    if _held(model, auto, tagged):
+        return "product"
     return "model" if model or kind == "model" else "product"
 
 
@@ -878,10 +925,10 @@ class Copier:
 
     def _folder(self, conn, pid: int | None) -> Path:
         """Where a frame belongs right now."""
-        t = conn.execute("SELECT t.model, t.verdict, l.name FROM live_tags t LEFT JOIN live_products l ON l.id=t.product WHERE t.photo_id=?", (pid,)).fetchone()
+        t = conn.execute("SELECT t.model, t.model_auto, t.tagged, t.verdict, l.name FROM live_tags t LEFT JOIN live_products l ON l.id=t.product WHERE t.photo_id=?", (pid,)).fetchone()
         if t is None:
             return Path("unread")
-        if t["model"]:
+        if t["model"] and not _held(t["model"], t["model_auto"], t["tagged"]):
             base = Path("models", _seg(t["model"], "model"))
         else:
             base = Path("unsorted") if t["name"] == UNSORTED else Path("products", _seg(t["name"], "product"))
@@ -1152,8 +1199,9 @@ class LiveSession:
                  poll_s: float = POLL_S, pair_window_s: float = PAIR_WINDOW_S, queue_max: int = QUEUE_MAX,
                  on_shot: Callable[[dict], None] | None = None, on_finished: Callable[["LiveSession"], None] | None = None,
                  drive: str | Path | None = None, shoot: str | None = None, drive_resume: bool = False,
-                 drive_poll_s: float = DRIVE_POLL_S, faces: bool = True, products: bool = True, mode: str | None = None):
+                 drive_poll_s: float = DRIVE_POLL_S, faces: bool = True, products: bool = True, mode: str | None = None, camera: str | None = None):
         self.root = Path(root); self.log = log or EventLog(); self.shoot = shoot
+        self.camera = camera              # "wifi": the receiver feeds the folder, and Back to the last shoot brings it back
         self.mode = mode                  # NEW_ONLY or EVERYTHING: a new shoot. Anything else carries on from what the folder's index holds
         self.project: str | None = None   # the project file, once the stop has saved it
         # Both only put work off. Frames are ordinary index rows either way: n_faces stays NULL, which is what Detect faces
@@ -1173,6 +1221,10 @@ class LiveSession:
         self.active: dict[str, str | None] = {"product": None, "model": None}
         self.shots: dict[int, dict] = {}
         self.products: dict[int, dict] = {}
+        self.models: dict[int, dict] = {}
+        self.faces: dict[int, np.ndarray] = {}    # shot id: the main face, on frames fit to teach a centroid
+        self.moved: dict[str, str] = {}           # a model's old name: its name now, for frames queued under the old one
+        self.tag_lock = threading.RLock()         # a frame from its assignment to its commit; a rename or a retag waits for that. Taken before self.lock
         self.sets: dict[tuple[str, int], dict] = {}
         self.window = _Window(self.root)
         self.recent: deque[dict] = deque(maxlen=ALERT_WINDOW)    # what the light alerts compare a frame with
@@ -1180,6 +1232,7 @@ class LiveSession:
         self.seen: dict[str, _Seen] = {}
         self.done: dict[str, tuple[int, float]] = {}
         self.attached: set[str] = set()
+        self.suspects: set[str] = set()
         self.first_poll = True
         self._stop = threading.Event()
         self.finished = threading.Event()
@@ -1199,7 +1252,7 @@ class LiveSession:
             elif self.mode == NEW_ONLY:
                 self._skip_what_is_there(conn)
             db.set_meta(conn, SHOOT_KEY, json.dumps({"name": self.shoot, "strobe": self.strobe, "no_flash": self.no_flash,
-                                                     "faces": self.use_faces, "products": self.use_products}))
+                                                     "faces": self.use_faces, "products": self.use_products, "camera": self.camera}))
             if self.copier:
                 self.copier.open(conn)
         finally:
@@ -1249,6 +1302,10 @@ class LiveSession:
             self.done[r[0]] = (r[1], r[2])
         for r in conn.execute("SELECT id, name, auto FROM live_products ORDER BY id"):
             self.products[r[0]] = {"id": r[0], "name": r[1], "auto": bool(r[2]), "n": 0, "sum": np.zeros(EMBED_DIM, np.float32)}
+        conn.execute("INSERT OR IGNORE INTO live_models(name) SELECT DISTINCT model FROM live_tags WHERE model IS NOT NULL")   # typed before this table
+        conn.commit()
+        for r in conn.execute("SELECT id, name, auto FROM live_models ORDER BY id"):
+            self.models[r[0]] = {"id": r[0], "name": r[1], "auto": bool(r[2]), "n": 0, "sum": np.zeros(FACE_DIM, np.float32)}
         rows = conn.execute(
             "SELECT t.*, p.id, p.rel, p.qhash, p.camera, p.taken_at, p.subsec, p.exposure_s, p.fnumber, p.iso, p.focal_mm, p.ev_bias, p.exp_mode, "
             "p.kind AS photo_kind, p.embed FROM live_tags t JOIN photos p ON p.id=t.photo_id ORDER BY t.n").fetchall()
@@ -1256,8 +1313,12 @@ class LiveSession:
             shot = self._shot_dict(dict(r), self.products[r["product"]]["name"] if r["product"] in self.products else None)
             shot.update(verdict=r["verdict"], reason=r["reason"], kind=r["kind"], flash=r["flash"], model=r["model"],
                         product_id=r["product"], tagged=bool(r["tagged"]), ev=r["ev"], n=r["n"], ms={"total": r["ms"]},
-                        alerts=json.loads(r["alerts"] or "[]"), hidden=bool(r["hidden"]), category=_category(r["kind"], r["model"]))
+                        alerts=json.loads(r["alerts"] or "[]"), hidden=bool(r["hidden"]), model_auto=bool(r["model_auto"]),
+                        category=_category(r["kind"], r["model"], r["model_auto"], r["tagged"]))
             self.shots[r["id"]] = shot
+            if r["face"]:
+                self.faces[r["id"]] = np.frombuffer(r["face"], np.float16).astype(np.float32)
+                self._teach(self._model_named(r["model"]), self.faces[r["id"]])
             p = self.products.get(r["product"])
             if p is not None and r["grey"]:
                 p["sum"] += np.frombuffer(r["grey"], np.float16).astype(np.float32); p["n"] += 1
@@ -1488,43 +1549,52 @@ class LiveSession:
         region = None if row.get("n_faces") else product_region(rgb)     # a person is not the product the clip alert speaks of
         verdict = judge(row, thumb, region)
         level, clip = light_level(rgb), clipped_share(rgb, region)
-        with self.lock:
-            old = self.shots.get(pid)
-            if old is not None:           # the same frame written again: it keeps its tags, the centroid does not count it twice
-                product, model, tagged, n = self.products[old["product_id"]], old["model"], old["tagged"], old["n"]
-            else:
-                product, tagged = self._assign(conn, item.product, grey, verdict["verdict"] == "soft")
-                model, n = item.model, len(self.shots) + 1
-            shot = self._shot_dict(dict(row, id=pid), product["name"])
-            light = {"level": level, "exposure_s": row.get("exposure_s"), "fnumber": row.get("fnumber"), "iso": row.get("iso"), "focal_mm": row.get("focal_mm"), "product": product["id"]}
-            shot.update(verdict, product_id=product["id"], model=model, tagged=tagged, n=n,
-                        flash=flash_state(row.get("flash"), self.strobe, self.no_flash),
-                        alerts=light_alerts(light, self.recent, self.strobe, clip),
-                        category=_category(verdict["kind"], model), copy="queued" if self.copier else None)
-            if old is not None:
-                shot["burst"], shot["bracket"], shot["ev"], shot["hidden"] = old["burst"], old["bracket"], old["ev"], old["hidden"]
-            else:
-                self.recent.append(light)
-            self.shots[pid] = shot
-            self.window.add(dict(row, id=pid), colour)
-            changed = self._regroup()
-        db.set_embed(conn, pid, colour)
-        total = (time.monotonic() - t0) * 1000
-        conn.execute("INSERT OR REPLACE INTO live_tags(photo_id, n, product, model, tagged, verdict, reason, kind, flash, burst, bracket, ev, ms, grey, alerts, level, hidden) "
-                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (pid, n, product["id"], model, int(tagged), shot["verdict"], shot["reason"], shot["kind"], shot["flash"],
-                      (shot["burst"] or {}).get("id"), (shot["bracket"] or {}).get("id"), shot["ev"], total,
-                      grey.astype(np.float16).tobytes() if grey is not None else None,
-                      json.dumps(shot["alerts"]), level, int(shot["hidden"])))
-        for i in changed:
-            s = self.shots[i]
-            conn.execute("UPDATE live_tags SET burst=?, bracket=?, ev=? WHERE photo_id=?",
-                         ((s["burst"] or {}).get("id"), (s["bracket"] or {}).get("id"), s["ev"], i))
-        if self.copier:                   # one row in this commit is all a copy costs the worker
-            self.copier.add(conn, pid, item.rel)
-            if row["sibling"]:
-                self.copier.add(conn, pid, row["sibling"])
-        conn.commit()                     # the embedding and the tags land together: a crash leaves the file not done
+        main = main_face(res["faces"], thumb.size) if self.use_faces else None
+        face = np.frombuffer(main["embed"], np.float32) if main else None
+        soft_face = main is not None and (verdict["verdict"] == "soft" or main["eye_sharp"] < FACE_CLUSTER_MIN_EYE_SHARP)
+        with self.tag_lock:
+            with self.lock:
+                old = self.shots.get(pid)
+                if old is not None:           # the same frame written again: it keeps its tags, the centroid does not count it twice
+                    product, model, auto, tagged, n = self.products[old["product_id"]], old["model"], old["model_auto"], old["tagged"], old["n"]
+                else:
+                    model, auto = self._match(conn, self.moved.get(item.model, item.model), face, soft_face)
+                    product, tagged = self._assign(conn, item.product, grey, verdict["verdict"] == "soft", _shown_as_product(model, auto, bool(item.product)))
+                    n = len(self.shots) + 1
+                    if face is not None and not soft_face:
+                        self.faces[pid] = face
+                shot = self._shot_dict(dict(row, id=pid), product["name"])
+                light = {"level": level, "exposure_s": row.get("exposure_s"), "fnumber": row.get("fnumber"), "iso": row.get("iso"), "focal_mm": row.get("focal_mm"), "product": product["id"]}
+                shot.update(verdict, product_id=product["id"], model=model, model_auto=auto, tagged=tagged, n=n,
+                            flash=flash_state(row.get("flash"), self.strobe, self.no_flash),
+                            alerts=light_alerts(light, self.recent, self.strobe, clip) + self._cut_alert(item),
+                            category=_category(verdict["kind"], model, auto, tagged), copy="queued" if self.copier else None)
+                if old is not None:
+                    shot["burst"], shot["bracket"], shot["ev"], shot["hidden"] = old["burst"], old["bracket"], old["ev"], old["hidden"]
+                else:
+                    self.recent.append(light)
+                self.shots[pid] = shot
+                self.window.add(dict(row, id=pid), colour)
+                changed = self._regroup()
+                kept = self.faces.get(pid)
+            db.set_embed(conn, pid, colour)
+            total = (time.monotonic() - t0) * 1000
+            conn.execute("INSERT OR REPLACE INTO live_tags(photo_id, n, product, model, tagged, verdict, reason, kind, flash, burst, bracket, ev, ms, grey, alerts, level, hidden, face, model_auto) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (pid, n, product["id"], model, int(tagged), shot["verdict"], shot["reason"], shot["kind"], shot["flash"],
+                          (shot["burst"] or {}).get("id"), (shot["bracket"] or {}).get("id"), shot["ev"], total,
+                          grey.astype(np.float16).tobytes() if grey is not None else None,
+                          json.dumps(shot["alerts"]), level, int(shot["hidden"]),
+                          kept.astype(np.float16).tobytes() if kept is not None else None, int(auto)))
+            for i in changed:
+                s = self.shots[i]
+                conn.execute("UPDATE live_tags SET burst=?, bracket=?, ev=? WHERE photo_id=?",
+                             ((s["burst"] or {}).get("id"), (s["bracket"] or {}).get("id"), s["ev"], i))
+            if self.copier:                   # one row in this commit is all a copy costs the worker
+                self.copier.add(conn, pid, item.rel)
+                if row["sibling"]:
+                    self.copier.add(conn, pid, row["sibling"])
+            conn.commit()                     # the embedding and the tags land together: a crash leaves the file not done
         if self.copier:
             self.copier.poke()
         shot["ms"] = {"decode": round((t1 - t0) * 1000, 1), "embed": round((t2 - t1) * 1000, 1), "total": round(total, 1),
@@ -1537,26 +1607,43 @@ class LiveSession:
     def _shot_dict(row: dict, product: str | None) -> dict:
         qh = row["qhash"]
         return {"id": row["id"], "file": row["rel"], "thumb": f"/api/thumb/{qh}?size=grid", "preview": f"/api/thumb/{qh}?size=preview",
-                "verdict": None, "reason": None, "kind": None, "product": product, "product_id": None, "model": None, "tagged": False,
+                "verdict": None, "reason": None, "kind": None, "product": product, "product_id": None, "model": None, "model_auto": False, "tagged": False,
                 "burst": None, "bracket": None, "ev": None, "flash": "unknown", "ms": {}, "n": 0, "taken_at": row.get("taken_at"), "sharp": row.get("sharp"),
                 "alerts": [], "hidden": False, "category": "product", "copy": None}
 
     # ===== products =====
-    def _new_product(self, conn, name: str | None) -> dict:
+    def _next_product(self, word: str = "product") -> str:
+        """The next free number for the piles on screen. A product only a model's shots sit in is named apart ("other 1"), so
+        it does not use one up and the first pile anyone sees is product 1."""
+        taken = {p["name"] for p in self.products.values()}
+        k = sum(p["auto"] and _is_other(p["name"]) == (word == OTHER) for p in self.products.values()) + 1
+        while f"{word} {k}" in taken:
+            k += 1
+        return f"{word} {k}"
+
+    def _show_product(self, conn, p: dict) -> None:
+        """Its first shot in a pile on screen: it takes its place in the numbering. Nothing anyone has seen changes name."""
+        if not p["auto"] or not _is_other(p["name"]):
+            return
+        old, name = p["name"], self._next_product()
+        conn.execute("UPDATE live_products SET name=? WHERE id=?", (name, p["id"]))
+        p["name"] = name
+        for s in self.shots.values():
+            if s["product_id"] == p["id"]:
+                s["product"] = name
+        self.log.emit("product_renamed", id=p["id"], name=name, old=old)
+
+    def _new_product(self, conn, name: str | None, shown: bool = True) -> dict:
         auto = name is None
         if auto:
-            taken = {p["name"] for p in self.products.values()}
-            k = sum(p["auto"] for p in self.products.values()) + 1
-            while f"product {k}" in taken:
-                k += 1
-            name = f"product {k}"
+            name = self._next_product("product" if shown else OTHER)
         pid = conn.execute("INSERT INTO live_products(name, auto) VALUES(?, ?)", (name, int(auto))).lastrowid
         p = {"id": pid, "name": name, "auto": auto, "n": 0, "sum": np.zeros(EMBED_DIM, np.float32)}
         self.products[pid] = p
         self.log.emit("product_created", id=pid, name=name, auto=auto)
         return p
 
-    def _assign(self, conn, active: str | None, grey: np.ndarray | None, soft: bool = False) -> tuple[dict, bool]:
+    def _assign(self, conn, active: str | None, grey: np.ndarray | None, soft: bool = False, shown: bool = True) -> tuple[dict, bool]:
         """(product, tagged): the active product when there is one, else the nearest running centroid at PRODUCT_SIM, else
         a new product. Either way the frame joins that centroid, so a scanned barcode teaches the auto assignment. With
         products off there are no centroids: the active product, else the one Unsorted pile."""
@@ -1576,12 +1663,139 @@ class LiveSession:
                     best, sim = x, c
             # blur moves a frame far from its own product, so a soft frame never opens a folder when one exists, and
             # it never pulls a centroid off the sharp frames
-            p = best if best is not None and (soft or sim >= PRODUCT_SIM) else self._new_product(conn, None)
+            p = best if best is not None and (soft or sim >= PRODUCT_SIM) else self._new_product(conn, None, shown)
+        if shown:
+            self._show_product(conn, p)
         if not soft:
             p["sum"] = p["sum"] + grey
         p["n"] += 1
         return p, bool(active)
 
+    # ===== models =====
+    def _model_named(self, name: str | None) -> dict | None:
+        """Without regard to case: on a Mac disk Asha and asha are one folder, so they had better be one model."""
+        key = (name or "").casefold()
+        return next((m for m in self.models.values() if m["name"].casefold() == key), None)
+
+    def _new_model(self, conn, name: str | None) -> dict:
+        auto = name is None
+        if auto:
+            taken = {m["name"] for m in self.models.values()}
+            k = sum(m["auto"] for m in self.models.values()) + 1
+            while f"model {k}" in taken:
+                k += 1
+            name = f"model {k}"
+        mid = conn.execute("INSERT INTO live_models(name, auto) VALUES(?, ?)", (name, int(auto))).lastrowid
+        m = {"id": mid, "name": name, "auto": auto, "n": 0, "sum": np.zeros(FACE_DIM, np.float32)}
+        self.models[mid] = m
+        self.log.emit("model_created", id=mid, name=name, auto=auto)
+        return m
+
+    def _nearest_model(self, face: np.ndarray | None) -> tuple[dict | None, float]:
+        best, sim = None, -1.0
+        if face is None:
+            return best, sim
+        for m in self.models.values():
+            norm = float(np.linalg.norm(m["sum"]))
+            c = float(face @ m["sum"]) / norm if norm else -1.0
+            if c > sim:
+                best, sim = m, c
+        return best, sim
+
+    @staticmethod
+    def _teach(m: dict | None, face: np.ndarray, sign: int = 1) -> None:
+        if m is None:
+            return
+        m["n"] += sign
+        m["sum"] = m["sum"] + sign * face if m["n"] > 0 else np.zeros(FACE_DIM, np.float32)     # the last one out leaves rounding, not a direction
+
+    def _match(self, conn, typed: str | None, face: np.ndarray | None, soft: bool) -> tuple[str | None, bool]:
+        """(model, auto) for a new frame. A typed name is taken as it stands. Otherwise the nearest running centroid at
+        MODEL_SIM, else a new model when the face is clearly nobody yet. Anything unsure stays out: a soft frame opens
+        nothing, even the first (it could not teach the centroid, and the next sharp frame would open a second folder), and
+        a face between the two cuts waits. Unlike a product there is no nearest whatever: a blurred face is closer to
+        strangers than to itself. The first frame under a new typed name that matches a model nobody has named takes that
+        model over, so typing a name for the person on set never makes them two people."""
+        if not self.use_faces:
+            return typed, False
+        near, sim = self._nearest_model(face)
+        teach = face is not None and not soft
+        if typed:
+            m = self._model_named(typed)
+            if (m is None or not m["n"]) and teach and sim >= MODEL_SIM and _unnamed(near):
+                m = self._fold_model(conn, near, typed)
+            elif m is None:
+                m = self._new_model(conn, typed)
+        elif face is None:
+            return None, False
+        elif sim >= MODEL_SIM:
+            m = near
+        elif soft or sim >= MODEL_OPEN_SIM:
+            return None, False
+        else:
+            m = self._new_model(conn, None)
+        if teach:
+            self._teach(m, face)
+        return m["name"], not typed
+
+    def _fold_model(self, conn, m: dict, name: str) -> dict:
+        """m takes this name, or goes into the model that already has it: centroids add, shots follow, the files are only
+        flagged, as in Hub.rename. The caller commits, holding tag_lock so no frame is between its assignment and its row."""
+        old = m["name"]
+        into = self._model_named(name)
+        into = None if into is m else into
+        target = into["name"] if into else name
+        conn.execute("UPDATE live_copies SET stale=stale+1 WHERE photo_id IN (SELECT photo_id FROM live_tags WHERE model=?)", (old,))
+        conn.execute("UPDATE live_tags SET model=? WHERE model=?", (target, old))
+        if into:
+            conn.execute("DELETE FROM live_models WHERE id=?", (m["id"],))
+        else:
+            conn.execute("UPDATE live_models SET name=? WHERE id=?", (name, m["id"]))
+        with self.lock:
+            if into:
+                into["sum"] = into["sum"] + m["sum"]; into["n"] += m["n"]
+                del self.models[m["id"]]
+            else:
+                m["name"] = name
+            for s in self.shots.values():
+                if s["model"] == old:
+                    s["model"] = target
+            self.moved = {k: target if v == old else v for k, v in self.moved.items()}
+            self.moved[old] = target
+            active = self.active["model"] == old
+            if active:
+                self.active["model"] = target
+                out = dict(self.active)
+        if active:
+            db.set_meta(conn, ACTIVE_KEY, json.dumps(out))
+        self.log.emit("model_renamed", old=old, name=target, merged=into is not None)
+        if active:
+            self._status()
+        return into or m
+
+    def rename_model(self, old: str, name: str) -> dict:
+        """The Models tab. A name another model has already merges the two, which is the fix when light or an angle split one
+        person. Nothing is deleted: the files move into the one folder."""
+        name = name.strip()
+        if not name:
+            raise ValueError("a model needs a name")
+        conn = db.connect(self.root)
+        try:
+            with self.tag_lock:
+                with self.lock:
+                    m = next((x for x in self.models.values() if x["name"] == old), None)
+                if m is None:
+                    raise KeyError(old)
+                if name != old:
+                    m = self._fold_model(conn, m, name)
+                    conn.commit()
+        finally:
+            conn.close()
+        if self.copier:
+            self.copier.poke()
+        return {"name": m["name"]}
+
+    # ===== choosing by hand =====
     def set_active(self, product=_UNSET, model=_UNSET) -> dict:
         """Change what new frames are tagged with. A barcode scanner types into this field and ends with a return, so
         the text is trimmed; empty clears it. Frames already on their way keep what was active when they appeared."""
@@ -1590,6 +1804,7 @@ class LiveSession:
                 self.active["product"] = (product or "").strip() or None
             if model is not _UNSET:
                 self.active["model"] = (model or "").strip() or None
+                self.moved.pop(self.active["model"], None)      # typed again from here on, it means a new model of that name
             out = dict(self.active)
         conn = db.connect(self.root)
         try:
@@ -1622,43 +1837,65 @@ class LiveSession:
             name = (product or "").strip()
             if not name:
                 raise ValueError("a frame needs a product")
+        typed = (model or "").strip() or None if model is not _UNSET else None
         conn = db.connect(self.root)
         try:
-            r = conn.execute("SELECT grey FROM live_tags WHERE photo_id=?", (pid,)).fetchone()
-            if name is not None:
-                with self.lock:
-                    known = any(x["name"] == name for x in self.products.values())
-                if not known:
-                    conn.execute("INSERT OR IGNORE INTO live_products(name, auto) VALUES(?, 0)", (name,)); conn.commit()
-                    new = conn.execute("SELECT id FROM live_products WHERE name=?", (name,)).fetchone()[0]
-                    with self.lock:
-                        made = new not in self.products
-                        self.products.setdefault(new, {"id": new, "name": name, "auto": False, "n": 0, "sum": np.zeros(EMBED_DIM, np.float32)})
-                    if made:
-                        self.log.emit("product_created", id=new, name=name, auto=False)
-            with self.lock:
-                s = self.shots[pid]
-                if name is not None:
-                    was = self.products.get(s["product_id"])
-                    p = next(x for x in self.products.values() if x["name"] == name)
-                    if p is not was:
-                        grey = np.frombuffer(r[0], np.float16).astype(np.float32) if r and r[0] and s["verdict"] != "soft" else 0.0
-                        if was is not None:
-                            was["sum"] = was["sum"] - grey; was["n"] -= 1
-                        p["sum"] = p["sum"] + grey; p["n"] += 1
-                        s.update(product=p["name"], product_id=p["id"], tagged=True)
-                if model is not _UNSET:
-                    s["model"] = (model or "").strip() or None
-                s["category"] = _category(s["kind"], s["model"])
-                out = dict(s)
-            conn.execute("UPDATE live_tags SET product=?, model=?, tagged=? WHERE photo_id=?", (out["product_id"], out["model"], int(out["tagged"]), pid))
-            conn.execute("UPDATE live_copies SET stale=stale+1 WHERE photo_id=?", (pid,))
-            conn.commit()
+            with self.tag_lock:
+                out = self._retag(conn, pid, name, model, typed)
         finally:
             conn.close()
         self.log.emit("shot_update", **out)
         if self.copier:
             self.copier.poke()
+        return out
+
+    def _retag(self, conn, pid: int, name: str | None, model, typed: str | None) -> dict:
+        r = conn.execute("SELECT grey FROM live_tags WHERE photo_id=?", (pid,)).fetchone()
+        if typed and self.use_faces:
+            with self.lock:
+                known = self._model_named(typed)
+            if known is None:
+                conn.execute("INSERT OR IGNORE INTO live_models(name) VALUES(?)", (typed,)); conn.commit()
+                new = conn.execute("SELECT id FROM live_models WHERE name=?", (typed,)).fetchone()[0]
+                with self.lock:
+                    self.models[new] = {"id": new, "name": typed, "auto": False, "n": 0, "sum": np.zeros(FACE_DIM, np.float32)}
+                self.log.emit("model_created", id=new, name=typed, auto=False)
+        if name is not None:
+            with self.lock:
+                known = any(x["name"] == name for x in self.products.values())
+            if not known:
+                conn.execute("INSERT OR IGNORE INTO live_products(name, auto) VALUES(?, 0)", (name,)); conn.commit()
+                new = conn.execute("SELECT id FROM live_products WHERE name=?", (name,)).fetchone()[0]
+                with self.lock:
+                    made = new not in self.products
+                    self.products.setdefault(new, {"id": new, "name": name, "auto": False, "n": 0, "sum": np.zeros(EMBED_DIM, np.float32)})
+                if made:
+                    self.log.emit("product_created", id=new, name=name, auto=False)
+        with self.lock:
+            s = self.shots[pid]
+            if name is not None:
+                was = self.products.get(s["product_id"])
+                p = next(x for x in self.products.values() if x["name"] == name)
+                if p is not was:
+                    grey = np.frombuffer(r[0], np.float16).astype(np.float32) if r and r[0] and s["verdict"] != "soft" else 0.0
+                    if was is not None:
+                        was["sum"] = was["sum"] - grey; was["n"] -= 1
+                    p["sum"] = p["sum"] + grey; p["n"] += 1
+                    s.update(product=p["name"], product_id=p["id"], tagged=True)
+            if model is not _UNSET:
+                now = self._model_named(typed)
+                face = self.faces.get(pid)
+                if face is not None and now is not self._model_named(s["model"]):
+                    self._teach(self._model_named(s["model"]), face, -1)
+                    self._teach(now, face)
+                s["model"], s["model_auto"] = now["name"] if now else typed, False
+            s["category"] = _category(s["kind"], s["model"], s["model_auto"], s["tagged"])
+            if _shown_as_product(s["model"], s["model_auto"], s["tagged"]) and s["product_id"] in self.products:
+                self._show_product(conn, self.products[s["product_id"]])
+            out = dict(s)
+        conn.execute("UPDATE live_tags SET product=?, model=?, model_auto=?, tagged=? WHERE photo_id=?", (out["product_id"], out["model"], int(out["model_auto"]), int(out["tagged"]), pid))
+        conn.execute("UPDATE live_copies SET stale=stale+1 WHERE photo_id=?", (pid,))
+        conn.commit()
         return out
 
     def set_hidden(self, pid: int, hidden: bool) -> dict:
@@ -1734,6 +1971,16 @@ class LiveSession:
         return changed
 
     # ===== reporting =====
+    def _cut_alert(self, item: _Item) -> list[dict]:
+        names = {item.rel, item.sibling}
+        return [{"kind": "cut", "text": "May be incomplete. Check the card"}] if names & self.suspects else []
+
+    def suspect(self, rel: str) -> None:
+        """The receiver took a file that looks cut short. It is in the folder and it is the photographer's call. This reaches them
+        even when the file has no shot of its own, a RAW that joins its JPEG or one that will not open."""
+        self.suspects.add(rel)
+        self._status(message=f"{Path(rel).name} may be incomplete. Check it on the card")
+
     def _status_body(self) -> dict:
         with self.lock:
             n = len(self.shots)
@@ -1825,7 +2072,8 @@ def under(path: Path, root: Path) -> bool:
 
 
 class StartReq(BaseModel):
-    folder: str
+    folder: str = ""          # left empty with camera set: the receiver makes one for the shoot
+    camera: str | None = None # "wifi": the camera sends straight here, over the FTP receiver in tether.py
     strobe: bool = False      # the photographer declared strobes: every frame counts as flash
     no_flash: bool = False    # the photographer declared no flash: a clear or missing tag counts as none
     faces: bool = True        # false: no face detection per shot, every frame is judged as product
@@ -1837,6 +2085,15 @@ class StartReq(BaseModel):
     mode: str | None = None
 
 
+def login_path() -> Path:
+    return app_home() / "camera-login.json"
+
+
+def camera_folder(shoot: str | None) -> Path:
+    """Where frames straight from the camera land: nobody picks it, and a shoot's name finds it again."""
+    return export_root() / "Live" / _seg(shoot, "shoot")
+
+
 class ActiveReq(BaseModel):
     product: str | None = None      # a field left out stays as it is; null or empty clears it
     model: str | None = None
@@ -1844,6 +2101,11 @@ class ActiveReq(BaseModel):
 
 class RenameProductReq(BaseModel):
     product: int
+    name: str
+
+
+class RenameModelReq(BaseModel):
+    model: str                      # models go by name, as they do in live_tags
     name: str
 
 
@@ -1877,6 +2139,10 @@ class Hub:
         self.state, self.switch_root = state, switch_root
         self.log = EventLog()
         self.session: LiveSession | None = None
+        self.receiver: tether.FtpReceiver | None = None
+        self.draining: tether.FtpReceiver | None = None     # Finish pressed, frames still on the wire
+        self.camera_last: dict | None = None     # how the receiver ended: what Finish can still report
+        self.camera_error: str | None = None
         self.lock = threading.Lock()
         self.export = {"running": False, "done": 0, "failed": 0, "total": 0, "path": None, "error": None}
 
@@ -1935,12 +2201,16 @@ class Hub:
             self.state["root"] = folder; self.state["index"] = Index(folder)
 
     def start(self, req: StartReq) -> dict:
-        folder = Path(req.folder).expanduser()
+        if req.camera not in (None, "wifi"):
+            raise HTTPException(400, "camera is wifi, or left out")
+        if req.camera and req.mode != RESUME and not (req.shoot or "").strip():
+            raise HTTPException(400, "Give the shoot a name")
+        folder = camera_folder(req.shoot) if req.camera and req.mode != RESUME else Path(req.folder).expanduser()
         if req.strobe and req.no_flash:
             raise HTTPException(400, "pick strobes or no flash, not both")
         if req.mode not in (None, NEW_ONLY, EVERYTHING, RESUME):
             raise HTTPException(400, "mode is new_only, everything or resume")
-        if not folder.is_dir():
+        if not folder.is_dir() and not req.camera:
             raise HTTPException(400, "that folder is not there")
         if req.drive:
             why = drive_preflight(folder, req.drive, req.shoot)
@@ -1954,6 +2224,8 @@ class Hub:
                 raise HTTPException(409, "cannot start a live session while a scan is running")
             if any(s[k]["running"] for k in ("export", "focus", "fps", "clipfaces") if k in s):
                 raise HTTPException(409, "cannot start a live session until the running job has finished")
+            if req.camera:
+                folder.mkdir(parents=True, exist_ok=True)
             self._open(folder)
             conn = db.connect(folder)
             try:
@@ -1977,17 +2249,85 @@ class Hub:
             s["progress"] = {"stage": "live", "done": 0, "total": 0, "stage_started": time.time()}
             self.session = LiveSession(folder, self.log, last.get("strobe", req.strobe), last.get("no_flash", req.no_flash),
                                        on_shot=self._on_shot, on_finished=self._on_finished, drive=drive, shoot=shoot or last.get("name"),
-                                       drive_resume=remembered, faces=last.get("faces", req.faces), products=last.get("products", req.products), mode=req.mode)
-            awake.acquire()
+                                       drive_resume=remembered, faces=last.get("faces", req.faces), products=last.get("products", req.products), mode=req.mode,
+                                       camera=req.camera or last.get("camera"))
+            awake.acquire(); awake.display_on()
             try:
                 self.session.start()
             except BaseException:
-                awake.release()
+                awake.release(); awake.display_off()
                 s["running"] = False
                 s["progress"] = {"stage": "idle", "done": 0, "total": 0}
                 self.session = None
                 raise
-            return self.session.snapshot()
+            self._camera_on(folder)
+            return self.snapshot()
+
+    # ===== the camera, straight to this Mac =====
+    def _camera_on(self, folder: Path) -> None:
+        self.camera_last = self.camera_error = None
+        if not self.session.camera:
+            return
+        login = tether.load_login(login_path())
+        r = tether.FtpReceiver(folder, on_event=self._camera_event, port=login["port"], user=login["user"], password=login["password"])
+        try:
+            r.start()
+            self.receiver = r
+        except OSError as e:              # the shoot still runs: the folder is there, and sorted says what is wrong
+            self.camera_error = f"The camera connection could not start: {e.strerror or e}"
+            self.session._status(message=self.camera_error)
+
+    def _camera_event(self, kind: str, **data) -> None:
+        session = self.session
+        if kind == "login":
+            login = tether.load_login(login_path())
+            if (login["host"], login["port"]) != (data["host"], data["port"]):
+                tether.save_login(login_path(), {**login, "host": data["host"], "port": data["port"]})
+        elif kind == "suspect" and session is not None:
+            session.suspect(data["name"])
+        self.log.emit("camera", kind=kind)
+
+    def _camera_off(self, session: "LiveSession") -> None:
+        """Before the watcher stops: it drops whatever it has not called landed, so the frames on the wire arrive first and it gets
+        its polls, and a lone RAW its pair window, to take them."""
+        r, self.receiver = self.receiver, None
+        if r is None:
+            return
+        self.camera_last = dict(self.camera_last or {}, running=False, draining=True)
+        self.draining = r
+        try:
+            self.camera_last = r.stop()
+        finally:
+            self.draining = None
+        time.sleep(2 * session.poll_s)
+        end = time.monotonic() + session.pair_window_s + 1
+        while session.seen and time.monotonic() < end:
+            time.sleep(session.poll_s)
+
+    def camera(self, shoot: str | None = None) -> dict:
+        """What the camera menu needs and how it is going, for the start screen and the running line."""
+        login = tether.load_login(login_path())
+        r = self.receiver or self.draining
+        st = r.status() if r else (self.camera_last or {})
+        addresses = st.get("addresses") if r else tether.lan_addresses()
+        addresses = addresses or []
+        now = [a["address"] for a in addresses]
+        out = {"user": login["user"], "password": login["password"], "port": st.get("port") or login["port"],
+               "host": login["host"] if login["host"] in now else (now[0] if now else None), "addresses": addresses,
+               "moved": tether.moved(login, addresses, st.get("port") if r else None), "running": bool(r), "error": self.camera_error,
+               "kept": st.get("kept", 0), "landed": st.get("landed", 0)}
+        if r:
+            out["line"] = tether.camera_line({**st, "moved": out["moved"]})
+        else:
+            out["folder"] = str(camera_folder(shoot)) if shoot else None
+            out["block_all"] = tether.firewall()["block_all"]
+        return out
+
+    def reset_camera(self) -> dict:
+        if self.receiver:
+            raise HTTPException(409, "Finish the shoot first: the camera is using this login")
+        tether.reset_login(login_path())
+        return self.camera()
 
     def _on_shot(self, shot: dict) -> None:
         n = len(self.session.shots)
@@ -2038,6 +2378,9 @@ class Hub:
     def _on_finished(self, session: LiveSession) -> None:
         """Runs once, on the worker thread, after the last frame. The server is handed back whatever happens here."""
         out = {"project": None, "error": None}
+        if self.receiver and not self.draining:      # a session that ended by itself must not leave the door open
+            self.camera_last = self.receiver.stop(drain_s=0)
+            self.receiver = None
         try:
             session._status()
             out["project"] = session.project = str(self._save_project(session))
@@ -2047,7 +2390,7 @@ class Hub:
             self.state["running"] = False
             self.state["stale"] = True
             self.state["progress"] = {"stage": "idle", "done": 0, "total": 0}
-            awake.release()
+            awake.release(); awake.display_off()
             n = len(session.shots)
             self.log.emit("status", **dict(session._status_body(), state="stopped"), project=out["project"], message=out["error"],
                           # products.find_products does the full re-cluster; it is the person's call, so it is only offered
@@ -2056,16 +2399,19 @@ class Hub:
     def stop(self) -> dict:
         if not self.running():
             raise HTTPException(409, "no live session is running")
+        if self.draining:
+            return self.snapshot()        # a second press while the camera finishes must not cut it off
+        self._camera_off(self.session)
         self.session.stop()
-        return self.session.snapshot()
+        return self.snapshot()
 
     def snapshot(self) -> dict:
         if self.session is None:
             return {"running": False, "state": "stopped", "folder": None, "queue": 0, "behind": False, "done": 0, "errors": 0,
                     "active": {"product": None, "model": None}, "strobe": False, "no_flash": False, "faces": True, "products_on": True,
                     "products": [], "models": [], "shots": [], "project": None,
-                    "drive": drive_off(), "seq": self.log.seq, "export": dict(self.export)}
-        return dict(self.session.snapshot(), export=dict(self.export))
+                    "drive": drive_off(), "seq": self.log.seq, "export": dict(self.export), "camera": False}
+        return dict(self.session.snapshot(), export=dict(self.export), camera=bool(self.session.camera))
 
     def active(self, req: ActiveReq) -> dict:
         if not self.running():
@@ -2101,6 +2447,14 @@ class Hub:
                 self.session.copier.poke()
         self.log.emit("product_renamed", id=req.product, name=name, old=old)
         return {"id": req.product, "name": name}
+
+    def rename_model(self, req: RenameModelReq) -> dict:
+        try:
+            return self._shot_session().rename_model(req.model, req.name)
+        except KeyError:
+            raise HTTPException(404, "no such model")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     def _shot_session(self) -> LiveSession:
         if self.session is None:
@@ -2215,6 +2569,10 @@ def install(app: FastAPI, switch_root: Callable[[Path], dict] | None = None) -> 
     def rename_product(req: RenameProductReq):
         return hub.rename(req)
 
+    @r.post("/rename-model")
+    def rename_model(req: RenameModelReq):
+        return hub.rename_model(req)
+
     @r.post("/assign")
     def assign(req: AssignReq):
         return hub.assign(req)
@@ -2235,6 +2593,14 @@ def install(app: FastAPI, switch_root: Callable[[Path], dict] | None = None) -> 
     @r.get("/ready")
     def ready(folder: str | None = None):
         return hub.ready(folder)
+
+    @r.get("/camera")
+    def camera(shoot: str | None = None):
+        return hub.camera(shoot)
+
+    @r.post("/camera/reset")
+    def camera_reset():
+        return hub.reset_camera()
 
     @r.get("/recent")
     def recent(last: str | None = None):

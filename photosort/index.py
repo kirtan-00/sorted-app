@@ -1,15 +1,17 @@
 from __future__ import annotations
-import json, multiprocessing as mp, os, time
+import json, os, shutil, sqlite3, time
 from pathlib import Path
 from typing import Callable
 import numpy as np
 from PIL import Image
 from . import db
-from .config import PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, VIDEO_WORKERS, VIDEO_EXTS, EMBED_BATCH, YUNET_PATH, SFACE_PATH
+from .config import (PREVIEW_EDGE, GRID_EDGE, THUMB_QUALITY, JPEG_WORKERS, RAW_WORKERS, VIDEO_WORKERS, VIDEO_EXTS, EMBED_BATCH,
+                     YUNET_PATH, SFACE_PATH, PHOTO_WATCHDOG_S, VIDEO_WATCHDOG_S)
 from .walk import find_images, quick_hash
 from .decode import load_preview
 from .features import phash, exif_info, sharpness_tiles, to_gray, SETTING_KEYS
 from .places import READ_KEY as _PLACES_READ_KEY
+from .workers import supervised_map
 
 CURRENT_MAX = 120        # how much of the path in flight the progress payload carries
 
@@ -33,6 +35,49 @@ def _short_rel(rel: str | None, limit: int = CURRENT_MAX) -> str | None:
 class SourceUnavailable(RuntimeError):
     """The shoot root is not there (disk unplugged, wrong mount) while the index already holds photos.
     Raised before any write so the saved index is left exactly as it was."""
+
+SKIPPED_KEY = "scan_skipped"      # meta: {why: {n, examples}} of the camera files the last scan's walk left out
+
+class DiskFull(RuntimeError):
+    """The disk holding the index has no room. The message is written for a person. Nothing is marked failed: the
+    file in hand stays pending, what was read stays read, and Continue picks up once there is room."""
+
+# What one item costs under app_home: a photo's thumb, grid and row come to about 465 KB (20,000 is 9.3 GB), and a
+# clip keeps about eight frames on top of those, each about the size of a photo's thumb.
+INDEX_BYTES_PER_PHOTO = 465 * 1000
+INDEX_BYTES_PER_VIDEO = 3 * 1000 * 1000
+
+def index_need(n_photos: int, n_videos: int) -> int:
+    return n_photos * INDEX_BYTES_PER_PHOTO + n_videos * INDEX_BYTES_PER_VIDEO
+
+def _size(b: int) -> str:
+    return f"{b / 1e9:.1f} GB" if b >= 1e9 else f"{b / 1e6:.0f} MB"
+
+def index_preflight(root: Path, files: list, known: dict, also: int = 0) -> dict | None:
+    """None when the index's disk has room for the items of `files` not in `known`, else {need_bytes, free_bytes,
+    message}. also is anything else bound for the same disk (the project file, when it goes there too). Keeps the
+    same slack beside it as a project file does, because a Mac with no free space stops working well long before
+    this scan would notice. An item already read costs nothing here, so Continue on a nearly full disk still runs."""
+    from .bundle import project_headroom
+    todo = [f for f in files if known.get(f.rel) != (f.size, f.mtime)]
+    if not todo:
+        return None
+    videos = sum(1 for f in todo if f.is_video)
+    est = index_need(len(todo) - videos, videos) + also
+    need = est + project_headroom(est)
+    free = shutil.disk_usage(db.index_dir(root)).free
+    if need <= free:
+        return None
+    return {"need_bytes": need, "free_bytes": free,
+            "message": f"sorted keeps its previews on this Mac, and scanning {len(todo):,} items needs about {_size(need)} "
+                       f"there. It has {_size(free)} free. Free up some space and scan again."}
+
+def _full_message(conn, what: str = "The disk that holds sorted's previews is full") -> str:
+    try:
+        n = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
+        return f"{what}, so the scan stopped with {n:,} items scanned. Free up some space and press Continue scan."
+    except Exception:
+        return f"{what}, so the scan stopped. Free up some space and press Continue scan."
 
 _ENGINE = None
 def _face_engine():
@@ -85,7 +130,7 @@ def _process_video(root: str, rel: str, out: dict, want_faces: bool = False) -> 
     count and face size (clip_face_summary); n_faces stays 0 on a clip, see db.connect for why."""
     from . import flicker, video
     path = Path(root) / rel
-    qh = quick_hash(path)
+    qh = out["qhash"] = quick_hash(path)
     info = video.probe(path)
     side = video.read_sidecar(path)
     frames, segs = video.sample_frames(path, info["duration"], key=(info["codec"], info["pix_fmt"]), fps=info["fps"])
@@ -127,7 +172,8 @@ def _process_video(root: str, rel: str, out: dict, want_faces: bool = False) -> 
 def process_one(args: tuple[str, str, bool]) -> dict:
     root, rel, want_faces = args
     path = Path(root) / rel
-    out = {"rel": rel, "row": None, "faces": [], "segments": [], "clip_faces": [], "error": None}
+    out = {"rel": rel, "row": None, "faces": [], "segments": [], "clip_faces": [], "error": None, "disk_full": False}
+    qh = None
     try:
         if path.suffix.lower() in VIDEO_EXTS:
             _process_video(root, rel, out, want_faces)
@@ -155,7 +201,20 @@ def process_one(args: tuple[str, str, bool]) -> dict:
                              eye_sharp=f.eye_sharp, embed=f.embed.astype(np.float32).tobytes()) for f in faces]
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
+        # Not this file's fault. The caller stops the scan rather than writing it down as unreadable, and the half
+        # written preview goes, because the space it holds is what the next write needs.
+        out["disk_full"] = db.is_disk_full(e)
+        if out["disk_full"] and (qh or out.get("qhash")):
+            _drop_previews(Path(root), qh or out["qhash"])
     return out
+
+def _drop_previews(root: Path, qh: str) -> None:
+    idx = db.index_dir(root)
+    for p in [idx / "thumbs" / f"{qh}.jpg", idx / "grid" / f"{qh}.jpg", *(idx / "frames").glob(f"{qh}_*.jpg")]:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 def faces_one(args: tuple[str, str, str]) -> dict:
     """The faces-only pass for a photo indexed with faces off: detect on the stored 1024 px thumb (the very
@@ -177,6 +236,18 @@ def faces_one(args: tuple[str, str, str]) -> dict:
 def index_folder(root: Path, faces: bool = True, workers: int | None = None,
                  progress: Callable[[dict], None] | None = None, embed: bool = True,
                  retry_errors: bool = False) -> dict:
+    """Read the shoot into the index. Raises SourceUnavailable when the disk goes away and DiskFull when the index's
+    disk fills, both of them pauses that Continue picks up from."""
+    try:
+        return _index_folder(root, faces, workers, progress, embed, retry_errors)
+    except Exception as e:
+        if db.is_disk_full(e):
+            raise DiskFull("The disk that holds sorted's previews is full, so the scan stopped. "
+                           "Free up some space and press Continue scan.") from e
+        raise
+
+def _index_folder(root: Path, faces: bool, workers: int | None, progress: Callable[[dict], None] | None,
+                  embed: bool, retry_errors: bool) -> dict:
     t0 = time.time(); root = Path(root)
     _raw = progress or (lambda d: None)
     stage = {"name": None, "t": t0}
@@ -221,7 +292,8 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     n_ok = conn.execute("SELECT count(*) FROM photos WHERE status IN ('ok', 'pending')").fetchone()[0]
     if not root.is_dir():
         raise SourceUnavailable(f"{root} is not there. Plug the disk in; the saved index ({n_ok} photos) was left untouched.")
-    files = find_images(root)
+    left_out: dict = {}
+    files = find_images(root, left_out)
     if not files and n_ok > 0:
         raise SourceUnavailable(f"{root} has no photos right now. Is the disk mounted? The saved index ({n_ok} photos) was left untouched.")
     if not root.is_dir():
@@ -231,6 +303,11 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     known = db.known_files(conn, retry_errors=retry_errors)
     missing = db.missing_files(conn)
     idx = db.index_dir(root)
+    # Before the first pending row: a scan that cannot fit should not leave a half started job behind. /api/index asks
+    # the same question up front so the person gets the answer at once; this covers the CLI and everything else.
+    short = index_preflight(root, files, {**known, **{r: m[:2] for r, m in missing.items()}})
+    if short:
+        raise DiskFull(short["message"])
     # A file that went missing and came back unchanged, with its thumb still on the Mac, needs no re-decode.
     restore = [f.rel for f in files if f.rel in missing and missing[f.rel][:2] == (f.size, f.mtime)
                and (idx / "thumbs" / f"{missing[f.rel][2]}.jpg").is_file()]
@@ -239,12 +316,12 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         known.update({r: missing[r][:2] for r in restore})
     # A changed (or new) file is decoded in full. An unchanged photo indexed with faces off only needs the
     # face pass, run on its stored thumb: its row, embedding, category, cluster and focus label all stay.
-    need_faces = db.photos_without_faces(conn) if faces else set()
+    need_faces = db.photos_without_faces(conn, retry_errors) if faces else set()
     todo = [f for f in files if known.get(f.rel) != (f.size, f.mtime)]
     changed = {f.rel for f in todo}
     face_todo = [f for f in files if f.rel in need_faces and f.rel not in changed]
     stats = dict(total=len(files), skipped=len(files) - len(todo) - len(face_todo), indexed=0, faced=0, errors=0, embedded=0,
-                 clip_faced=0)
+                 clip_faced=0, quarantined=0)
     # Clips already read whose frames have never been through face detection (a shoot from before clips got
     # faces, or scanned with faces off): the frames are on the Mac, so this costs no disk and runs last.
     clip_face_todo = faces and any(r[0] not in changed for r in conn.execute(
@@ -260,6 +337,7 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
     db.add_pending(conn, todo)
     db.mark_missing(conn, {f.rel for f in files})
     db.set_meta(conn, "scan_faces", "1" if faces else "0")
+    db.set_meta(conn, SKIPPED_KEY, json.dumps(left_out))        # what the walk left out, for the Scan tab's line
     # The job row: found again as 'interrupted' when the shoot is next opened if this run never finishes.
     job["id"] = db.start_job(conn, "scan", {"stage": "scan", "done": 0, "total": len(todo), "faces": faces})
     try:
@@ -270,6 +348,16 @@ def index_folder(root: Path, faces: bool = True, workers: int | None = None,
         db.finish_job(conn, job["id"], "interrupted", error=str(e))
         raise
     except BaseException as e:
+        if isinstance(e, DiskFull) or db.is_disk_full(e):
+            # Whatever was mid-write goes back. The job row may not fit either; then it stays 'running', and the next
+            # open finds it interrupted (db.interrupt_running_jobs), which is the same answer without the words.
+            conn.rollback()
+            msg = _full_message(conn)
+            try:
+                db.finish_job(conn, job["id"], "interrupted", error=msg)
+            except sqlite3.Error:
+                conn.rollback()
+            raise DiskFull(msg) from e
         db.finish_job(conn, job["id"], "failed", error=f"{type(e).__name__}: {e}")
         raise
     stats["seconds"] = round(time.time() - t0, 1)
@@ -523,27 +611,39 @@ def find_clip_faces(root: Path, progress: Callable[[dict], None] | None = None, 
         db.finish_job(conn, jid, "done")
     return {"found": found, "read": total, "missing": missing}
 
+def _watchdog(task: tuple) -> float:
+    """Seconds one file may hold a worker. Read when each file goes out, so a test can shorten them."""
+    return VIDEO_WATCHDOG_S if Path(task[1]).suffix.lower() in VIDEO_EXTS else PHOTO_WATCHDOG_S
+
+def _lost(task: tuple, reason: str) -> dict:
+    """The result for a file whose worker died or ran out of time, in the shape process_one and faces_one return."""
+    return {"rel": task[1], "row": None, "faces": [], "segments": [], "clip_faces": [], "eye": None,
+            "error": reason, "quarantine": reason}
+
 def _run_stages(root: Path, conn, todo, face_todo, faces: bool, workers: int | None, embed: bool,
                 stats: dict, notify, idx: Path) -> None:
     """The three passes of index_folder (faces on stored thumbs, features from the disk, embeddings from
     the thumbs), each resumable: a pass only ever touches rows that lack its result."""
     if face_todo:
         qh = {r[0]: r[1] for r in conn.execute("SELECT rel, qhash FROM photos WHERE n_faces IS NULL AND status='ok'")}
-        ctx = mp.get_context("spawn")
         done = 0
-        with ctx.Pool(min(workers or JPEG_WORKERS, JPEG_WORKERS, len(face_todo))) as pool:
-            for res in pool.imap_unordered(faces_one, [(str(root), f.rel, qh[f.rel]) for f in face_todo], chunksize=2):
-                if res["error"]:
-                    stats["errors"] += 1
-                else:
-                    db.set_faces_only(conn, res["rel"], res["faces"], res["eye"])
-                    stats["faced"] += 1
-                done += 1
-                notify({"stage": "faces", "done": done, "total": len(face_todo), "current": res["rel"]})
+        for res in supervised_map(faces_one, [(str(root), f.rel, qh[f.rel]) for f in face_todo],
+                                  min(workers or JPEG_WORKERS, JPEG_WORKERS), _watchdog, _lost):
+            if res.get("quarantine"):
+                # The photo itself is fine, only the face pass cannot get through it: the row stays ok, and the
+                # reason keeps the next scan from walking into the same crash (db.photos_without_faces).
+                stats["errors"] += 1; stats["quarantined"] += 1
+                db.set_problem(conn, res["rel"], res["quarantine"])
+            elif res["error"]:
+                stats["errors"] += 1
+            else:
+                db.set_faces_only(conn, res["rel"], res["faces"], res["eye"])
+                stats["faced"] += 1
+            done += 1
+            notify({"stage": "faces", "done": done, "total": len(face_todo), "current": res["rel"]})
     if todo:
         sib = {f.rel: f.sibling for f in todo}
         meta = {f.rel: (f.size, f.mtime) for f in todo}
-        ctx = mp.get_context("spawn")
         done = 0
         def _store(res):
             nonlocal done
@@ -552,9 +652,12 @@ def _run_stages(root: Path, conn, todo, face_todo, faces: bool, workers: int | N
                 # row stays pending, the ones already read stay ok, and Continue picks up from this point.
                 n_ok = conn.execute("SELECT count(*) FROM photos WHERE status='ok'").fetchone()[0]
                 raise SourceUnavailable(f"{root} went away during the scan. Plug the disk in and continue; {n_ok} photos are scanned so far.")
+            if res.get("disk_full"):
+                raise DiskFull(_full_message(conn))        # before the error row: this file is fine and stays pending
             if res["error"]:
                 stats["errors"] += 1
-                db.mark_error(conn, res["rel"], meta[res["rel"]][0], meta[res["rel"]][1])
+                stats["quarantined"] += bool(res.get("quarantine"))
+                db.mark_error(conn, res["rel"], meta[res["rel"]][0], meta[res["rel"]][1], problem=res.get("quarantine"))
             else:
                 res["row"]["sibling"] = sib.get(res["rel"])
                 pid = db.upsert_photo(conn, res["row"])
@@ -573,10 +676,9 @@ def _run_stages(root: Path, conn, todo, face_todo, faces: bool, workers: int | N
         for group, cap in ((std, JPEG_WORKERS), (raw, RAW_WORKERS), (vid, VIDEO_WORKERS)):
             if not group:
                 continue
-            n = min(workers or cap, cap, len(group))
-            with ctx.Pool(n) as pool:
-                for res in pool.imap_unordered(process_one, [(str(root), f.rel, faces) for f in group], chunksize=2):
-                    _store(res)
+            for res in supervised_map(process_one, [(str(root), f.rel, faces) for f in group],
+                                      min(workers or cap, cap), _watchdog, _lost):
+                _store(res)
     if embed:
         _embed_stage(conn, stats, notify, idx)
 

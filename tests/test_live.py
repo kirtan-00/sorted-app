@@ -1725,3 +1725,560 @@ def test_the_slow_shutter_alert_comes_once_per_setting(tmp_path, fake_encoder):
     said = [any(a["kind"] == "shutter" for a in x["alerts"]) for x in sorted(shots_of(s), key=lambda x: x["n"])]
     assert said == [True, False, False, True, False]
     assert live.light_alerts(dict(frame(t=1 / 30), focal_mm=50.0), [dict(frame(t=1 / 30), focal_mm=85.0)]) != []    # a new lens is a new setting
+
+
+# ===== automatic models =====
+def person(k):
+    """Someone's face: an axis of its own, so two people are at cosine 0."""
+    v = np.zeros(live.FACE_DIM, np.float32); v[k] = 1.0
+    return v
+
+
+def seen_at(v, cos, away=-1):
+    """The same face at this cosine from v, turned towards an axis nobody uses."""
+    o = np.zeros(live.FACE_DIM, np.float32); o[away] = 1.0
+    return (cos * v + np.sqrt(1 - cos ** 2) * o).astype(np.float32)
+
+
+def face(vec, edge=300, score=0.92, eye=500.0, x=100):
+    return dict(x=x, y=50, w=edge, h=edge, score=score, landmarks="[]", eye_sharp=eye, embed=np.asarray(vec, np.float32).tobytes())
+
+
+@pytest.fixture
+def faces(monkeypatch):
+    """{file name: faces}: the frames are real, the detector's answer is written down. Same keys as index.process_one.
+    Every session a test started is ended here: a copier left polling calls shutil.disk_usage in a later test's patch."""
+    table = {}
+    real = live.index.process_one
+    started, start = [], live.LiveSession.start
+    monkeypatch.setattr(live.LiveSession, "start", lambda s: (started.append(s), start(s))[1])
+
+    def process(args):
+        out = real((args[0], args[1], False))
+        found = table.get(Path(args[1]).name, [])
+        if out["row"]:
+            out["faces"] = found
+            out["row"].update(n_faces=len(found) if args[2] else None, sharp_eye=max((f["eye_sharp"] for f in found), default=None))
+        return out
+    monkeypatch.setattr(live.index, "process_one", process)
+    yield table
+    for s in started:
+        s.stop(); s.wait(30)
+        if s.copier:
+            s.copier.close()
+
+
+def shoot(s, root, table, frames):
+    """Lands frames one at a time, each only after the last is done, so their order is the order given."""
+    for i, (name, found) in enumerate(frames, len(s.shots) + 1):
+        table[name] = found
+        landed(root, name, product(seed=i))
+        assert wait_for(lambda: len(shots_of(s)) == i), name
+    return {x["file"]: x for x in shots_of(s)}
+
+
+def names(s):
+    return sorted(m["name"] for m in s.models.values())
+
+
+def test_a_new_face_opens_a_model_and_the_same_face_joins_it(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(seen_at(person(0), 0.8))]), ("C.JPG", [face(person(1))]), ("D.JPG", [])])
+    assert [by[f]["model"] for f in ("A.JPG", "B.JPG", "C.JPG", "D.JPG")] == ["model 1", "model 1", "model 2", None]
+    assert by["A.JPG"]["model_auto"] and by["A.JPG"]["category"] == "model" and by["D.JPG"]["category"] == "product"
+    assert s.snapshot()["models"] == [{"name": "model 1", "n": 2}, {"name": "model 2", "n": 1}]
+    made = [e for e in s.log.since(0, 0)["events"] if e["type"] == "model_created"]
+    assert [(e["name"], e["auto"]) for e in made] == [("model 1", True), ("model 2", True)]
+
+
+def test_the_cuts(tmp_path, fake_encoder, faces):
+    """At the join cut it joins, under the open cut it opens, and between the two it waits."""
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(seen_at(person(0), live.MODEL_SIM - 0.02, -1))]),
+                                ("C.JPG", [face(seen_at(person(0), live.MODEL_OPEN_SIM + 0.02, -2))]), ("D.JPG", [face(seen_at(person(0), live.MODEL_SIM + 0.01, -3))]),
+                                ("E.JPG", [face(seen_at(person(0), live.MODEL_OPEN_SIM - 0.02, -4))])])
+    assert [by[f]["model"] for f in ("A.JPG", "B.JPG", "C.JPG", "D.JPG", "E.JPG")] == ["model 1", None, None, "model 1", "model 2"]
+    assert live.MODEL_SIM == 0.55 and live.MODEL_OPEN_SIM == 0.40
+
+
+def test_soft_frames_open_nothing_and_move_no_centroid(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    soft = FACE_CLUSTER_MIN_EYE_SHARP - 1
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0), eye=soft)]), ("B.JPG", [face(person(0))]), ("C.JPG", [face(seen_at(person(0), 0.7), eye=soft)]),
+                                ("D.JPG", [face(person(1), eye=soft)])])
+    assert by["A.JPG"]["model"] is None and by["A.JPG"]["verdict"] == "soft"       # the first frame of a shoot, and still no folder
+    assert by["C.JPG"]["model"] == "model 1" and by["D.JPG"]["model"] is None
+    m = next(iter(s.models.values()))
+    assert m["n"] == 1 and np.allclose(m["sum"], person(0))
+    assert names(s) == ["model 1"]
+
+
+def test_a_soft_main_face_is_soft_even_with_a_sharp_face_behind_it(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0), eye=5.0), face(person(1), edge=90, x=700)])])
+    assert by["A.JPG"]["verdict"] == "sharp" and by["A.JPG"]["model"] is None and not s.models
+
+
+def test_only_the_largest_face_counts_so_a_background_face_opens_nothing(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(1), edge=100, x=800), face(person(0), edge=300)]), ("B.JPG", [face(person(0)), face(person(2), edge=120, x=800)])])
+    assert by["A.JPG"]["model"] == by["B.JPG"]["model"] == "model 1"
+    assert names(s) == ["model 1"] and np.allclose(s.models[next(iter(s.models))]["sum"], 2 * person(0))
+
+
+def test_two_equal_faces_join_the_larger():
+    a, b = face(person(0), edge=200), face(person(1), edge=201)
+    assert live.main_face([a, b], (1024, 683)) is b
+
+
+def test_a_small_or_doubtful_face_is_no_main_face_and_the_frame_stays_with_its_product(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive); s.set_active(product="SKU")
+    small = int(live.MODEL_MIN_FACE * 1024) - 2                                    # the thumb is 1024 on the long side
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0), edge=small)]), ("B.JPG", [face(person(0), score=live.MODEL_MIN_SCORE - 0.01)])])
+    settled(s)
+    assert by["A.JPG"]["model"] is None and by["B.JPG"]["model"] is None and not s.models
+    assert by["A.JPG"]["kind"] == "model" and on_drive(drive) == ["products/SKU/A.JPG", "products/SKU/B.JPG"]
+    assert live.main_face([face(person(0), edge=40)], (400, 300)) is None           # a share of a small frame is still too few pixels
+
+
+def test_find_people_off_changes_nothing(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive, faces=False); s.set_active(model="Asha")
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(model="")
+    by = shoot(s, root, faces, [("B.JPG", [face(person(0))])])
+    settled(s)
+    assert by["A.JPG"]["model"] == "Asha" and by["B.JPG"]["model"] is None and by["B.JPG"]["kind"] == "product"
+    assert not s.models and not s.faces
+    assert on_drive(drive) == ["models/Asha/A.JPG", "products/product 1/B.JPG"]
+
+
+def test_folder_rules_typed_and_found(tmp_path, fake_encoder, faces, drive):
+    """Typed model wins, a found model beats a found product, a typed product beats a found model."""
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(product="SKU")
+    by = shoot(s, root, faces, [("B.JPG", [face(person(0))])])
+    s.set_active(model="Asha")
+    by = shoot(s, root, faces, [("C.JPG", [face(person(1))])])
+    settled(s)
+    assert on_drive(drive) == ["models/Asha/C.JPG", "models/model 1/A.JPG", "products/SKU/B.JPG"]
+    assert (by["B.JPG"]["model"], by["B.JPG"]["model_auto"], by["B.JPG"]["tagged"], by["B.JPG"]["category"]) == ("model 1", True, True, "product")
+    assert by["C.JPG"]["model_auto"] is False and by["C.JPG"]["category"] == "model"
+    assert {"name": "model 1", "n": 2} in s.snapshot()["models"]                   # counted, though its folder is the product's
+    conn = db.connect(root)
+    assert conn.execute("SELECT model, model_auto, tagged FROM live_tags ORDER BY n").fetchall()[1][:] == ("model 1", 1, 1)
+    s.stop(); s.wait(30)
+    with open(drive / "Job" / "manifest.csv", newline="") as f:
+        rows = {r["file"]: r for r in csv.DictReader(f)}
+    assert rows["products/SKU/B.JPG"]["model"] == "model 1" and rows["products/SKU/B.JPG"]["product"] == "SKU"
+
+
+def test_a_typed_model_teaches_its_centroid(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root); s.set_active(model="Asha")
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(model="")
+    by = shoot(s, root, faces, [("B.JPG", [face(seen_at(person(0), 0.8))])])
+    assert by["B.JPG"]["model"] == "Asha" and by["B.JPG"]["model_auto"] is True and names(s) == ["Asha"]
+
+
+def test_typing_a_name_for_the_person_on_set_does_not_make_them_two(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(model="Asha")
+    by = shoot(s, root, faces, [("B.JPG", [face(seen_at(person(0), 0.8))])])
+    assert by["A.JPG"]["model"] == by["B.JPG"]["model"] == "Asha" and names(s) == ["Asha"]
+    assert wait_for(lambda: on_drive(drive) == ["models/Asha/A.JPG", "models/Asha/B.JPG"])
+
+
+def test_a_name_typed_for_someone_new_leaves_the_model_on_set_alone(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(model="Asha")
+    by = shoot(s, root, faces, [("B.JPG", [face(person(1))])])
+    assert by["A.JPG"]["model"] == "model 1" and by["B.JPG"]["model"] == "Asha" and names(s) == ["Asha", "model 1"]
+
+
+def test_an_established_name_never_swallows_a_model_by_itself(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(model="Asha")
+    shoot(s, root, faces, [("B.JPG", [face(person(1))])])
+    by = shoot(s, root, faces, [("C.JPG", [face(person(0))])])                     # someone forgot to clear the field
+    assert by["A.JPG"]["model"] == "model 1" and by["C.JPG"]["model"] == "Asha" and names(s) == ["Asha", "model 1"]
+
+
+def test_a_restart_carries_the_centroids_and_the_tags(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive); s.set_active(product="SKU")
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(product="")
+    shoot(s, root, faces, [("B.JPG", [face(person(1))])])
+    finish(s)
+    s2 = live.LiveSession(root, poll_s=0.02, pair_window_s=0.05, drive=drive, shoot="Job", drive_resume=True); s2.start()
+    assert wait_for(lambda: s2.state == "live")
+    assert names(s2) == ["model 1", "model 2"] and sorted(m["n"] for m in s2.models.values()) == [1, 1]
+    by = shoot(s2, root, faces, [("C.JPG", [face(seen_at(person(1), 0.9))]), ("D.JPG", [face(person(2))])])
+    assert by["A.JPG"]["category"] == "product" and by["A.JPG"]["model_auto"] is True
+    assert by["C.JPG"]["model"] == "model 2" and by["D.JPG"]["model"] == "model 3"
+    settled(s2)
+    assert "products/SKU/A.JPG" in on_drive(drive)
+    finish(s2)
+
+
+def test_a_shoot_from_before_this_table_keeps_its_typed_models(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root); s.set_active(model="Asha")
+    shoot(s, root, faces, [("A.JPG", [])])
+    finish(s)
+    conn = db.connect(root); conn.execute("DELETE FROM live_models"); conn.commit(); conn.close()
+    s2 = session(root)
+    assert names(s2) == ["Asha"]
+    finish(s2)
+
+
+def test_a_new_shoot_starts_clean_and_the_last_one_steps_aside(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    finish(s)
+    s2 = session(root, mode=live.NEW_ONLY)
+    assert not s2.models and not s2.faces
+    by = shoot(s2, root, faces, [("B.JPG", [face(person(0))])])
+    assert by["B.JPG"]["model"] == "model 1"
+    assert list(db.connect(root).execute("SELECT name FROM live_models_prev").fetchall()[0]) == ["model 1"]
+    finish(s2)
+
+
+def model_client(tmp_path, s):
+    app = create_app(tmp_path / "other"); hub = app.state.live; hub.session = s
+    return TestClient(app)
+
+
+def test_renaming_a_model_moves_what_is_copied_and_redirects_what_is_queued(tmp_path, fake_encoder, faces, drive, monkeypatch):
+    root = tmp_path / "shoot"; root.mkdir(); (tmp_path / "other").mkdir()
+    s = dsession(root, drive)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    assert wait_for(lambda: on_drive(drive) == ["models/model 1/A.JPG"])
+    gate = threading.Event()
+    real = live.land_file
+    monkeypatch.setattr(live, "land_file", lambda a, b: (gate.wait(10), real(a, b))[1])
+    shoot(s, root, faces, [("B.JPG", [face(person(0))])])                          # stuck in the queue while the name changes
+    c = model_client(tmp_path, s)
+    assert c.post("/api/live/rename-model", json={"model": "model 1", "name": "Asha"}).json() == {"name": "Asha"}
+    gate.set()
+    assert wait_for(lambda: on_drive(drive) == ["models/Asha/A.JPG", "models/Asha/B.JPG"])
+    assert {x["model"] for x in shots_of(s)} == {"Asha"} and names(s) == ["Asha"]
+    assert wait_for(lambda: not (drive / "Job" / "models" / "model 1").exists())
+    assert c.post("/api/live/rename-model", json={"model": "nobody", "name": "x"}).status_code == 404
+    assert c.post("/api/live/rename-model", json={"model": "Asha", "name": "  "}).status_code == 400
+    by = shoot(s, root, faces, [("C.JPG", [face(person(0))])])
+    assert by["C.JPG"]["model"] == "Asha"                                          # the centroid kept its name
+    e = [x for x in s.log.since(0, 0)["events"] if x["type"] == "model_renamed"]
+    assert [(x["old"], x["name"], x["merged"]) for x in e] == [("model 1", "Asha", False)]
+
+
+def test_renaming_to_a_name_already_there_merges_and_deletes_nothing(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir(); (tmp_path / "other").mkdir()
+    s = dsession(root, drive)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(person(1))]), ("C.JPG", [face(person(1))])])
+    assert wait_for(lambda: len(on_drive(drive)) == 3)
+    src = tree(root)
+    r = s.rename_model("model 2", "model 1")
+    assert r == {"name": "model 1"} and names(s) == ["model 1"]
+    assert wait_for(lambda: on_drive(drive) == ["models/model 1/A.JPG", "models/model 1/B.JPG", "models/model 1/C.JPG"])
+    m = next(iter(s.models.values()))
+    assert m["n"] == 3 and np.allclose(m["sum"], person(0) + 2 * person(1))
+    assert s.snapshot()["models"] == [{"name": "model 1", "n": 3}]
+    assert tree(root) == src
+    conn = db.connect(root)
+    assert [x[0] for x in conn.execute("SELECT name FROM live_models")] == ["model 1"]
+    assert {x[0] for x in conn.execute("SELECT model FROM live_tags")} == {"model 1"}
+    by = shoot(s, root, faces, [("D.JPG", [face(person(1))])])                     # both halves of the person now find it
+    assert by["D.JPG"]["model"] == "model 1"
+    finish(s)
+    s2 = session(root)
+    assert names(s2) == ["model 1"] and next(iter(s2.models.values()))["n"] == 4
+    finish(s2)
+
+
+def test_a_merge_keeps_a_typed_products_shot_in_its_folder(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive); s.set_active(product="SKU")
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.set_active(product="")
+    shoot(s, root, faces, [("B.JPG", [face(person(1))])])
+    s.rename_model("model 1", "Asha")
+    s.rename_model("model 2", "Asha")
+    settled(s)
+    assert on_drive(drive) == ["models/Asha/B.JPG", "products/SKU/A.JPG"]
+    assert s.snapshot()["models"] == [{"name": "Asha", "n": 2}]
+
+
+def test_a_case_change_is_a_rename_and_another_case_is_the_same_model(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(person(1))])])
+    s.rename_model("model 1", "asha")
+    s.rename_model("asha", "Asha")
+    assert names(s) == ["Asha", "model 2"]
+    s.rename_model("model 2", "ASHA")
+    assert names(s) == ["Asha"]
+
+
+def test_a_frame_queued_under_the_old_name_follows_the_rename(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root); s.set_active(model="Asha")
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.rename_model("Asha", "Priya")
+    assert s.snapshot()["active"]["model"] == "Priya"
+    assert s._match(db.connect(root), s.moved.get("Asha", "Asha"), None, False) == ("Priya", False) and names(s) == ["Priya"]
+
+
+def test_not_a_model_goes_back_to_its_product_and_out_of_the_centroid(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir(); (tmp_path / "other").mkdir()
+    s = dsession(root, drive)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(person(0))])])
+    settled(s)
+    c = model_client(tmp_path, s)
+    out = c.post("/api/live/assign", json={"id": by["B.JPG"]["id"], "model": None}).json()
+    assert out["model"] is None and out["model_auto"] is False
+    assert wait_for(lambda: f"products/{by['B.JPG']['product']}/B.JPG" in on_drive(drive))
+    m = next(iter(s.models.values()))
+    assert m["n"] == 1 and np.allclose(m["sum"], person(0))
+    c.post("/api/live/assign", json={"id": by["A.JPG"]["id"], "model": None})
+    assert not m["sum"].any() and m["n"] == 0                                      # the last one out leaves nothing to match
+    assert s.snapshot()["models"] == []
+
+
+def test_a_shot_reassigned_by_hand_takes_its_face_along(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))]), ("B.JPG", [face(person(1))]), ("C.JPG", [face(person(1))])])
+    out = s.retag(by["C.JPG"]["id"], model="model 1")
+    assert out["model_auto"] is False
+    ms = {m["name"]: m for m in s.models.values()}
+    assert np.allclose(ms["model 1"]["sum"], person(0) + person(1)) and ms["model 2"]["n"] == 1
+    out = s.retag(by["B.JPG"]["id"], model="Asha")
+    assert "Asha" in names(s) and s.snapshot()["models"][-1] == {"name": "Asha", "n": 1}
+    assert wait_for(lambda: "models/Asha/B.JPG" in on_drive(drive))
+
+
+def test_the_same_frame_written_again_keeps_its_model_and_counts_once(tmp_path, fake_encoder, faces):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    landed(root, "A.JPG", product(seed=9), when="2026:11:06 10:00:01")
+    assert wait_for(lambda: s.log.since(0, 0)["events"] and sum(e["type"] == "shot" for e in s.log.since(0, 0)["events"]) == 2)
+    m = next(iter(s.models.values()))
+    assert shots_of(s)[0]["model"] == "model 1" and m["n"] == 1
+    finish(s)
+    assert db.connect(root).execute("SELECT face IS NOT NULL, model_auto FROM live_tags").fetchone()[:] == (1, 1)
+
+
+SITE = Path(__file__).resolve().parents[1] / "site" / "img"
+
+
+@pytest.fixture
+def faces_on(monkeypatch):
+    """As faces, ending every session, but the detector is the real one."""
+    started, start = [], live.LiveSession.start
+    monkeypatch.setattr(live.LiveSession, "start", lambda s: (started.append(s), start(s))[1])
+    yield
+    for s in started:
+        s.stop(); s.wait(30)
+        if s.copier:
+            s.copier.close()
+
+
+@pytest.mark.skipif(not (SITE / "hari2.webp").exists(), reason="the site's pictures are not in this checkout")
+def test_real_faces_sort_into_real_people(tmp_path, fake_encoder, faces_on, drive):
+    """No stand-in for the faces: real portraits through the real detector and SFace. One man in two photos, one in two
+    other photos in profile and full face, and two more people. The chart in audience.webp is what YuNet took for a face
+    and the couple in chapel.webp are far off: neither opens anything."""
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    plan = ["hari2", "face3", "face5", "hari3", "face4", "audience", "chapel", "sari"]
+    for i, name in enumerate(plan, 1):
+        with Image.open(SITE / f"{name}.webp") as im:
+            landed(root, f"{name}.jpg", im.convert("RGB"))
+        assert wait_for(lambda: len(shots_of(s)) == i, 60), name
+    settled(s)
+    by = {Path(x["file"]).stem: x for x in shots_of(s)}
+    assert by["hari2"]["model"] == by["hari3"]["model"] == "model 1"
+    assert by["face3"]["model"] == by["face4"]["model"] == "model 2"
+    assert by["face5"]["model"] == "model 3" and by["sari"]["model"] == "model 4"
+    assert by["audience"]["model"] is None and by["chapel"]["model"] is None
+    assert len(s.models) == 4
+    assert "models/model 1/hari3.jpg" in on_drive(drive)
+    assert s.rename_model("model 4", "Rani") == {"name": "Rani"}
+    assert wait_for(lambda: "models/Rani/sari.jpg" in on_drive(drive))
+
+
+# ===== numbering: what is on screen counts =====
+def test_a_model_shot_does_not_use_up_a_product_number(tmp_path, fake_encoder, faces, drive):
+    """The product a model's shot opens never shows, so the first pile anyone sees is product 1."""
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    landed(root, "B.JPG", im=ImageOps.invert(product(seed=1)))
+    assert wait_for(lambda: len(shots_of(s)) == 2)
+    b = next(x for x in shots_of(s) if x["file"] == "B.JPG")
+    assert b["product"] == "product 1" and by["A.JPG"]["product"] == "other 1"
+    settled(s)
+    assert on_drive(drive) == ["models/model 1/A.JPG", "products/product 1/B.JPG"]
+
+
+def test_a_hidden_product_takes_the_next_number_when_a_shot_shows_it(tmp_path, fake_encoder, faces, drive):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive)
+    by = shoot(s, root, faces, [("A.JPG", [face(person(0))])])
+    s.retag(by["A.JPG"]["id"], model=None)
+    assert shots_of(s)[0]["product"] == "product 1"
+    assert {"product 1"} == {p["name"] for p in s.snapshot()["products"]}
+
+
+def test_names_already_in_a_folder_stay_as_they_are(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    landed(root, "A.JPG", im=product(seed=1)); assert wait_for(lambda: len(shots_of(s)) == 1)
+    finish(s)
+    conn = db.connect(root); conn.execute("UPDATE live_products SET name='product 2'"); conn.commit(); conn.close()
+    s = session(root)
+    landed(root, "B.JPG", im=ImageOps.invert(product(seed=1))); assert wait_for(lambda: len(shots_of(s)) == 2)
+    assert {x["file"]: x["product"] for x in shots_of(s)} == {"A.JPG": "product 2", "B.JPG": "product 3"}
+    finish(s)
+
+
+# ===== straight from the camera =====
+import ftplib, io, socket, struct
+from photosort import tether
+
+
+@pytest.fixture
+def wifi(monkeypatch):
+    """The real receiver on loopback, on a free port. Everything past the address is the real thing."""
+    monkeypatch.setattr(tether, "lan_addresses", lambda: [{"address": "127.0.0.1", "interface": "en0", "default": True, "kind": "Wi-Fi"}])
+    tether.save_login(live.login_path(), {**tether.load_login(live.login_path()), "port": 0, "host": None})
+    app = create_app(); hub = app.state.live; c = TestClient(app)
+    yield hub, c
+    if hub.running():
+        c.post("/api/live/stop"); hub.session.wait(30)
+
+
+def jpeg_bytes(seed=1):
+    b = io.BytesIO(); product(seed=seed).save(b, "JPEG", quality=90)
+    return b.getvalue()
+
+
+def cam(hub):
+    login = tether.load_login(live.login_path())
+    f = ftplib.FTP(); f.connect("127.0.0.1", hub.receiver.port, timeout=30); f.login(login["user"], login["password"])
+    return f
+
+
+def test_start_makes_the_folder_and_a_frame_lands_as_a_shot(fake_encoder, wifi):
+    hub, c = wifi
+    assert c.post("/api/live/start", json={"camera": "usb", "shoot": "Job"}).status_code == 400
+    assert c.post("/api/live/start", json={"camera": "wifi", "shoot": " "}).status_code == 400
+    r = c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job", "drive": None}).json()
+    assert r["camera"] is True and r["folder"] == str(live.camera_folder("Job")) and Path(r["folder"]).is_dir()
+    f = cam(hub); f.storbinary("STOR DSC00001.JPG", io.BytesIO(jpeg_bytes())); f.quit()
+    assert wait_for(lambda: len(hub.session.snapshot()["shots"]) == 1)
+    line = c.get("/api/live/camera").json()["line"]
+    assert "last shot" in line["text"] and line["warn"] is None
+
+
+def test_the_login_is_kept_and_only_reset_on_purpose(fake_encoder, wifi):
+    hub, c = wifi
+    a = c.get("/api/live/camera", params={"shoot": "Job"}).json()
+    assert a["user"] == c.get("/api/live/camera").json()["user"] and a["folder"] == str(live.camera_folder("Job")) and a["host"] == "127.0.0.1"
+    c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job"})
+    assert c.post("/api/live/camera/reset").status_code == 409
+    assert hub.receiver.user == a["user"] and hub.receiver.password == a["password"]
+    c.post("/api/live/stop"); hub.session.wait(30)
+    b = c.post("/api/live/camera/reset").json()
+    assert (b["user"], b["password"]) != (a["user"], a["password"])
+    assert tether.load_login(live.login_path())["user"] == b["user"]
+
+
+def test_where_the_camera_reached_us_is_remembered_and_a_change_is_said(fake_encoder, wifi, monkeypatch):
+    hub, c = wifi
+    c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job"})
+    f = cam(hub); f.quit()
+    assert wait_for(lambda: tether.load_login(live.login_path())["host"] == "127.0.0.1")
+    assert c.get("/api/live/camera").json()["moved"] is None
+    c.post("/api/live/stop"); hub.session.wait(30)
+    monkeypatch.setattr(tether, "lan_addresses", lambda: [{"address": "10.1.1.9", "interface": "en0", "default": True, "kind": "Wi-Fi"}])
+    m = c.get("/api/live/camera").json()
+    assert m["moved"]["was"] == "127.0.0.1" and m["moved"]["now"] == "10.1.1.9" and m["host"] == "10.1.1.9"
+
+
+def test_a_file_that_looks_cut_lands_and_the_photographer_hears(fake_encoder, wifi):
+    hub, c = wifi
+    c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job"})
+    data = jpeg_bytes()
+    f = cam(hub); f.voidcmd("TYPE I")
+    conn = f.transfercmd("STOR DSC00001.JPG"); conn.sendall(data[:len(data) * 3 // 4]); conn.close(); assert f.getresp().startswith("226"); f.quit()
+    assert wait_for(lambda: any(e["type"] == "status" and "may be incomplete" in (e.get("message") or "") for e in hub.log.since(0, 0)["events"]))
+    assert wait_for(lambda: hub.session.snapshot()["shots"] or hub.session.errors)
+    shots = hub.session.snapshot()["shots"]
+    if shots:
+        assert any(a["kind"] == "cut" for a in shots[0]["alerts"])
+
+
+def test_finish_waits_for_the_frame_on_the_wire_and_live_takes_it(fake_encoder, wifi):
+    hub, c = wifi
+    c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job"})
+    root = hub.session.root; data = jpeg_bytes()
+    f = cam(hub); f.voidcmd("TYPE I")
+    conn = f.transfercmd("STOR LAST.JPG"); conn.sendall(data[:1000])
+    assert wait_for(lambda: hub.receiver.status()["uploads"])
+    done = []
+    t = threading.Thread(target=lambda: done.append(c.post("/api/live/stop").status_code)); t.start()
+    assert wait_for(lambda: hub.draining is not None)
+    assert "last frame" in c.get("/api/live/camera").json()["line"]["text"]
+    assert c.post("/api/live/stop").status_code == 200 and hub.draining is not None       # a second press cuts nothing off
+    time.sleep(0.3)
+    conn.sendall(data[1000:]); conn.close(); f.getresp(); f.close()
+    t.join(30); assert hub.session.wait(30)
+    assert (root / "LAST.JPG").read_bytes() == data
+    assert [x["file"] for x in hub.session.snapshot()["shots"]] == ["LAST.JPG"]
+
+
+def test_carry_on_brings_the_receiver_back_and_an_aborted_upload_stays_out(fake_encoder, wifi):
+    hub, c = wifi
+    r = c.post("/api/live/start", json={"camera": "wifi", "shoot": "Job"}).json()
+    f = cam(hub); f.voidcmd("TYPE I")
+    conn = f.transfercmd("STOR GONE.JPG"); conn.sendall(jpeg_bytes()[:5000])
+    assert wait_for(lambda: hub.receiver.status()["uploads"] and hub.receiver.status()["uploads"][0]["bytes"] == 5000)
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)); conn.close(); f.close()
+    assert wait_for(lambda: hub.receiver.status()["kept"] == 1 and not hub.receiver.status()["uploads"])
+    c.post("/api/live/stop"); hub.session.wait(30)
+    assert not list(Path(r["folder"]).glob("*.JPG")) and c.get("/api/live/camera").json()["kept"] == 1
+    r2 = c.post("/api/live/start", json={"folder": r["folder"], "mode": "resume"}).json()
+    assert r2["camera"] is True and hub.receiver is not None
+
+
+def test_folder_mode_runs_no_receiver(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    app = create_app(); hub = app.state.live; c = TestClient(app)
+    r = c.post("/api/live/start", json={"folder": str(root)}).json()
+    assert r["camera"] is False and hub.receiver is None
+    c.post("/api/live/stop"); hub.session.wait(30)
+
+
+def test_the_client_window_stays_free_of_camera_text():
+    js = Path(live.__file__).with_name("ui").joinpath("live.js").read_text()
+    assert 'if (CLIENT || !S.cameraOn) return;' in js and 'body.is-client > :not(.client):not(script) { display: none; }' in Path(live.__file__).with_name("ui").joinpath("live.css").read_text()

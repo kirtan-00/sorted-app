@@ -9,6 +9,8 @@ Calibrated on scripts/make_product_set.py (seven products, four colours, four vi
 reasoning behind every threshold are in docs/shoot-modes.md.
 """
 from __future__ import annotations
+import re
+from collections import Counter
 from pathlib import Path
 import numpy as np
 from . import db
@@ -198,46 +200,69 @@ def load_grey(root: Path) -> tuple[np.ndarray, np.ndarray] | None:
     return ids, X / np.linalg.norm(X, axis=1, keepdims=True).clip(1e-9)
 # ===== end client pick =====
 
+def _person_named(name: str | None, renamed: int) -> bool:
+    """Did a person give this product its name? renamed says so from now on. A row from before that column can still be
+    told by its shape, since everything the app makes up is a word of PRODUCT_VOCAB or "product 3", with or without a
+    number after it."""
+    if renamed:
+        return True
+    if not name:
+        return False
+    return re.fullmatch(r"product \d+", name) is None and re.sub(r" \d+$", "", name) not in PRODUCT_VOCAB
+
+def _kept_names(conn, found: list[dict], pids: list[int]) -> dict[int, str]:
+    """{new product number: name} for the new products holding photos of a product a person named: the name most of
+    those photos carried, the same rule as a person's name across a face recluster."""
+    named = {r[0]: r[1] for r in conn.execute("SELECT product, MIN(name), MAX(COALESCE(renamed, 0)) FROM product_sets GROUP BY product")
+             if _person_named(r[1], r[2])}
+    name_of = {r[0]: named[r[1]] for r in conn.execute("SELECT photo_id, product FROM products") if r[1] in named}
+    out = {}
+    for k, prod in enumerate(found, 1):
+        votes = Counter(name_of[pids[r]] for r in prod["rows"] if pids[r] in name_of)
+        if votes:
+            out[k] = votes.most_common(1)[0][0]
+    return out
+
 def find_products(root: Path, ids: list[int] | None = None, progress=None) -> dict:
     """Group the shoot's stills (or just ids, the photos on screen) into products and colour variants, and store them
     (tables products and product_sets, replacing the last run). Reads the grid thumbs on this Mac only: the shoot disk
-    can be unplugged. progress(done, total) is called per batch. Returns {products, variants, photos}."""
+    can be unplugged. progress(done, total) is called per batch. Returns {products, variants, photos}.
+
+    All the slow work happens first, with nothing written and nothing locked, so stars and flags go on being set during
+    the encode, and a run that dies leaves the last result as it was. The swap at the end is one transaction. What a
+    person decided outlives it: a name goes to the new product holding most of its photos, and a hand pick in Client
+    pick stays on its photo under the new product number (cull.py)."""
     root = Path(root); conn = db.connect(root)
     still = {r[0]: r[1] for r in conn.execute("SELECT id, qhash FROM photos WHERE status='ok' AND kind!='video' AND qhash IS NOT NULL ORDER BY id")}
     want = set(ids) if ids is not None else None
     pids = [p for p in still if want is None or p in want]
-    conn.execute("DELETE FROM products"); conn.execute("DELETE FROM product_sets")
-    # ===== client pick: its picks name these product numbers, so a new find starts it over =====
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cull'").fetchone():
-        conn.execute("DELETE FROM cull")
-    # ===== end client pick =====
-    if len(pids) < PRODUCT_MIN_PHOTOS:
-        conn.commit()
-        return {"products": 0, "variants": 0, "photos": 0}
-    grid = db.index_dir(root) / "grid"
-    paths = [grid / f"{still[p]}.jpg" for p in pids]
-    X = grey_embeddings(paths, progress)
-    # ===== client pick: keep the grey embeddings, so Client pick can match angles across colours and put a frame that
-    # fell out of every product back next to its nearest one without encoding the shoot again (cull.py) =====
-    save_grey(root, pids, X)
-    # ===== end client pick =====
-    colours = [subject_colour(p) for p in paths]
-    found = group(X, colours)
-    from .embed import get_embedder
-    E = get_embedder()
-    all_ids, M = db.load_embeds(conn)                 # the colour embeddings name the product, as a category is named
-    pos = {int(p): i for i, p in enumerate(all_ids.tolist())}
-    T = getattr(E, "_product_T", None)
-    if T is None:
-        T = E.encode_text(list(PRODUCT_VOCAB)); E._product_T = T
+    found, kept, X = [], {}, None                      # under PRODUCT_MIN_PHOTOS nothing groups, and the swap below clears the last run
+    if len(pids) >= PRODUCT_MIN_PHOTOS:
+        grid = db.index_dir(root) / "grid"
+        paths = [grid / f"{still[p]}.jpg" for p in pids]
+        X = grey_embeddings(paths, progress)
+        colours = [subject_colour(p) for p in paths]
+        found = group(X, colours)
+        from .embed import get_embedder
+        E = get_embedder()
+        all_ids, M = db.load_embeds(conn)             # the colour embeddings name the product, as a category is named
+        pos = {int(p): i for i, p in enumerate(all_ids.tolist())}
+        T = getattr(E, "_product_T", None)
+        if T is None:
+            T = E.encode_text(list(PRODUCT_VOCAB)); E._product_T = T
+        kept = _kept_names(conn, found, pids)
     used: dict[str, int] = {}
     unnamed = nvar = nphotos = 0
+    sets, rows_out = [], []
     for k, prod in enumerate(found, 1):
         rows = [pos[pids[r]] for r in prod["rows"] if pids[r] in pos]
         name = None
         if rows:
             cent = M[rows].astype(np.float32).mean(0); cent /= (np.linalg.norm(cent) or 1.0)
             name = _name(cent, T)
+        renamed = int(k in kept)
+        if renamed:
+            name = kept[k]
         if name is None:
             unnamed += 1; name, named = f"product {unnamed}", 0
         else:
@@ -246,12 +271,30 @@ def find_products(root: Path, ids: list[int] | None = None, progress=None) -> di
         for v, var in enumerate(prod["variants"], 1):
             lab = var["lab"]
             cname, hexc = (colour_name(lab), "#%02x%02x%02x" % _rgb(lab)) if lab is not None else ("unknown", None)
-            conn.execute("INSERT INTO product_sets(product, variant, name, named, colour, hex, n, views) VALUES(?,?,?,?,?,?,?,?)",
-                         (k, v, name, named, cname, hexc, len(var["rows"]), len(set(var["views"]))))
-            conn.executemany("INSERT INTO products(photo_id, product, variant, view) VALUES(?,?,?,?)",
-                             [(pids[r], k, v, view) for r, view in zip(var["rows"], var["views"])])
+            sets.append((k, v, name, named, cname, hexc, len(var["rows"]), len(set(var["views"])), renamed))
+            rows_out.extend((pids[r], k, v, view) for r, view in zip(var["rows"], var["views"]))
             nvar += 1; nphotos += len(var["rows"])
-    conn.commit()
+    # ===== the swap: nothing above wrote anything, and from here on it is one transaction =====
+    try:
+        conn.execute("DELETE FROM products"); conn.execute("DELETE FROM product_sets")
+        conn.executemany("INSERT INTO product_sets(product, variant, name, named, colour, hex, n, views, renamed) VALUES(?,?,?,?,?,?,?,?,?)", sets)
+        conn.executemany("INSERT INTO products(photo_id, product, variant, view) VALUES(?,?,?,?)", rows_out)
+        # ===== client pick: its rows name these product numbers, so a new find starts it over, hand picks excepted =====
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cull'").fetchone():
+            conn.execute("DELETE FROM cull WHERE manual=0")
+            home = {r[0]: (r[1], r[2]) for r in rows_out}
+            conn.executemany("UPDATE cull SET product=?, variant=? WHERE photo_id=?",
+                             [(*home.get(r[0], (0, 0)), r[0]) for r in conn.execute("SELECT photo_id FROM cull").fetchall()])
+        # ===== end client pick =====
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    # ===== client pick: keep the grey embeddings, so Client pick can match angles across colours and put a frame that
+    # fell out of every product back next to its nearest one without encoding the shoot again (cull.py) =====
+    if X is not None:
+        save_grey(root, pids, X)
+    # ===== end client pick =====
     return {"products": len(found), "variants": nvar, "photos": nphotos}
 
 def list_products(conn) -> list[dict]:
@@ -267,6 +310,7 @@ def list_products(conn) -> list[dict]:
     return sorted(out.values(), key=lambda p: (-p["n"], p["product"]))
 
 def rename(conn, product: int, name: str) -> int:
-    n = conn.execute("UPDATE product_sets SET name=?, named=1 WHERE product=?", (name.strip(), product)).rowcount
+    db.durable(conn)
+    n = conn.execute("UPDATE product_sets SET name=?, named=1, renamed=1 WHERE product=?", (name.strip(), product)).rowcount
     conn.commit()
     return n

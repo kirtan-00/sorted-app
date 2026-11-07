@@ -87,34 +87,56 @@ def _apply_links(labels: np.ndarray, fids: np.ndarray, F: np.ndarray, links: lis
 def cluster_faces(root: Path, eps: float | None = None, min_samples: int = FACE_MIN_SAMPLES) -> list[dict]:
     """Rebuild the people table from every face big and sharp enough to trust (FACE_CLUSTER_MIN_EDGE,
     FACE_CLUSTER_MIN_EYE_SHARP; the rest keep person_id NULL): DBSCAN at eps (FACE_CLUSTER_EPS when
-    None), then the remembered "same"/"different" answers (see _apply_links). Names survive by majority vote."""
+    None), then the remembered "same"/"different" answers (see _apply_links).
+
+    A name is a person's decision, so it is not at the mercy of the clustering. DBSCAN runs with nothing written, and
+    the swap is one transaction, so a run that dies leaves every name where it was. A new group takes the name most of
+    its faces carried. A name that won no group, because its faces went to noise or were outvoted inside someone else's
+    group, is not dropped: its faces come back together under it. So is a chosen cover, while its face stays in the group."""
     conn = db.connect(root)
     fids, pids, F = db.load_face_embeds(conn)
     _q, edge, eye = db.load_face_quality(conn)
     keep = (edge >= FACE_CLUSTER_MIN_EDGE) & (eye >= FACE_CLUSTER_MIN_EYE_SHARP)
     fids, pids, F = fids[keep], pids[keep], F[keep]
-    # Names survive a recluster: remember which face belonged to a named person,
-    # then hand each new cluster the majority name among its faces.
     old_names = {r[0]: r[1] for r in conn.execute(
         "SELECT f.id, pe.name FROM faces f JOIN people pe ON pe.id=f.person_id WHERE pe.name IS NOT NULL")}
-    conn.execute("UPDATE faces SET person_id=NULL"); conn.execute("DELETE FROM people"); conn.commit()
-    if len(fids) == 0:
+    covers = {r[0] for r in conn.execute("SELECT cover_face_id FROM people WHERE name IS NOT NULL AND cover_face_id IS NOT NULL")}
+    if len(fids) == 0 and not old_names:
+        conn.execute("UPDATE faces SET person_id=NULL"); conn.execute("DELETE FROM people"); conn.commit()
         return []
+    if len(fids) == 0:
+        return list_people(root)                       # nothing to cluster is no reason to forget who was who
     # working_memory caps the pairwise-distance chunks DBSCAN builds (MiB); the default
     # 1024 can spike RSS on a big shoot.
     with sklearn.config_context(working_memory=128):
         labels = DBSCAN(eps=FACE_CLUSTER_EPS if eps is None else eps, min_samples=min_samples, metric="cosine", n_jobs=1).fit_predict(F)
     labels = _apply_links(labels, fids, F, db.face_links(conn), FACE_MERGE_AUTO_SIM)
+    groups: list[tuple[str | None, list[int]]] = []
     for lab in sorted(set(labels) - {-1}):
-        idx = np.where(labels == lab)[0]
-        members = [int(f) for f in fids[idx]]
-        n_photos = len(set(pids[idx].tolist()))
-        best = conn.execute(f"SELECT id FROM faces WHERE id IN ({','.join('?'*len(members))}) ORDER BY score DESC LIMIT 1", members).fetchone()[0]
+        members = [int(f) for f in fids[labels == lab]]
         votes = Counter(old_names[f] for f in members if f in old_names)
-        name = votes.most_common(1)[0][0] if votes else None
-        cur = conn.execute("INSERT INTO people(name, cover_face_id, n) VALUES(?, ?, ?)", (name, best, n_photos))
-        conn.executemany("UPDATE faces SET person_id=? WHERE id=?", [(cur.lastrowid, f) for f in members])
-    conn.commit()
+        groups.append((votes.most_common(1)[0][0] if votes else None, members))
+    won = {name for name, _ in groups if name}
+    for name in sorted(set(old_names.values()) - won):
+        theirs = {f for f, n in old_names.items() if n == name}
+        groups = [(n, [f for f in m if f not in theirs]) for n, m in groups]
+        groups.append((name, sorted(theirs)))
+    try:
+        conn.execute("UPDATE faces SET person_id=NULL"); conn.execute("DELETE FROM people")
+        for name, members in groups:
+            if not members:
+                continue
+            marks = ",".join("?" * len(members))
+            rows = conn.execute(f"SELECT id, photo_id FROM faces WHERE id IN ({marks}) ORDER BY score DESC", members).fetchall()
+            if not rows:
+                continue
+            best = next((r[0] for r in rows if r[0] in covers), rows[0][0])
+            cur = conn.execute("INSERT INTO people(name, cover_face_id, n) VALUES(?, ?, ?)", (name, best, len({r[1] for r in rows})))
+            conn.executemany("UPDATE faces SET person_id=? WHERE id=?", [(cur.lastrowid, r[0]) for r in rows])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return list_people(root)
 
 def list_people(root: Path) -> list[dict]:
@@ -204,6 +226,7 @@ def merge_people(root: Path, keep: int, drop: int) -> dict:
     conn = db.connect(root)
     k, d = _person_row(conn, keep), _person_row(conn, drop)
     ck, cd = _cover_or_best(conn, keep, k[2]), _cover_or_best(conn, drop, d[2])
+    db.durable(conn)
     conn.execute("UPDATE faces SET person_id=? WHERE person_id=?", (keep, drop))
     n = conn.execute("SELECT count(DISTINCT photo_id) FROM faces WHERE person_id=?", (keep,)).fetchone()[0]
     conn.execute("UPDATE people SET n=?, name=?, cover_face_id=? WHERE id=?", (n, k[1] or d[1], ck, keep))
@@ -226,7 +249,7 @@ def reject_merge(root: Path, a: int, b: int) -> None:
     db.add_face_link(conn, ca, cb, "different")
 
 def name_person(root: Path, person_id: int, name: str) -> None:
-    conn = db.connect(root); conn.execute("UPDATE people SET name=? WHERE id=?", (name.strip() or None, person_id)); conn.commit()
+    conn = db.connect(root); db.durable(conn); conn.execute("UPDATE people SET name=? WHERE id=?", (name.strip() or None, person_id)); conn.commit()
 
 class ReferenceUnreadable(Exception):
     """The reference image exists but could not be decoded or scanned for faces."""

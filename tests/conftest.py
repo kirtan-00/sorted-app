@@ -30,6 +30,10 @@ def pytest_configure(config):
     there by 2026-09-24, two more per suite run. Pointing the variable at a session temp dir here means
     monkeypatch restores to THIS value rather than to unset, so a late thread still lands in temp."""
     os.environ.setdefault("PHOTOSORT_HOME", tempfile.mkdtemp(prefix="photosort-test-home-"))
+    # TestClient's made up host. The real server refuses every name that is not local (server.LocalOnly);
+    # tests/test_local_only.py proves it, on its own client and with a real socket.
+    from photosort import config as _config
+    _config.LOCAL_HOSTNAMES.add("testserver")
 
 @pytest.fixture(autouse=True)
 def _isolated_dirs(tmp_path_factory, monkeypatch):
@@ -41,6 +45,7 @@ def _isolated_dirs(tmp_path_factory, monkeypatch):
     import sys
     from photosort import awake
     monkeypatch.setattr(awake, "AWAKE_CMD", [sys.executable, "-c", "import time; time.sleep(600)", "{pid}"])
+    monkeypatch.setattr(awake, "DISPLAY_CMD", [sys.executable, "-c", "import time; time.sleep(600)", "{pid}"])
     monkeypatch.setattr(awake, "_proc", None)
     monkeypatch.setattr(awake, "_holders", 0)
     yield

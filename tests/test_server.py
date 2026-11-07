@@ -222,7 +222,7 @@ def test_free_port_skips_busy_port():
 def test_no_folder_open_by_default_and_endpoints_degrade():
     c = TestClient(create_app(None))
     f = c.get("/api/folder").json()
-    assert f == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None}
+    assert f == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None, "index_note": None}
     assert c.get("/api/stats").json()["photos"] == 0
     assert c.get("/api/search").json() == {"results": [], "total": 0, "offset": 0, "limit": 200}
     assert c.get("/api/people").json() == []
@@ -478,7 +478,9 @@ def test_rename_discovered_category_endpoint(tmp_path):
     assert TestClient(create_app(None)).post("/api/categories/discovered/rename", json={"old": "a", "new": "b"}).status_code == 400
 
 
-def _wait_idle(c, n=100):
+def _wait_idle(c, n=600):
+    # 60 s: a scan's first worker can take 15 s to start on a busy Mac, and a test that stops waiting early leaves its
+    # scan running into the next test's monkeypatches.
     import time
     for _ in range(n):
         if not c.get("/api/progress").json()["running"]: return
@@ -1459,7 +1461,7 @@ def test_folder_info_says_whether_the_disk_is_there(tmp_path, tmp_path_factory):
     f = c.get("/api/folder").json()
     assert f["mounted"] is True and f["disk"] == tmp_path.resolve().name
     assert c.get("/api/stats").json()["mounted"] is True
-    assert TestClient(create_app(None)).get("/api/folder").json() == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None}
+    assert TestClient(create_app(None)).get("/api/folder").json() == {"root": None, "name": None, "indexed": False, "mounted": False, "disk": None, "index_note": None}
     # the disk got unplugged: the index is still there, the folder is not
     disk = tmp_path_factory.mktemp("disk") / "shoot"; disk.mkdir()
     from conftest import make_image

@@ -1,6 +1,6 @@
 [project]
 name = "photosort"
-version = "0.8.2"
+version = "0.8.3"
 requires-python = ">=3.11"
 dependencies = [
   "torch", "torchvision", "open_clip_torch", "timm", "opencv-python",
@@ -13,6 +13,8 @@ dependencies = [
 ]
 [project.optional-dependencies]
 dev = ["pytest"]
+# Live over USB (photosort/tether.py). Left out of the default install: Wi-Fi needs nothing, and the helper reports it is missing.
+usb = ["pyobjc-framework-ImageCaptureCore"]
 [project.scripts]
 photosort = "photosort.cli:main"
 [build-system]

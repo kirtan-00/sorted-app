@@ -65,3 +65,13 @@ def test_missing_caffeinate_is_a_quiet_no_op(monkeypatch):
     with awake.hold():
         assert awake.held() is False and awake.pid() is None
     assert awake.held() is False
+
+
+def test_a_live_display_hold_is_its_own_and_ends_on_its_own(monkeypatch):
+    monkeypatch.setattr(awake, "DISPLAY_CMD", [sys.executable, "-c", "import time; time.sleep(600)", "{pid}"])
+    awake.display_on(); p = awake._display
+    assert p is not None and p.poll() is None
+    awake.display_on()
+    assert awake._display is p                       # one display hold, however often a shoot asks
+    awake.display_off()
+    assert p.poll() is not None and awake._display is None and not awake.held()

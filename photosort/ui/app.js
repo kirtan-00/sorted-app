@@ -52,9 +52,10 @@
   var statusEl = $("#status-text");
   var statusTimer = null;
   function setStatus(msg, hold) {
+    if (serverGone() && /^(could not|export failed|search failed)/i.test(msg || "")) return;   // the banner already says it, once
     statusEl.textContent = msg || "";
     // ===== status colour: an error message gets .err (danger) on the status bar =====
-    $("#status").classList.toggle("err", /^(could not|failed|error)|\bfailed:/i.test(msg || ""));
+    $("#status").classList.toggle("err", /^(could not|failed|error)|\bfailed:|nothing was exported/i.test(msg || ""));
     // ===== end status colour =====
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
     if (msg && !hold) {
@@ -62,8 +63,42 @@
     }
   }
 
+  // ===== the server is gone: one banner for it, however many calls fail. Nothing is held back to send later: a change
+  // that could not be saved is taken off the screen, and the keys that make changes do nothing until the server is back.
+  // A small request every few seconds finds out, and when it answers the screen is read again from the index. =====
+  var goneTimer = null;
+  function serverGone() { return goneTimer != null; }
+  function serverLost() {
+    if (goneTimer != null) return;
+    $("#offline").hidden = false;
+    setStatus("");
+    goneTimer = setInterval(function () { heartbeat().then(serverBack, function () { /* still gone */ }); }, 2500);
+  }
+  function heartbeat() {
+    return fetch("/favicon.ico", { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error(String(r.status)); });
+  }
+  function serverBack() {
+    if (goneTimer == null) return;
+    clearInterval(goneTimer); goneTimer = null;
+    $("#offline").hidden = true;
+    api("/api/folder").then(function (f) {
+      if ((f && f.root) !== (state.folder && state.folder.root)) { location.reload(); return; }   // it came back on another shoot, or none
+      setStatus("sorted is back; this is what was saved");
+      if (!state.folder.root) return;
+      loadPile(); loadMarkCounts();
+      if (state.view === "search") runSearch(state.lastParams);
+    }).catch(function () { /* gone again: the banner is already back */ });
+  }
+  setInterval(function () { if (goneTimer == null) heartbeat().catch(serverLost); }, 5000);
+  // ===== end the server is gone =====
+
   function api(path, opts) {
-    return fetch(path, opts).then(function (r) {
+    return fetch(path, opts).catch(function () {
+      serverLost();
+      var gone = new Error("sorted is not running");
+      gone.gone = true;
+      throw gone;
+    }).then(function (r) {
       if (!r.ok) {
         return r.json().catch(function () { return {}; }).then(function (body) {
           var err = new Error((body && body.detail) || (r.status + " " + r.statusText));
@@ -228,6 +263,7 @@
     // ===== scroll memory: the returned-to list sits where it was =====
     if (switching) restoreScroll(name);
     // ===== end scroll memory =====
+    if (switching && name === "search" && gridEl) focusTile(null, true);   // the keys work on the grid at once, not after a click
     // ===== navigation: a saved-person find owed from a history restore runs once Search shows =====
     if (name === "search" && pendingFind) { var pf = pendingFind; pendingFind = null; findSaved(pf); }
     // ===== end navigation =====
@@ -775,7 +811,7 @@
       title.title = "";
     }
     box.classList.toggle("ended", !state.scanning);    // the call to action is the red one, the running count is not
-    $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.rel; }).join("\n") + (total > 200 ? "\n… " + fmtN(total - 200) + " more" : "");
+    $("#index-errors-list").textContent = list.slice(0, 200).map(function (e) { return e.problem ? e.rel + ": " + e.problem : e.rel; }).join("\n") + (total > 200 ? "\n… " + fmtN(total - 200) + " more" : "");
   }
 
   // ---------- folder ----------
@@ -783,6 +819,7 @@
 
   function applyFolderInfo(info) {
     state.folder = info || { root: null, name: null, indexed: false };
+    if (info && info.index_note) setStatus(info.index_note, true);
     if (info && info.scan) state.scan = info.scan;   // ===== resume =====
     else if (!info || !info.root) state.scan = null;
     folderNameEl.textContent = state.folder.name || "no folder open";
@@ -969,7 +1006,7 @@
   function settleFolder(info) {
     state.people = []; state.peopleLoaded = false;
     state.results = [];
-    state.selected = pileSet([]); state.pile = null; offerUndo(); wasRejected.clear(); loadPile();   // ===== the pile: this shoot's, from the index =====
+    state.selected = pileSet([]); state.pile = null; offerUndo(); wasRejected.clear(); undoStack.length = 0; loadPile();   // ===== the pile: this shoot's, from the index =====
     state.live = null;                                 // ===== live counts: the previous shoot's numbers mean nothing here =====
     state.categories = { fixed: {}, discovered: {}, drone: 0 };
     state.catTicked = new Set(); state.catSeen = new Set();
@@ -2103,7 +2140,7 @@
     var params = currentFilters();
     Object.assign(params, extra || {});
     params.fold = state.showCopies ? 0 : 1;            // ===== duplicates and bursts: one tile per set unless "Show every copy" is ticked =====
-    if (!append) { state.offset = 0; state.results = []; }
+    if (!append) { state.offset = 0; state.results = []; state.focusGrid = true; }
     params.limit = PAGE; params.offset = state.offset;
     state.lastParams = params;
     var qs = new URLSearchParams(params).toString();
@@ -2542,7 +2579,7 @@
       return;
     }
     // Enter runs the search itself: there is no Find button to stand behind it
-    if (e.key === "Enter" && (qHist.hidden || qhIndex < 0)) { e.preventDefault(); closeHistory(); runSearch(); return; }
+    if (e.key === "Enter" && (qHist.hidden || qhIndex < 0)) { e.preventDefault(); closeHistory(); qField.blur(); runSearch(); return; }
     if (qHist.hidden) return;
     if (e.key === "ArrowUp") { e.preventDefault(); if (qhIndex <= 0) closeHistory(); else highlightRow(qhIndex - 1); return; }
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeHistory(); return; }
@@ -2659,15 +2696,19 @@
   var resultById = new Map();
   var lastClickedId = null;
   var hoveredId = null;
+  var keyNav = false;                                  // the arrows are driving: a pointer resting on a tile does not take the keys from them
+  var lastTileId = null;                               // the tile the keyboard was last on, across a redraw of the grid
   function cardEl(id) { return gridEl.querySelector('.card[data-id="' + id + '"]'); }
   function indexOfId(id) {
     for (var i = 0; i < state.results.length; i++) if (state.results[i].id === id) return i;
     return -1;
   }
   function clickCard(e, r, card) {
+    if (serverGone()) return;
     if (e.shiftKey && lastClickedId != null) {
       var a = indexOfId(lastClickedId), b = indexOfId(r.id);
       if (a >= 0 && b >= 0) {
+        rememberMarks(state.results.slice(Math.min(a, b), Math.max(a, b) + 1).map(function (x) { return x.id; }), ["flag"]);
         for (var i = Math.min(a, b); i <= Math.max(a, b); i++) state.selected.add(state.results[i].id);
         drawPicks();
         return;
@@ -2677,19 +2718,30 @@
     toggleSelect(r.id, card);                          // a plain click and a command-click both toggle
   }
   gridEl.addEventListener("mouseover", function (e) {
+    if (keyNav) return;
     var c = e.target.closest ? e.target.closest(".card") : null;
     if (c && gridEl.contains(c)) { hoveredId = Number(c.dataset.id); renderInspector(); }
   });
+  gridEl.addEventListener("mousemove", function (e) { if (e.movementX || e.movementY) keyNav = false; });   // a scroll fires this too, standing still
   gridEl.addEventListener("mouseleave", function () { hoveredId = null; renderInspector(); });
   gridEl.addEventListener("focusin", function (e) {
     var c = e.target.closest ? e.target.closest(".card") : null;
     if (!c) return;
+    lastTileId = Number(c.dataset.id);
     $$(".card", gridEl).forEach(function (x) { x.tabIndex = x === c ? 0 : -1; });
   });
+  // The keyboard's place in the grid: this tile, else the one it was last on, else the first.
+  function focusTile(id, still) {
+    var c = (id != null && cardEl(id)) || (lastTileId != null && cardEl(lastTileId)) || gridEl.querySelector(".card");
+    if (!c) return;
+    c.focus({ preventScroll: true });
+    if (!still) c.scrollIntoView({ block: "nearest" });
+  }
   function moveFocus(key) {
+    keyNav = true; hoveredId = null;
     var cards = $$(".card", gridEl);
     var i = cards.indexOf(document.activeElement);
-    if (i < 0) { if (cards[0]) cards[0].focus(); return; }
+    if (i < 0) { focusTile(); return; }
     var cols = getComputedStyle(gridEl).gridTemplateColumns.split(" ").length || 1;
     var j = key === "ArrowRight" ? i + 1 : key === "ArrowLeft" ? i - 1 : key === "ArrowDown" ? i + cols : i - cols;
     if (j >= 0 && j < cards.length) { cards[j].focus(); cards[j].scrollIntoView({ block: "nearest" }); }
@@ -2700,6 +2752,7 @@
     // would select everything, and the sort control has nothing to do.
     var ranked = !!(state.lastParams.q || state.lastParams.image_id);
     syncSortControl(ranked);
+    var hadFocus = gridEl.contains(document.activeElement);
     gridEl.innerHTML = "";
     resultById = new Map();
     hoveredId = null;
@@ -2714,6 +2767,7 @@
         divided = true;
         var div = document.createElement("div");
         div.className = "grid-divider";
+        div.setAttribute("role", "presentation");
         // under a category the band also holds what was filed elsewhere and fits here too (a runner-up)
         div.textContent = state.lastParams.category ? "possible matches, or filed under another category too, by confidence" : "possible matches, sorted by confidence";
         gridEl.appendChild(div);
@@ -2722,12 +2776,17 @@
       card.className = "card";
       if (unsure) card.classList.add("unsure");
       card.dataset.id = r.id;
+      card.setAttribute("role", "option");
 
       var img = document.createElement("img");
       img.loading = "lazy";
-      img.alt = r.rel;
+      img.alt = "";                                    // the tile's own label says it, with the marks
       img.src = "/api/thumb/" + r.qhash + "?size=grid";
       card.appendChild(img);
+      var fname = document.createElement("div");
+      fname.className = "fname";
+      fname.textContent = fileOf(r);
+      card.appendChild(fname);
 
       // no caption on the card: sharpness, faces and confidence live in the inspector
       card.tabIndex = idx === 0 ? 0 : -1;
@@ -2783,13 +2842,20 @@
     $("#grid-head").hidden = state.results.length === 0;
     updateSelbar();
     renderCtxBar();                                    // ===== navigation: the count line follows the results =====
+    // A search or a filter hands the keys to the grid, unless the person is still in a field; a redraw never loses them.
+    var a = document.activeElement, free = !a || a === document.body || a.tagName === "SELECT";
+    if ((hadFocus || (state.focusGrid && free)) && state.view === "search" && $("#lightbox").hidden) focusTile(null, !hadFocus);
+    state.focusGrid = false;
   }
 
   function toggleSelect(id, card) {
+    if (serverGone()) return;
     if (state.selected.has(id)) {
       if (wasRejected.has(id)) { applyMarks([id], { flag: "reject" }); return; }
+      rememberMarks([id], ["flag"]);
       state.selected.delete(id);
     } else {
+      rememberMarks([id], ["flag"]);
       state.selected.add(id);
     }
     decorateMarks(card, rowOf(id));
@@ -2797,6 +2863,22 @@
     updateSelbar();
   }
 
+  // ===== tile size and file names: one menu at the head of the grid, remembered on this Mac =====
+  var gridView = $("#grid-view");
+  function applyGridView() {
+    var v = gridView.value;
+    gridEl.dataset.tile = v.charAt(0);
+    gridEl.classList.toggle("show-names", v.slice(1) === "n");
+  }
+  try { gridView.value = localStorage.getItem("sorted.gridView") || "m"; } catch (e) { /* private mode */ }
+  if (!gridView.value) gridView.value = "m";
+  applyGridView();
+  gridView.addEventListener("change", function () {
+    applyGridView();
+    try { localStorage.setItem("sorted.gridView", gridView.value); } catch (e) { /* private mode */ }
+    focusTile();
+  });
+  // ===== end tile size and file names =====
   var selbar = $("#selbar");
   var selcount = $("#selcount");
   var selectAllTop = $("#selectall-top");
@@ -2880,7 +2962,14 @@
       updateSelbar();
       loadMarkCounts();
       if (q.add.size > 1) offerUnreject(d.unrejected);
-    }).catch(function (err) { setStatus("could not keep your picks: " + err.message); });
+    }).catch(function (err) {
+      // not saved, so not picked: the screen goes back to what the index holds
+      q.add.forEach(function (id) { state.selected.mirror(id, false); var r = rowOf(id); if (r && r.flag === "pick") r.flag = null; });
+      q.rem.forEach(function (id) { state.selected.mirror(id, true); });
+      undoStack.length = 0;
+      drawPicks();
+      setStatus("could not keep your picks: " + err.message);
+    });
   }
   // Anything else that changes the list (a flag, Clear, Undo, a reload of it) waits its turn behind what is queued.
   function pileThen(fn) {
@@ -2968,12 +3057,12 @@
     var prefs = exportPrefs();
     var drive = exportDest() === "drive";
     // every grid render calls this; with a big pile and nothing changed, the last answer stands
-    var key = JSON.stringify([ids.length, ids.reduce(function (a, b) { return a + b; }, 0), prefs, drive, $("#exportname").value.trim(), state.folder.root, state.exportDest && state.exportDest.path]);
+    var key = JSON.stringify([ids.length, ids.reduce(function (a, b) { return a + b; }, 0), prefs, drive, exportFolder(), state.folder.root, state.exportDest && state.exportDest.path]);
     if (key === planKey && !planEl.hidden) return;
     planKey = key;
     var ticket = ++planSeq;
     api("/api/export/plan", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids: ids, name: $("#exportname").value.trim() || "export", mode: drive ? "copy" : prefs.mode,
+      body: JSON.stringify({ ids: ids, name: exportFolder(), mode: drive ? "copy" : prefs.mode,
                              web_size: drive ? null : prefs.web_size, include_raw: drive ? $("#drive-include-raw").checked : prefs.include_raw }) })
       .then(function (d) { if (ticket === planSeq) renderPlan(d, drive, drive ? "copy" : prefs.mode); })
       .catch(function () { if (ticket === planSeq) renderPlan(null); });
@@ -2985,13 +3074,10 @@
     var raw = d.files - d.n;
     return parts.join(" and ") + (raw > 0 ? " + " + num(raw) + " RAW" : "");
   }
-  // The part of the path worth reading in a line: the disk when it is a plugged-in one, then <shoot>/<name>. The whole
-  // path is the line's tooltip.
+  // The place in plain text, ~ for the home folder and the disk's own name for a plugged-in one, the tail kept when the
+  // bar is narrow (CSS clips it from the left). The path as it really is sits on the hover.
   function planWhere(path) {
-    var parts = String(path || "").split("/").filter(Boolean);
-    var tail = parts.slice(-2).join("/");
-    var disk = parts[0] === "Volumes" && parts.length > 3 ? parts[1] : null;
-    return (disk ? disk + "/" : "") + (parts.length > (disk ? 4 : 2) ? "…/" : "") + tail;
+    return String(path || "").replace(/^\/Users\/[^\/]+/, "~").replace(/^\/Volumes\//, "");
   }
   function planTime(sec) {
     if (sec < 60) return "under a minute";
@@ -3004,7 +3090,9 @@
     planEl.innerHTML = "";
     [[head, "plan-head"], [where, "plan-where"], [tail, "plan-tail"]].forEach(function (p) {
       if (!p[0]) return;
-      var s = document.createElement("span"); s.className = p[1]; s.textContent = p[0]; planEl.appendChild(s);
+      var s = document.createElement("span"); s.className = p[1]; s.textContent = p[0];
+      if (p[1] === "plan-where") { s.textContent = "\u200E" + p[0] + "\u200E"; s.title = (title || "").split("\n")[0]; }
+      planEl.appendChild(s);
     });
     planEl.title = title || "";
     planEl.classList.toggle("err", !!err);
@@ -3018,15 +3106,15 @@
       return;
     }
     if (d.dest_error) { setPlan(what + ": ", d.dest_error, "", d.dest_error, true); return; }
-    var where = "to " + planWhere(d.dest);
+    var where = planWhere(d.dest);
     if (mode === "copy" && d.fits === false) {
-      setPlan(what + ", " + bytes(d.bytes) + ": only " + bytes(d.free) + " free ", where, "", d.dest, true);
+      setPlan(what + ", " + bytes(d.bytes) + ": only " + bytes(d.free) + " free in ", where, "", d.dest, true);
       return;
     }
-    if (mode === "symlink") { setPlan(what + ", links ", where, ", a few seconds", d.dest); return; }
-    if (mode === "csv") { setPlan(what + ", one CSV ", where, "", d.dest); return; }
+    if (mode === "symlink") { setPlan(what + ", links to ", where, ", a few seconds", d.dest); return; }
+    if (mode === "csv") { setPlan(what + ", one CSV to ", where, "", d.dest); return; }
     var measured = d.basis === "measured";
-    setPlan(what + ", " + bytes(d.bytes) + ", ", where, ", " + planTime(d.seconds) + (measured ? " (measured)" : " (estimate)"),
+    setPlan(what + ", " + bytes(d.bytes) + " to ", where, ", " + planTime(d.seconds) + (measured ? " (measured)" : " (estimate)"),
       d.dest + "\n" + (measured ? "timed on this shoot's last export" :
       "no export from this shoot has been timed yet, so this assumes 50 MB/s off the disk and 0.75 s a resized photo, both on the slow side") +
       (d.web ? "\n" + num(d.web) + " photos re-encoded to the web size" : ""));
@@ -3095,13 +3183,14 @@
         var written = p.done - p.failed - (p.skipped || 0);
         var msg = "exported " + written + " of " + p.total + " to " + p.path;
         if (p.skipped) msg += ", " + p.skipped + " already there";
+        if (!written && p.skipped && !p.failed) msg = "nothing new: all " + p.skipped + " were already in " + p.path;
         if (p.failed) msg += " (" + p.failed + " failed, see failed.txt)";
         setStatus(msg, true);
       }).catch(function () {
         fails += 1;
         if (fails < EXPORT_POLL_MAX_FAILS) return;     // one dropped poll is not a lost server
         clearInterval(exportTimer); exportTimer = null;
-        setStatus("lost contact with the server; check the terminal", true);
+        serverLost();
       });
     }, 800);
   }
@@ -3122,10 +3211,68 @@
                        "uploading " + ids.length + " photo(s)");
       return;
     }
-    var name = $("#exportname").value.trim() || "export";
-    var mode = $("#exportmode").value;
-    startExport(ids, name, mode, "exporting " + ids.length + " photo(s)");
+    preflightExport(ids, exportFolder(), $("#exportmode").value);
   });
+
+  // ===== before an export: the folder's name carries the size unless one is typed, so a web set and a full set never
+  // share a folder by accident. Export asks the server first (/api/export/check): a disk that is gone is one plain line, and
+  // files already in the folder are a question, Replace them or Keep both, never a quiet "exported 0 of 3". =====
+  function defaultFolder(p) {
+    if (p.mode === "symlink") return "export links";
+    if (p.mode === "csv") return "export";
+    return p.web_size ? "export " + p.web_size + " px" : "export full size";
+  }
+  function exportFolder() { return $("#exportname").value.trim() || defaultFolder(exportPrefs()); }
+  var exportAsk = $("#export-ask");
+  var exportAskDo = null;
+  function askExport(title, why, keep, replace, rest) {
+    $("#export-ask-title").textContent = title;
+    $("#export-ask-why").textContent = why;
+    var keepBtn = $("#export-ask-keep"), goBtn = $("#export-ask-go");
+    keepBtn.hidden = !keep;
+    keepBtn.title = keep ? "export into a new folder, " + keep.label : "";
+    goBtn.textContent = replace ? "Replace" : "Export the rest";
+    exportAskDo = { keep: keep && keep.run, go: replace || rest };
+    exportAsk.showModal();
+    goBtn.focus();
+  }
+  function answerExport(which) {
+    var run = exportAskDo && exportAskDo[which];
+    exportAskDo = null;
+    exportAsk.close();
+    if (run) run();
+  }
+  $("#export-ask-cancel").addEventListener("click", function () { answerExport("none"); });
+  $("#export-ask-keep").addEventListener("click", function () { answerExport("keep"); });
+  $("#export-ask-go").addEventListener("click", function () { answerExport("go"); });
+  function preflightExport(ids, name, mode) {
+    var prefs = exportPrefs();
+    var body = JSON.stringify({ ids: ids, name: name, mode: mode, web_size: mode === "copy" ? prefs.web_size : null, include_raw: prefs.include_raw });
+    var json = { method: "POST", headers: { "Content-Type": "application/json" }, body: body };
+    var label = "exporting " + ids.length + " photo(s)";
+    var run = function (folder) { startExport(ids, folder, mode, label); };
+    return api("/api/export/check", json).then(function (d) {
+      if (d.problem) { setStatus(d.problem, true); return; }
+      var n = d.already + d.clash, gone = d.missing ? " " + num(d.missing) + " more are not on the disk right now and will be listed in failed.txt." : "";
+      if (d.missing >= ids.length) { setStatus("None of these files are on the disk right now, so nothing was exported.", true); return; }
+      if (n) {
+        var how = d.clash ? (d.already ? "Some of the files in it are this export already and some are another size or another export." : "The files in it are another size, or from another export.") : "They are the same files.";
+        askExport(num(n) + (n === 1 ? " file is" : " files are") + " already in " + name, how + gone + " Replace overwrites them; Keep both starts a new folder, " + d.free_name + ".",
+          { label: d.free_name, run: function () { run(d.free_name); } },
+          function () {
+            api("/api/export/replace", json).then(function () { run(name); })
+              .catch(function (err) { setStatus("could not replace them: " + err.message, true); });
+          });
+        return;
+      }
+      if (d.missing) {
+        askExport(num(d.missing) + " of " + num(ids.length) + " are not on the disk", "The others can still go. The ones missing will be listed in failed.txt in the export folder.", null, null, function () { run(name); });
+        return;
+      }
+      run(name);
+    }).catch(function (err) { setStatus("export failed: " + err.message, true); });
+  }
+  // ===== end before an export =====
 
   // ===== export presets: one select sets copy or links, the size and the RAW box for the selection export; any change to those
   // makes it Custom; the choice is remembered per shoot (/api/export/prefs, in the index). With Google Drive as the destination
@@ -3145,6 +3292,7 @@
     var copy = $("#exportmode").value === "copy";
     exportSize.disabled = !copy;
     exportSize.title = copy ? "the long edge for photos in a copy; RAW files and clips are never resized" : "links and the CSV point at the originals, so there is no size";
+    $("#exportname").placeholder = defaultFolder(exportPrefs());
   }
   function applyPreset(name, save) {
     var p = PRESETS[name];
@@ -3523,7 +3671,8 @@
 
   // ---------- lightbox ----------
   var lightbox = $("#lightbox");
-  var lbImg = $("#lb-img");
+  var lbStage = $("#lb-stage");
+  var lbZoom = $("#lb-zoom");
   var lbVideo = $("#lb-video");
   var lbMeta = $("#lb-meta");
   var lbSegments = $("#lb-segments");
@@ -3570,18 +3719,35 @@
     lbSegments.innerHTML = "";
   }
 
-  function openLightbox(r) {
-    currentLb = r;
+  // ===== the loupe (loupe.js): opens on the 1024 px thumb, the file's own pixels take over when decoded, and the shots either
+  // side are read ahead. Z or a click is 100% at that point, a drag pans, F is full screen, C puts two shots side by side at
+  // the same zoom, and the arrows keep the zoom and the place. =====
+  function lbItem(r) {
+    return { key: r.id + ":" + r.qhash, thumb: "/api/thumb/" + r.qhash + "?size=full", full: "/api/full/" + r.id + "?v=" + r.qhash, edge: Math.max(r.width || 0, r.height || 0) };
+  }
+  var loupe = window.sortedLoupe(lbStage, {
+    onChange: function (v) {
+      var edge = currentLb ? Math.max(currentLb.width || 0, currentLb.height || 0) : 0;
+      var small = v.loaded && edge && Math.max(v.w, v.h) < edge * 0.98;   // a RAW whose embedded preview is smaller than the sensor
+      lbZoom.textContent = v.failed ? "Small preview" : !v.zoom ? "Fit" : small ? "100% of the preview" : "100%";
+      lbZoom.setAttribute("aria-pressed", v.zoom ? "true" : "false");
+      lbZoom.title = (v.failed ? "the file could not be read, so this is the small preview. " : small ? "the largest preview in this RAW is " + Math.max(v.w, v.h) + " px. " : "") +
+        "Z or a click for 100%, F for full screen, C to compare two shots";
+    },
+    onBackdrop: function () { closeLightbox(); }
+  });
+  function readAhead(r) {
+    var i = indexOfId(r.id), around = [i + 1, i - 1, i + 2];
+    loupe.preload(around.map(function (j) { return state.results[j]; }).filter(function (x) { return x && x.kind !== "video"; }).map(lbItem));
+    if (i >= 0 && i + 3 >= state.results.length && state.results.length < state.total) moreShots();
+  }
+  var fetchingMore = null;
+  function moreShots() {                               // the cull runs on past the page the grid has loaded
+    if (!fetchingMore) fetchingMore = Promise.resolve(runSearch(state.lastParams, true)).then(function () { fetchingMore = null; }, function () { fetchingMore = null; });
+    return fetchingMore;
+  }
+  function fillLbMeta(r) {
     var isVideo = r.kind === "video";
-    stopVideo();
-    lbImg.hidden = isVideo;
-    if (isVideo) {
-      lbVideo.hidden = false;
-      lbVideo.src = "/api/media/" + r.id;
-      lbImg.removeAttribute("src");
-    } else {
-      lbImg.src = "/api/thumb/" + r.qhash + "?size=full";
-    }
     var sharpPct = r.sharp_pct != null ? Math.round(r.sharp_pct) : 0;
     var bits = [r.rel, r.width + "×" + r.height];
     if (isVideo) bits.push(mmss(r.duration));
@@ -3597,8 +3763,26 @@
     lbMeta.appendChild(fn);
     lbMeta.appendChild(document.createTextNode(", " + bits.slice(1).join(", ")));
     // ===== end lightbox strip =====
+  }
+  // keep: stepping from another shot, so the zoom and the place stay. Otherwise a fresh open at fit.
+  function openLightbox(r, keep) {
+    currentLb = r;
+    var isVideo = r.kind === "video";
+    stopVideo();
+    lbZoom.hidden = isVideo;
+    if (isVideo) {
+      loupe.clear();
+      lbVideo.hidden = false;
+      lbVideo.src = "/api/media/" + r.id;
+    } else {
+      if (loupe.comparing()) loupe.caption(fileOf(r));
+      loupe.show(lbItem(r), !keep).then(function () { if (currentLb === r) readAhead(r); });
+    }
+    fillLbMeta(r);
     renderLbMarks();                                   // ===== marks =====
+    var opening = lightbox.hidden;
     lightbox.hidden = false;
+    if (opening) lightbox.focus();
     if (isVideo) {
       api("/api/segments/" + r.id).then(function (data) {
         if (currentLb !== r) return;                       // another item opened meanwhile
@@ -3607,10 +3791,44 @@
     }
   }
   function closeLightbox() {
+    var id = currentLb ? currentLb.id : null;
+    if (document.fullscreenElement) document.exitFullscreen().catch(function () { /* already out */ });
+    lightbox.classList.remove("lb-bare");
     lightbox.hidden = true;
     currentLb = null;
     stopVideo();
+    loupe.clear();
+    if (state.view === "search") focusTile(id);        // back on the tile of the shot last shown, so the arrows go on working
   }
+  function toggleFullscreen() {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(function () { /* already out */ }); return; }
+    lightbox.classList.add("lb-bare");
+    lightbox.requestFullscreen().catch(function () { /* the window stays as it is, the bar still goes */ });
+  }
+  document.addEventListener("fullscreenchange", function () { lightbox.classList.toggle("lb-bare", !!document.fullscreenElement); });
+  function toggleCompare() {
+    if (!currentLb) return;
+    if (loupe.comparing()) { loupe.compareOff(); return; }
+    if (currentLb.kind === "video") return;
+    var i = indexOfId(currentLb.id), other = null;
+    [1, -1].forEach(function (d) { for (var j = i + d; !other && state.results[j]; j += d) if (state.results[j].kind !== "video") other = state.results[j]; });
+    if (!other) { setStatus("there is no other shot to compare with"); return; }
+    var left = currentLb;
+    currentLb = other;
+    loupe.compare(fileOf(left), lbItem(other), fileOf(other)).then(function () { if (currentLb === other) readAhead(other); });
+    fillLbMeta(other);
+    renderLbMarks();
+  }
+  // Tab stays inside the dialog: everything behind it is out of reach while it is open.
+  function trapTab(e) {
+    var stops = $$("button, video[controls]", lightbox).filter(function (x) { return !x.hidden && x.offsetParent !== null; });
+    if (!stops.length) { e.preventDefault(); return; }
+    var first = stops[0], last = stops[stops.length - 1], at = document.activeElement;
+    if (e.shiftKey && (at === first || at === lightbox)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (at === last || at === lightbox)) { e.preventDefault(); first.focus(); }
+  }
+  lbZoom.addEventListener("click", function () { loupe.toggleZoom(); });
+  // ===== end the loupe =====
   $("#lb-close").addEventListener("click", closeLightbox);
   lightbox.addEventListener("click", function (e) {
     if (e.target === lightbox) closeLightbox();
@@ -3620,19 +3838,46 @@
     if (!currentLb) return;
     var i = indexOfId(currentLb.id);
     var next = i >= 0 ? state.results[i + d] : null;
-    if (next) openLightbox(next);
+    if (next) { openLightbox(next, true); return; }
+    if (d > 0 && i >= 0 && state.results.length < state.total) {
+      var at = currentLb;
+      moreShots().then(function () { if (currentLb === at && state.results[i + 1]) openLightbox(state.results[i + 1], true); });
+      return;
+    }
+    if (i >= 0) setStatus(d > 0 ? "that was the last shot" : "this is the first shot");
   }
+  // P and X move on by themselves in the full-size view. Remembered on this Mac; the box is in How it works.
+  var autoAdvance = true;
+  try { autoAdvance = localStorage.getItem("sorted.autoAdvance") !== "0"; } catch (e) { /* private mode */ }
+  $("#auto-advance").checked = autoAdvance;
+  $("#auto-advance").addEventListener("change", function () {
+    autoAdvance = this.checked;
+    try { localStorage.setItem("sorted.autoAdvance", autoAdvance ? "1" : "0"); } catch (e) { /* private mode */ }
+  });
   document.addEventListener("keydown", function (e) {
     var t = e.target;
     var tag = t && t.tagName;
     var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     var qField = form.querySelector('[name="q"]');
     var cmd = e.metaKey || e.ctrlKey;
+    if (document.querySelector("dialog[open]")) return;   // a question is up: the keys belong to it
     if (!lightbox.hidden) {
-      if (!cmd && !e.altKey && currentLb && marksKey(e, [currentLb.id], currentLb.id)) return;   // ===== marks: P X U 0-9 on the shot shown =====
-      if (e.key === "Escape") { e.preventDefault(); closeLightbox(); }
+      if (e.key === "Tab") { trapTab(e); return; }
+      if (cmd && !e.shiftKey && e.key.toLowerCase() === "z") { e.preventDefault(); undoMark(); return; }
+      if (!cmd && !e.altKey && currentLb && marksKey(e, [currentLb.id], currentLb.id)) {   // ===== marks: P X U 0-9 on the shot shown =====
+        var shown = rowOf(currentLb.id);
+        if (autoAdvance && /^[px]$/i.test(e.key) && shown && shown.flag && !serverGone()) stepLightbox(1);
+        return;
+      }
+      if (e.key === "Escape") { e.preventDefault(); if (loupe.comparing()) loupe.compareOff(); else closeLightbox(); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepLightbox(1); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); stepLightbox(-1); }
+      else if (!cmd && !e.altKey && !e.repeat) {
+        var k = e.key.toLowerCase();
+        if (k === "f") { e.preventDefault(); toggleFullscreen(); }
+        else if (k === "z" && currentLb && currentLb.kind !== "video") { e.preventDefault(); loupe.toggleZoom(); }
+        else if (k === "c") { e.preventDefault(); toggleCompare(); }
+      }
       return;
     }
     // ===== help panel: Esc closes it before anything else reads the key =====
@@ -3663,6 +3908,7 @@
     if (cmd && e.shiftKey && e.key.toLowerCase() === "r") { e.preventDefault(); revealSelection(); return; }
     // ===== end show in the Finder =====
     if (cmd && e.key.toLowerCase() === "a") { e.preventDefault(); selectAllShown(); return; }
+    if (cmd && !e.shiftKey && e.key.toLowerCase() === "z") { e.preventDefault(); undoMark(); return; }
     if (!cmd && !e.altKey && marksKey(e, marksTargets(), flagTarget())) return;   // ===== marks: the Lightroom keys =====
     if (e.key === " ") {
       var id = hoveredId != null ? hoveredId : (document.activeElement && document.activeElement.classList.contains("card") ? Number(document.activeElement.dataset.id) : null);
@@ -3675,7 +3921,10 @@
       if (rr) { e.preventDefault(); openLightbox(rr); }
       return;
     }
-    if (/^Arrow(Left|Right|Up|Down)$/.test(e.key) && gridEl.contains(document.activeElement)) { e.preventDefault(); moveFocus(e.key); }
+    // no tabbing needed: with nothing else holding the keys the arrows land on the grid
+    var held = document.activeElement;
+    var free = !held || held === document.body || gridEl.contains(held) || (held.closest && held.closest("#grid-head, #more-row, #ctxbar, #selbar"));
+    if (/^Arrow(Left|Right|Up|Down)$/.test(e.key) && free) { e.preventDefault(); moveFocus(e.key); }
   });
   // ===== end keyboard =====
   lbLike.addEventListener("click", function () {
@@ -3704,6 +3953,53 @@
   state.markCounts = null;
 
   function marksOf(r) { return { flag: r.flag || null, rating: Number(r.rating) || 0, label: r.label || null }; }
+  function fileOf(r) { return r.rel.split("/").pop(); }
+  // What a screen reader says for a tile: the name, then the marks the eye gets from the tile.
+  function tileLabel(r) {
+    var bits = [fileOf(r)];
+    if (r.kind === "video") bits.push("clip");
+    if (state.selected.has(r.id)) bits.push("picked");
+    if (r.flag === "reject") bits.push("rejected");
+    var n = Number(r.rating) || 0;
+    if (n) bits.push(n + (n === 1 ? " star" : " stars"));
+    if (r.label) bits.push(r.label + " label");
+    return bits.join(", ");
+  }
+  // ===== command Z: the last marks taken back, one change at a time. An entry is what those ids held before, for the
+  // fields that changed, and only a saved change stays on the list. It belongs to this shoot and this session. =====
+  var undoStack = [];
+  var UNDO_DEEP = 100;
+  function rememberMarks(ids, keys) {
+    var before = {};
+    ids.forEach(function (id) { var r = rowOf(id); if (r) before[id] = marksOf(r); });
+    var kept = Object.keys(before);
+    if (!kept.length) return null;
+    var entry = { ids: kept.map(Number), keys: keys, before: before };
+    undoStack.push(entry);
+    if (undoStack.length > UNDO_DEEP) undoStack.shift();
+    return entry;
+  }
+  function undoMark() {
+    if (serverGone()) return;
+    var u = undoStack.pop();
+    if (!u) { setStatus("nothing to undo"); return; }
+    var groups = {};                                   // /api/marks sets one value on many ids, so ids that held the same go together
+    u.ids.forEach(function (id) {
+      var change = {};
+      u.keys.forEach(function (k) { change[k] = u.before[id][k]; });
+      var g = JSON.stringify(change);
+      (groups[g] = groups[g] || { change: change, ids: [] }).ids.push(id);
+    });
+    var saves = Object.keys(groups).reduce(function (chain, g) {
+      return chain.then(function () { return applyMarks(groups[g].ids, groups[g].change, true); });
+    }, Promise.resolve());
+    saves.then(function () { if (!serverGone()) setStatus("undone: " + num(u.ids.length) + (u.ids.length === 1 ? " item is" : " items are") + " back as they were"); });
+    var id = u.ids[0], r = resultById.get(id);
+    if (!r) return;
+    if (!lightbox.hidden) { if (!currentLb || currentLb.id !== id) openLightbox(r, true); }
+    else if (u.ids.length === 1) focusTile(id);
+  }
+  // ===== end command Z =====
   function starsText(n) { var s = ""; for (var i = 0; i < n; i++) s += "★"; return s; }
   function marksChipLabel(c) {
     if (c.kind === "flag") return c.key === "reject" ? "rejects" : "not rated";
@@ -3718,6 +4014,8 @@
     if (old) old.remove();
     card.classList.toggle("selected", state.selected.has(r.id));
     card.classList.toggle("rejected", r.flag === "reject");
+    card.setAttribute("aria-selected", state.selected.has(r.id) ? "true" : "false");
+    card.setAttribute("aria-label", tileLabel(r));
     if (r.label) card.dataset.label = r.label; else delete card.dataset.label;
     var n = Number(r.rating) || 0;
     var rejected = r.flag === "reject";
@@ -3796,7 +4094,9 @@
     renderInspector();
     renderLbMarks();
   }
-  function applyMarks(ids, change) {
+  function applyMarks(ids, change, undoing) {
+    if (serverGone()) return Promise.resolve();        // nothing is drawn that cannot be saved
+    var entry = undoing ? null : rememberMarks(ids, Object.keys(change));
     var before = {}, wasOn = new Set(), flagged = "flag" in change;
     var unpicked = flagged && change.flag !== "pick" && ids.some(function (id) { return state.selected.has(id); });
     ids.forEach(function (id) {
@@ -3821,7 +4121,6 @@
     if (flagged) ids.forEach(function (id) { state.selected.mirror(id, change.flag === "pick"); });
     redrawMarks(ids);
     if (flagged) updateSelbar();
-    setStatus(marksWords(change, ids.length, unpicked));
     return saved.then(function (data) {
       var m = (data && data.marks) || {};
       Object.keys(m).forEach(function (id) {
@@ -3831,7 +4130,9 @@
       if (data && data.pile) { state.pile = data.pile; updateSelbar(); }
       redrawMarks(ids);
       loadMarkCounts();
+      if (!undoing) setStatus(marksWords(change, ids.length, unpicked));   // said once it is saved, not before
     }).catch(function (err) {
+      if (entry) undoStack.splice(undoStack.indexOf(entry), 1);
       Object.keys(before).forEach(function (id) {
         var r = rowOf(Number(id));
         if (r) Object.assign(r, before[id]);
@@ -3907,7 +4208,7 @@
     }
     if (n) { var s = document.createElement("span"); s.className = "mk-stars"; s.textContent = starsText(n); el.appendChild(s); }
     if (r.label) { var d = document.createElement("span"); d.className = "mk-dot mk-" + r.label; d.title = LABEL_WORDS[r.label] + " label"; el.appendChild(d); }
-    el.title = "P pick, X reject, U unflag, 0 to 5 stars, 6 to 9 labels";
+    el.title = "P pick, X reject, U unflag, 0 to 5 stars, 6 to 9 labels; command Z undoes";
   }
   // The sidebar Ratings block: a flag segment, "at least N stars", one label. Each writes a hidden form="q" field, so the
   // filter is a chip like the others (Back, Clear filters, the URL) and runSearch picks it up through currentFilters.
@@ -3974,7 +4275,6 @@
       b.title = (lb === "none" ? "no label" : LABEL_WORDS[lb]) + ": " + num((c.label || {})[lb] || 0) + "; click again for any";
     });
     $("#marks-xmp").hidden = !c.marked;
-    $("#xmp-sel").hidden = !c.marked;
   }
   function loadMarkCounts() {
     if (!(state.folder && state.folder.root)) { state.markCounts = null; renderMarkCounts(); return Promise.resolve(); }
@@ -3993,10 +4293,6 @@
     }).catch(function (err) { setStatus("could not save the ratings: " + err.message); });
   }
   $("#marks-xmp").addEventListener("click", function () { writeXmp(null); });
-  $("#xmp-sel").addEventListener("click", function () {
-    if (!state.selected.size) { setStatus("pick some first"); return; }
-    writeXmp(Array.from(state.selected));
-  });
   // The search field has focus when the page opens, so hover-a-tile-and-press-P would type a p into it. An EMPTY field
   // lets go of the focus when the pointer reaches the grid; one with text in it keeps it. / and command F take it back.
   gridEl.addEventListener("mouseenter", function () {
@@ -5107,6 +5403,7 @@
     var n = function (x) { return Number(x).toLocaleString("en-US"); };
     // ===== resume: the disk went away mid-scan; what was read is kept and Continue does the rest =====
     if (p.stage === "paused") {
+      if (p.disk_full) return p.error;
       // A pause keeps the step it stopped on, so say which one rather than leaving a bare count to be read
       // against a total that belongs to a stage the user can no longer see named.
       var at = (p.step > 0 && p.steps > 0 ? "in step " + n(p.step) + " of " + n(p.steps) + ", at " : "at ") + n(done) + " of " + n(total);
@@ -5178,7 +5475,7 @@
           if (p.stage === "error") {
             setStatus("scan failed: " + (p.error || "unknown error"), true);
           } else if (p.stage === "paused") {
-            setStatus("scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
+            setStatus(p.disk_full ? p.error : "scan paused: the disk went away. Plug it in and press Continue scan.", true);   // ===== resume =====
           } else if (p.project && p.project.error) {
             // the scan is done but its project file could not be written (the disk filled mid-scan): say so and ask
             setStatus("scan finished, but the shoot file could not be saved: " + p.project.error, true);
@@ -5218,7 +5515,7 @@
     }).then(function (res) {
       if (res && res.started === false && res.blocked) {
         setStatus("scan not started: " + res.blocked.message, true);
-        askProjectPlace({ mode: "before", body: body, startMsg: startMsg, blocked: res.blocked });
+        if (res.blocked.reason !== "index_space") askProjectPlace({ mode: "before", body: body, startMsg: startMsg, blocked: res.blocked });
         return;
       }
       scanStarted(startMsg);
@@ -5374,7 +5671,19 @@
 
   // The bar under the search head. Running: the progress readout (p) and the awake note. Not running and the
   // scan short: the summary with Continue. Complete: hidden.
+  // The camera files the last scan left out, and why, so a folder of RED clips is not just quietly missing.
+  function renderSkipped(sc) {
+    var el = $("#scan-skipped"), list = (sc && sc.left_out) || [];
+    var n = list.reduce(function (a, x) { return a + x.n; }, 0);
+    el.hidden = !n;
+    if (!n) return;
+    el.textContent = "Skipped " + fmtN(n) + (n === 1 ? " file: " : " files: ") +
+      list.map(function (x) { return fmtN(x.n) + " " + x.why; }).join("; ") + ".";
+    el.title = list.map(function (x) { return x.examples.join("\n"); }).join("\n");
+  }
+
   function renderScanBar(p) {
+    renderSkipped(state.scan);
     if (p && p.running) lastProgress = p;
     else if (p && !p.running) lastProgress = null;
     var sc = state.scan;

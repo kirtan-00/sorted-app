@@ -243,7 +243,7 @@
   <section id="view-search">
     <div class="search-head">
     <form id="q" class="subbar">
-      <span class="q-wrap"><input type="search" name="q" placeholder="Search" title="describe the shot: balcony, dining table, couple laughing; arrow down lists recent searches" autofocus autocomplete="off" aria-expanded="false" aria-controls="q-history"><div id="q-history" class="q-history" role="listbox" aria-label="recent searches" hidden></div></span>
+      <span class="q-wrap"><input type="search" name="q" placeholder="Search" title="describe the shot: balcony, dining table, couple laughing; arrow down lists recent searches" autocomplete="off" aria-expanded="false" aria-controls="q-history"><div id="q-history" class="q-history" role="listbox" aria-label="recent searches" hidden></div></span>
       <!-- one People menu over the two real selects: a row writes the select and fires its change, so how many and who still combine -->
       <div class="pick">
         <button type="button" id="people-btn" class="btn pick-btn" aria-haspopup="true" aria-expanded="false" aria-controls="people-menu" title="how many people in the frame, or one person">People<svg class="shoot-chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 4L5 7l3-3"/></svg></button>
@@ -291,10 +291,18 @@
         <option value="name">File name</option>
         <option value="longest">Longest clip</option>
       </select>
+      <select id="grid-view" title="how big the tiles are, and whether they show the file name" aria-label="tile size">
+        <option value="s">Small tiles</option>
+        <option value="m">Medium tiles</option>
+        <option value="l">Large tiles</option>
+        <option value="sn">Small, with names</option>
+        <option value="mn">Medium, with names</option>
+        <option value="ln">Large, with names</option>
+      </select>
       <button type="button" id="selectall-top" class="link" hidden title="pick every tile shown (command-A)">Pick all shown</button>
     </div>
     </div>
-    <div id="grid" class="grid" role="grid" aria-label="results"></div>
+    <div id="grid" class="grid" role="listbox" aria-multiselectable="true" aria-label="results"></div>
     <div id="more-row" class="row more" hidden>
       <span id="shown-count"></span>
       <button type="button" id="show-more" class="btn" title="load the next 200">Show more</button>
@@ -305,7 +313,6 @@
       <button type="button" id="pile-show" class="link" hidden title="only what is picked, in the grid on its own">Show picked</button>
       <button type="button" id="clearsel" class="link" title="take everything off the list; Undo in the status line puts it back">Clear</button>
       <button type="button" id="reveal-sel" class="link" title="open the picked files in the Finder, highlighted (command shift R)">Show in Finder</button>
-      <button type="button" id="xmp-sel" class="link" title="an .xmp sidecar for each picked item that has a flag, stars or a label, in the export folder; nothing is written to the shoot">Save ratings for Lightroom</button>
       <span class="spring"></span>
       <span id="export-plan" class="export-plan" hidden aria-live="polite"></span>
       <span class="sel-export export-group">
@@ -571,6 +578,7 @@
           <span id="scan-health-text" class="scan-health-text">Checking the folder…</span>
           <button type="button" id="scan-fix" class="btn small" hidden></button>
         </div>
+        <p id="scan-skipped" class="hint scan-skipped" hidden></p>
         <div id="index-errors" hidden>
           <p id="index-errors-new" class="index-errors-new" hidden></p>
           <details>
@@ -693,7 +701,9 @@
     <div class="panel" data-panel="help-marks">
       <button type="button" class="panel-head" aria-expanded="true"><svg class="disclosure" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5L6.5 5 3 8.5"/></svg>Flags, stars and Lightroom</button>
       <div class="panel-body help-lines">
-        <p>P, X and U work on one tile: the one under the pointer, or the last one you clicked. P picks it, or takes it off the list if it is on. X rejects it and takes it off. U takes the flag off. 1 to 5 give stars and 0 takes them off; 6 red, 7 yellow, 8 green, 9 blue, and the same key again takes the label off. Stars and labels go to everything picked, or to the tile under the pointer if nothing is. Purple is in Details. All of them work in the full-size view too, on the shot shown, so ← → and P is a cull.</p>
+        <p>P, X and U work on one tile: the one under the pointer, or the last one you clicked. P picks it, or takes it off the list if it is on. X rejects it and takes it off. U takes the flag off. 1 to 5 give stars and 0 takes them off; 6 red, 7 yellow, 8 green, 9 blue, and the same key again takes the label off. Stars and labels go to everything picked, or to the tile under the pointer if nothing is. Purple is in Details. All of them work in the full-size view too, on the shot shown. Command Z undoes the last mark, pick or reject, as many times as you need.</p>
+        <p>To judge focus, press Enter or double-click a tile. The shot opens at full resolution; Z or a click goes to 100% at that spot and a drag moves around. ← → move to the next shot at the same zoom and place, F is full screen, and C puts the shot beside the next one at the same zoom, where the arrows change the right side and C or Esc leaves. A RAW shows the largest preview inside it. Esc goes back to the same tile.</p>
+        <label class="check help-check" title="on: P or X in the full-size view goes straight to the next shot"><input type="checkbox" id="auto-advance" checked> Move to the next shot after P or X in the full-size view</label>
         <p>Picking a rejected photo takes the reject off.</p>
         <p>Ratings in the sidebar shows only what is picked, the rejects or what is not rated, at least so many stars, or one label.</p>
         <p>An export writes a sidecar (IMG_0001.xmp) beside every copy that has a flag, stars or a label, so Lightroom, Bridge and Capture One open with the stars and labels on. A reject goes out as rating -1, which they read as rejected. Lightroom keeps picks in its catalog only, so a pick reaches it as nothing; Bridge and Premiere see it as a good take.</p>
@@ -777,17 +787,19 @@
 
 <p id="status" class="status"><span id="status-undo" hidden><span id="status-undo-text"></span> <button type="button" id="status-undo-link" class="link small">Undo</button></span><span id="status-text" aria-live="polite"></span><span id="save-person-form" hidden><input id="save-person-name" type="text" placeholder="Name this person" autocomplete="off" title="a name for the person you just found"><button type="button" id="save-person" class="btn" title="save this person for later searches">Save</button></span></p>
 
-<div id="lightbox" hidden>
+<div id="offline" class="offline" role="alert" hidden>sorted is not running, so nothing can be saved. Your last change was not kept. Trying to reconnect; open sorted again if this stays.</div>
+
+<div id="lightbox" role="dialog" aria-modal="true" aria-label="Full-size view" tabindex="-1" hidden>
   <div id="lb-frame">
     <button type="button" id="lb-close" aria-label="Close" title="close (Esc)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
-    <div class="lb-stage">
-      <img id="lb-img" alt="">
+    <div class="lb-stage" id="lb-stage">
       <video id="lb-video" controls preload="metadata" hidden></video>
     </div>
     <div id="lb-segments" class="segments" hidden></div>
     <div class="lb-bar">
       <div id="lb-meta"></div>
       <div id="lb-marks" class="lb-marks" aria-live="polite"></div>
+      <button type="button" id="lb-zoom" class="link" aria-pressed="false">Fit</button>
       <button type="button" id="lb-like" class="btn" title="find shots that look like this one">More like this</button>
     </div>
   </div>
@@ -795,6 +807,20 @@
 
 <!-- ===== the shoot file needs a place: shown before a scan whose shoot folder cannot hold the file (read-only,
      too full), and after a scan whose save failed. A modal dialog: nothing else can be clicked until it is answered. ===== -->
+<dialog id="export-ask" class="ask" aria-labelledby="export-ask-title" aria-describedby="export-ask-why">
+  <div class="ask-inner">
+    <div class="ask-main">
+      <h2 id="export-ask-title"></h2>
+      <p id="export-ask-why" class="ask-why"></p>
+      <div class="ask-actions">
+        <button type="button" id="export-ask-cancel" class="btn">Cancel</button>
+        <button type="button" id="export-ask-keep" class="btn">Keep both</button>
+        <button type="button" id="export-ask-go" class="btn primary">Replace</button>
+      </div>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="project-ask" class="ask" aria-labelledby="project-ask-title" aria-describedby="project-ask-why">
   <div class="ask-inner">
     <svg class="glyph glyph-project" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 2.5h9.5L20 8v12.5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1z"/><path d="M14.5 2.5V8H20"/><rect x="7.5" y="10.5" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="7.5" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.4" y="15.4" width="3.6" height="3.6" rx=".9" fill="currentColor" stroke="none"/><rect x="12.6" y="10.3" width="3.6" height="3.6" rx=".9" fill="#f3c8d0" stroke="none" transform="rotate(12 14.4 12.1)"/></svg>
@@ -816,6 +842,7 @@
 </dialog>
 
 <script type="module" src="/ui/liquid-glass.es.js"></script>
+<script src="/ui/loupe.js"></script>
 <script src="/ui/app.js"></script>
 <script src="/ui/scene.js"></script>
 </body>
