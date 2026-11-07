@@ -1192,3 +1192,24 @@ def test_the_module_imports_with_no_models_loaded():
     out = subprocess.run([sys.executable, "-c", "import json; " + code], capture_output=True, text=True,
                          env={**os.environ, "PYTHONPATH": str(Path(tether.__file__).parent.parent)})
     assert json.loads(out.stdout) == []
+
+
+def test_two_bodies_saving_the_login_at_once_both_succeed(tmp_path):
+    # Found in a stress run: two cameras logging in together each saved the host through the same temp name. The second
+    # os.replace found it gone, and the OSError closed that camera's connection at PASS, with no reply.
+    path = tmp_path / "camera-login.json"
+    login = tether.load_login(path)
+    errors, go = [], threading.Barrier(8)
+    def save(i):
+        go.wait()
+        try:
+            for _ in range(50):
+                tether.save_login(path, {**login, "host": f"192.168.1.{i}"})
+        except OSError as e:
+            errors.append(e)
+    threads = [threading.Thread(target=save, args=(i,)) for i in range(8)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert errors == []
+    assert tether.load_login(path)["password"] == login["password"]
+    assert [p.name for p in tmp_path.iterdir()] == ["camera-login.json"]

@@ -1,4 +1,4 @@
 {
-  "version": "0.8.3",
-  "notes": "Live can take shots straight from the camera over Wi-Fi, and opens model 1, model 2 by itself as new faces arrive. A loupe for checking focus at 100%, keyboard culling with P and X that moves on, Undo, compare two shots, and the display stays on during a shoot."
+  "version": "0.8.4",
+  "notes": "Live holds up on a real day: a frame that crashes the reader costs only itself, a RAW that lands before its JPEG stays paired, a crash keeps the product you typed and the TV reconnects on the same address, and two cameras can log in over Wi-Fi at once."
 }

@@ -27,6 +27,15 @@ def fake_encoder(monkeypatch):
     monkeypatch.setattr(embed, "get_embedder", lambda: FakeEmbedder())
 
 
+@pytest.fixture(autouse=True)
+def _read_in_this_process(request, monkeypatch):
+    """Most tests here fake parts of the reader in this process (index.load_preview, index.process_one), which a worker
+    process would never see, and a worker start per session would add seconds to every test. The tests marked
+    real_reader run the shipped path: frames read in the warm worker process."""
+    if "real_reader" not in request.keywords:
+        monkeypatch.setattr(live, "READ_IN_WORKER", False)
+
+
 def exif(when="2026:11:06 10:00:00", sub=None, flash=None, shutter=None, fnumber=None, iso=None, focal=None):
     ex = Image.Exif()
     ifd = ex.get_ifd(0x8769)
@@ -291,6 +300,22 @@ def test_active_survives_a_crash_and_not_a_clean_stop(tmp_path, fake_encoder):
     finish(s)
     clean = live.LiveSession(root); clean._resume(conn)
     assert clean.active["product"] is None
+
+
+def test_frames_shot_through_a_crash_keep_the_product_that_was_typed(tmp_path, fake_encoder):
+    # Found in a stress run: kill -9 with "Blue bottle" typed and frames still queued, the camera shooting on, then Back to
+    # the last shoot. The product came back in the field, but the 29 frames queued or shot meanwhile were sorted as if
+    # nothing had been typed, into "product N" piles.
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root)
+    s.set_active(product="Blue bottle")
+    assert wait_for(lambda: s.state == "live")
+    write_jpeg(root / "DSC00009.JPG")              # the session never sees it: the Mac is down
+    crashed = poller(root); conn = db.connect(root); crashed._resume(conn); conn.close()
+    for t in range(4):
+        crashed.poll(float(t))
+    assert [(i.rel, i.product) for i in queued(crashed)] == [("DSC00009.JPG", "Blue bottle")]
+    finish(s)
 
 
 # ===== the verdict =====
@@ -1041,6 +1066,20 @@ def test_an_unreadable_frame_still_reaches_the_drive(tmp_path, fake_encoder, dri
     assert wait_for(lambda: s.snapshot()["drive"]["copied"] == 1)
     settled(s)
     assert on_drive(drive) == ["unread/DSC00001.JPG"]
+
+
+def test_a_raw_that_would_not_read_follows_its_late_jpeg_out_of_unread(tmp_path, fake_encoder, drive):
+    # Found in a stress run: RAW first, its JPEG past the pair window. The RAW went to unread/ on its own, then the JPEG
+    # took over its row and went to the product, and the RAW stayed behind in unread/, split from its JPEG.
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive, pair_window_s=0.05); s.set_active(product="SKU")
+    (root / "DSC00007.ARW").write_bytes(b"not a raw libraw can read" * 1000)
+    assert wait_for(lambda: copies(root).get("DSC00007.ARW", {}).get("state") == "copied")
+    landed(root, "DSC00007.JPG")
+    assert wait_for(lambda: [x["file"] for x in shots_of(s)] == ["DSC00007.JPG"])
+    settled(s)
+    assert on_drive(drive) == ["products/SKU/DSC00007.ARW", "products/SKU/DSC00007.JPG"]
+    assert (drive / "Job/products/SKU/DSC00007.ARW").read_bytes() == (root / "DSC00007.ARW").read_bytes()
 
 
 def test_a_copy_that_reads_back_wrong_is_redone_and_the_bad_one_kept(tmp_path, fake_encoder, drive, monkeypatch):
@@ -2282,3 +2321,115 @@ def test_folder_mode_runs_no_receiver(tmp_path, fake_encoder):
 def test_the_client_window_stays_free_of_camera_text():
     js = Path(live.__file__).with_name("ui").joinpath("live.js").read_text()
     assert 'if (CLIENT || !S.cameraOn) return;' in js and 'body.is-client > :not(.client):not(script) { display: none; }' in Path(live.__file__).with_name("ui").joinpath("live.css").read_text()
+
+
+# ===== the reader process: a frame that crashes the decoder costs that frame, never the session =====
+import worker_faults
+
+
+def _messages(s):
+    return [e.get("message") for e in s.log.since(0, 0)["events"] if e.get("message")]
+
+
+@pytest.mark.real_reader
+def test_a_crashing_frame_mid_session_is_set_aside_and_the_next_one_is_read(tmp_path, fake_encoder, drive, monkeypatch):
+    monkeypatch.setattr(live, "READ_FN", worker_faults.process_one)      # a real SIGSEGV, inside the reader process
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive, faces=False)
+    landed(root, "DSC00001.JPG", product(seed=1))
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    pid = s.reader.slot.proc.pid
+    landed(root, "DSC00002-segv.JPG", product(seed=2))
+    assert wait_for(lambda: s.errors == 1)
+    landed(root, "DSC00003.JPG", product(seed=3))
+    assert wait_for(lambda: len(shots_of(s)) == 2), "the shot after the crash was not read"
+    assert s.reader.restarts == 1 and s.reader.slot.proc.pid != pid
+    assert "DSC00002-segv.JPG could not be read. It is copied to the drive, in unread." in _messages(s)
+    assert wait_for(lambda: list(drive.rglob("unread/*segv*")))
+    finish(s)
+    r = db.connect(root).execute("SELECT status, problem FROM photos WHERE rel='DSC00002-segv.JPG'").fetchone()
+    assert r[0] == "error" and "SIGSEGV" in r[1]
+    assert [x["file"] for x in shots_of(s)] == ["DSC00001.JPG", "DSC00003.JPG"]
+
+
+@pytest.mark.real_reader
+def test_one_warm_worker_reads_every_frame(tmp_path, fake_encoder):
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root, faces=True)
+    pids = set()
+    for i in range(4):
+        landed(root, f"DSC0000{i}.JPG", product(seed=i))
+        assert wait_for(lambda: len(shots_of(s)) == i + 1)
+        pids.add(s.reader.slot.proc.pid)
+    assert len(pids) == 1 and s.reader.restarts == 0
+    finish(s)
+    assert s.reader.slot is None                                            # the stop took the worker down with it
+
+
+@pytest.mark.real_reader
+def test_a_full_mac_disk_stops_reading_and_keeps_copying(tmp_path, fake_encoder, drive, monkeypatch):
+    monkeypatch.setattr(live, "READ_FN", worker_faults.full_disk_one)      # the thumb save gets a real ENOSPC
+    root = tmp_path / "shoot"; root.mkdir()
+    s = dsession(root, drive, faces=False)
+    landed(root, "DSC00001.JPG", product(seed=1))
+    assert wait_for(lambda: len(shots_of(s)) == 1)
+    landed(root, "DSC00002-full.JPG", product(seed=2))
+    assert wait_for(lambda: s.disk_full)
+    landed(root, "DSC00003.JPG", product(seed=3))                          # fine on its own, but nothing is read now
+    assert wait_for(lambda: len(list(drive.rglob("unread/*.JPG"))) == 2)
+    finish(s)
+    full = [m for m in _messages(s) if "disk is full" in m]
+    assert len(full) == 1 and "still copied to the drive" in full[0] and "--" not in full[0] and "\u2014" not in full[0]
+    conn = db.connect(root)
+    assert conn.execute("SELECT count(*) FROM photos WHERE status='error'").fetchone()[0] == 0
+    assert "DSC00002-full.JPG" not in s.done and "DSC00003.JPG" not in s.done     # the next session reads them
+    assert len(shots_of(s)) == 1
+
+
+@pytest.mark.real_reader
+def test_a_full_disk_without_a_drive_says_so_and_stops_cleanly(tmp_path, fake_encoder, monkeypatch):
+    monkeypatch.setattr(live, "READ_FN", worker_faults.full_disk_one)
+    root = tmp_path / "shoot"; root.mkdir()
+    s = session(root, faces=False)
+    landed(root, "DSC00001-full.JPG", product(seed=1))
+    assert wait_for(lambda: s.disk_full)
+    finish(s)
+    (m,) = [m for m in _messages(s) if "disk is full" in m]
+    assert "copied" not in m and "start the session again" in m
+
+
+def test_a_session_start_checks_the_index(tmp_path, fake_encoder, monkeypatch):
+    root = tmp_path / "shoot"; root.mkdir()
+    calls = []
+    real = db.open_check
+    monkeypatch.setattr(db, "open_check", lambda f: (calls.append(Path(f)), real(f))[1])
+    app = create_app(); c = TestClient(app)
+    assert c.post("/api/live/start", json={"folder": str(root)}).status_code == 200
+    assert root in calls
+    c.post("/api/live/stop"); assert app.state.live.session.wait(30)
+    calls.clear()
+    assert c.post("/api/live/start", json={"folder": str(root), "mode": "resume"}).status_code == 200     # already open: checked again
+    assert root in calls
+    c.post("/api/live/stop"); assert app.state.live.session.wait(30)
+
+
+def test_a_restored_index_is_said_when_the_session_starts(tmp_path, fake_encoder, monkeypatch):
+    root = tmp_path / "shoot"; root.mkdir()
+    monkeypatch.setattr(db, "open_check", lambda f: "This shoot's index was damaged, so sorted went back to the backup from 7 Nov at 10:00.")
+    app = create_app(); c = TestClient(app)
+    assert c.post("/api/live/start", json={"folder": str(root)}).status_code == 200
+    s = app.state.live.session
+    assert any("went back to the backup" in m for m in _messages(s))
+    c.post("/api/live/stop"); assert s.wait(30)
+
+
+def test_the_client_window_never_shows_these_messages():
+    """The could-not-read and disk-full lines are for the photographer. The client on the TV sees pictures only."""
+    js = (Path(live.__file__).parent / "ui" / "live.js").read_text()
+    assert "if (body.message && !CLIENT) say(body.message, true);" in js
+    css = (Path(live.__file__).parent / "ui" / "live.css").read_text()
+    assert "body.is-client > :not(.client):not(script) { display: none; }" in css     # the status line is not in .client
+    html = (Path(live.__file__).parent / "ui" / "live.html").read_text()
+    import re
+    client = re.findall(r'<[^>]*class="[^"]*\bclient\b[^"]*"[^>]*>(.*?)</', html, re.S)
+    assert not [t for t in client if re.sub(r"<[^>]+>", "", t).strip()], "the client window carries no words"

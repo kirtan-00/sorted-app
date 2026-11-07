@@ -34,6 +34,7 @@ def pytest_configure(config):
     # tests/test_local_only.py proves it, on its own client and with a real socket.
     from photosort import config as _config
     _config.LOCAL_HOSTNAMES.add("testserver")
+    config.addinivalue_line("markers", "real_reader: a Live test that reads frames in the worker process, as shipped")
 
 @pytest.fixture(autouse=True)
 def _isolated_dirs(tmp_path_factory, monkeypatch):

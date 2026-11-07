@@ -208,6 +208,11 @@ def process_one(args: tuple[str, str, bool]) -> dict:
             _drop_previews(Path(root), qh or out["qhash"])
     return out
 
+def warm_reader(faces: bool = True) -> None:
+    """Run once in a fresh reader process (workers.WarmWorker's init): the face networks load before the first frame."""
+    if faces:
+        _face_engine()
+
 def _drop_previews(root: Path, qh: str) -> None:
     idx = db.index_dir(root)
     for p in [idx / "thumbs" / f"{qh}.jpg", idx / "grid" / f"{qh}.jpg", *(idx / "frames").glob(f"{qh}_*.jpg")]:

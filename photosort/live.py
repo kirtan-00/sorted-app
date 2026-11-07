@@ -1191,6 +1191,14 @@ def recent_folders(last: str | None = None, places: list[Path] | None = None, no
 # ===== end which folder =====
 
 
+# Frames are read in a warm worker process (workers.WarmWorker), so one that crashes the decoder costs that frame and not
+# the server, the session and the shoot. Off only for tests that fake the reader in this process.
+READ_IN_WORKER = True
+READ_FN = None             # what the worker runs on a frame: index.process_one, unless a test hands it a faulty stand-in
+DISK_FULL_MESSAGE = ("This Mac's disk is full, so sorted stopped reading new shots. {copy}Free up some space and start the "
+                     "session again; the shots that came in meanwhile are read then.")
+
+
 class LiveSession:
     """One session on one folder. start() returns at once; stop() drains what has landed and then calls on_finished on
     the worker thread. Files that have not landed by then are simply picked up by the next session."""
@@ -1234,9 +1242,12 @@ class LiveSession:
         self.attached: set[str] = set()
         self.suspects: set[str] = set()
         self.first_poll = True
+        self.crashed_active = False               # the active product came back from a session that never stopped cleanly
         self._stop = threading.Event()
         self.finished = threading.Event()
         self._threads: list[threading.Thread] = []
+        self.reader = None                        # the warm worker process, from start()
+        self.disk_full = False                    # the Mac's disk filled: frames are copied, not read, until a new session
 
     # ===== lifecycle =====
     def start(self) -> None:
@@ -1257,6 +1268,11 @@ class LiveSession:
                 self.copier.open(conn)
         finally:
             conn.close()
+        if READ_IN_WORKER:
+            from functools import partial
+            from .workers import WarmWorker
+            self.reader = WarmWorker(READ_FN or index.process_one, index._lost, init=partial(index.warm_reader, self.use_faces))
+            self.reader.start()               # its models load while the encoder loads here
         self.state = "starting"
         self._status()
         self._threads = [threading.Thread(target=self._work, name="live-worker", daemon=True),
@@ -1339,6 +1355,8 @@ class LiveSession:
                 self.active.update({k: v for k, v in json.loads(saved).items() if k in self.active})
             except ValueError:
                 pass
+            # A crash, not a pause: what is waiting now was queued or shot with this still typed, so it keeps it
+            self.crashed_active = any(self.active.values())
 
     # ===== the watcher =====
     def _listing(self) -> dict[str, tuple[int, float]]:
@@ -1363,7 +1381,7 @@ class LiveSession:
         files = self._listing()
         with self.lock:
             active = dict(self.active)
-        if self.first_poll:          # these landed while nobody was tagging, so the active product says nothing about them
+        if self.first_poll and not self.crashed_active:    # these landed while nobody was tagging, so the active product says nothing about them
             active = {"product": None, "model": None}
         self.first_poll = False
         for rel in [r for r in self.seen if r not in files]:
@@ -1446,8 +1464,8 @@ class LiveSession:
         from .embed import get_embedder
         blank = Image.new("RGB", (64, 64), (128, 128, 128))
         get_embedder().encode_images([blank, blank])
-        if self.use_faces:
-            index._face_engine()
+        if self.use_faces and self.reader is None:
+            index._face_engine()              # in the worker otherwise, where the faces are read
 
     def _work(self) -> None:
         conn = None
@@ -1477,6 +1495,8 @@ class LiveSession:
                     self._check_behind()
             db.set_meta(conn, ACTIVE_KEY, "")     # a clean stop: tomorrow's session does not inherit today's product
         finally:
+            if self.reader is not None:
+                self.reader.close()
             if conn is not None:
                 conn.close()
             if self.copier:
@@ -1510,21 +1530,29 @@ class LiveSession:
             conn.execute("UPDATE photos SET rel=?, sibling=? WHERE rel=? AND NOT EXISTS (SELECT 1 FROM photos WHERE rel=?)",
                          (item.rel, item.sibling, item.sibling, item.rel))
             conn.commit()
-        res = index.process_one((str(self.root), item.rel, self.use_faces))
+        if self.disk_full:
+            self._copy_unread(conn, item)
+            return
+        task = (str(self.root), item.rel, self.use_faces)
+        res = self.reader.call(task, index._watchdog(task)) if self.reader is not None else index.process_one(task)
+        if res.get("disk_full"):
+            self._stop_reading(conn, item)
+            return
         if res["error"]:
             if not self.root.is_dir():
                 self.done.pop(item.rel, None)         # the disk went away; this file is still to do
                 return
             if not (self.root / item.rel).is_file():
                 return                                # moved on by the tether app's own import: not ours to report
-            db.mark_error(conn, item.rel, item.size, item.mtime)
-            if self.copier:               # we could not read it; a RAW converter may. It goes on the drive all the same
+            db.mark_error(conn, item.rel, item.size, item.mtime, problem=res.get("quarantine"))
+            if self.copier:               # we could not read it; a RAW converter may. It goes on the drive all the same, in unread/
                 pid = conn.execute("SELECT id FROM photos WHERE rel=?", (item.rel,)).fetchone()
                 self.copier.add(conn, pid[0] if pid else None, item.rel)
                 conn.commit()
                 self.copier.poke()
             self.errors += 1
-            self.log.emit("status", **self._status_body(), message=f"Could not read {Path(item.rel).name}", file=item.rel)
+            where = " It is copied to the drive, in unread." if self.copier else ""
+            self.log.emit("status", **self._status_body(), message=f"{Path(item.rel).name} could not be read.{where}", file=item.rel)
             return
         row = res["row"]
         had = conn.execute("SELECT sibling FROM photos WHERE rel=?", (item.rel,)).fetchone()
@@ -1594,6 +1622,8 @@ class LiveSession:
                 self.copier.add(conn, pid, item.rel)
                 if row["sibling"]:
                     self.copier.add(conn, pid, row["sibling"])
+                if item.sibling:              # a RAW that went in alone is already on the drive, maybe in unread/: it follows its JPEG
+                    conn.execute("UPDATE live_copies SET stale=stale+1 WHERE rel=? AND state='copied'", (item.sibling,))
             conn.commit()                     # the embedding and the tags land together: a crash leaves the file not done
         if self.copier:
             self.copier.poke()
@@ -1602,6 +1632,29 @@ class LiveSession:
         self.log.emit("shot", **shot, queue=self.depth() - 1)
         if self.on_shot:
             self.on_shot(shot)
+
+    def _stop_reading(self, conn, item: _Item) -> None:
+        """The Mac's disk is full: no more reading, said once, plainly. The copies to the drive go on while its own disk has
+        room, into unread/, and the frames stay to do, so the next session reads them."""
+        self.disk_full = True
+        conn.rollback()
+        copying = self._copy_unread(conn, item)
+        self.errors += 1
+        copy = "They are still copied to the drive, into unread. " if copying else ""
+        self.log.emit("status", **self._status_body(), message=DISK_FULL_MESSAGE.format(copy=copy), file=item.rel)
+
+    def _copy_unread(self, conn, item: _Item) -> bool:
+        self.done.pop(item.rel, None)
+        if not self.copier:
+            return False
+        try:
+            self.copier.add(conn, None, item.rel)
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()                   # the copy queue lives on this Mac's disk too: with no room there, copying waits as well
+            return False
+        self.copier.poke()
+        return True
 
     @staticmethod
     def _shot_dict(row: dict, product: str | None) -> dict:
@@ -2192,12 +2245,20 @@ class Hub:
             conn.close()
 
     def _open(self, folder: Path) -> None:
+        """Open the folder for a session, with the index checked (db.open_check) whichever way it opens. A note from that
+        check, an index put back from its backup, is said when the session starts."""
         here = self.state.get("root")
+        self.open_note = None
         if here is not None and Path(here).resolve() == folder.resolve():
+            self.open_note = db.open_check(folder)
+            if self.open_note:
+                self.state["stale"] = True     # the index under the open shoot was replaced: the search reloads it
             return
         if self.switch_root:
-            self.switch_root(folder)
+            info = self.switch_root(folder)    # server._switch_root runs the same check, and its answer carries the note
+            self.open_note = (info or {}).get("index_note") if isinstance(info, dict) else None
         else:
+            self.open_note = db.open_check(folder)
             self.state["root"] = folder; self.state["index"] = Index(folder)
 
     def start(self, req: StartReq) -> dict:
@@ -2261,6 +2322,8 @@ class Hub:
                 self.session = None
                 raise
             self._camera_on(folder)
+            if getattr(self, "open_note", None):
+                self.session._status(message=self.open_note)
             return self.snapshot()
 
     # ===== the camera, straight to this Mac =====

@@ -212,10 +212,26 @@ def test_free_port_skips_busy_port():
     import socket
     from photosort.cli import free_port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)     # as uvicorn binds: a live server is still busy
         s.bind(("127.0.0.1", 0)); busy = s.getsockname()[1]; s.listen(1)
         got = free_port(busy)
         assert got != busy and busy < got < busy + 10
 
+
+
+def test_free_port_takes_back_a_port_left_in_time_wait_by_a_crashed_server():
+    # Found in a stress run: after kill -9 of a server with browser windows connected, its port sat in TIME_WAIT and the
+    # restart moved to the next port. The photographer's and the client's windows on the old port never reconnected.
+    import socket
+    from photosort.cli import free_port
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0)); port = srv.getsockname()[1]; srv.listen(1)
+    cli = socket.create_connection(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    conn.close(); srv.close()          # the server side closes first: its end of the connection waits in TIME_WAIT
+    cli.recv(1); cli.close()
+    assert free_port(port) == port
 
 # ---------- folder switching ----------
 

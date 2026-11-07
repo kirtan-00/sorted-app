@@ -65,6 +65,16 @@ and the start screen says so first.
 Each new shoot saves its own project file, `sorted_<shoot>.sorted`, in the folder the last project went to or the export
 folder, so a second shoot in the same folder does not write over the first.
 
+## A frame that will not read
+
+Frames are read in one worker process that starts with the session and keeps its models loaded, so a frame costs the
+same as reading it in the server (135 ms a 24 MP JPEG, faces on, on the M1, either way). A frame that crashes the decoder
+or hangs past the watchdog takes only that worker down: the photographer sees "DSC01234.JPG could not be read", the file
+goes to `unread/` on the drive, a new worker starts, and the next shot is read as usual. The client window shows none of
+this. If this Mac's disk fills, sorted stops reading new shots and says so once; they are still copied to the drive, into
+`unread/`, while its queue fits on the Mac, and the next session reads them. Starting a session checks the shoot's index
+and goes back to its last backup when it is damaged, as opening a shoot does.
+
 ## What each shot gets
 
 - **Sharp or soft**, judged on absolute floors, because shoot-relative labels drift while a shoot grows. Soft says

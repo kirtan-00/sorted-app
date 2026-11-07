@@ -25,13 +25,18 @@ POLL_S = 1.0
 JOIN_S = 2.0             # a process stuck on a dead disk cannot be reaped; never wait on it for longer than this
 
 
-def _worker(conn, fn: Callable) -> None:
+def _worker(conn, fn: Callable, init: Callable | None = None) -> None:
     # Its own process group, so a watchdog kill takes the ffmpeg under it as well.
     try:
         os.setpgrp()
     except OSError:
         pass
     signal.signal(signal.SIGINT, signal.SIG_IGN)      # Ctrl-C belongs to the parent, which stops the workers itself
+    if init is not None:
+        try:
+            init()                                    # load the models now, before anyone waits on a file
+        except Exception:
+            pass                                      # the first file will try again, and say why if it fails
     conn.send(("ready", None))
     while True:
         try:
@@ -61,9 +66,9 @@ def _limit_words(seconds: float) -> str:
 
 
 class _Slot:
-    def __init__(self, ctx, fn: Callable):
+    def __init__(self, ctx, fn: Callable, init: Callable | None = None):
         self.conn, child = ctx.Pipe()
-        self.proc = ctx.Process(target=_worker, args=(child, fn), daemon=True)
+        self.proc = ctx.Process(target=_worker, args=(child, fn, init), daemon=True)
         self.proc.start()
         child.close()
         self.ready = False
@@ -179,3 +184,86 @@ def supervised_map(fn: Callable, tasks: Iterable, workers: int, limit: Callable[
                     s.kill()
                 else:
                     s.reap()
+
+
+class WarmWorker:
+    """One worker process kept for the length of a Live session: the models load once, at the start, and a frame costs a
+    pipe round trip on top of its own work instead of a process start. A frame that kills the worker or holds it past its
+    limit comes back as lost(task, reason), like supervised_map's, and a new worker starts at once, so the next frame
+    finds one warming up. Not thread safe: one caller at a time, as Live's single reader thread is."""
+
+    def __init__(self, fn: Callable, lost: Callable[[object, str], dict], init: Callable | None = None):
+        self.fn, self.lost, self.init = fn, lost, init
+        self.ctx = mp.get_context("spawn")
+        self.slot: _Slot | None = None
+        self.restarts = 0
+
+    def start(self) -> None:
+        if self.slot is None:
+            self.slot = _Slot(self.ctx, self.fn, self.init)
+
+    def _ready(self) -> _Slot:
+        failed = 0
+        while True:
+            self.start()
+            s = self.slot
+            if s.ready:
+                return s
+            got = wait([s.conn, s.proc.sentinel], timeout=max(0.0, s.deadline - time.monotonic()))
+            if s.conn in got:
+                try:
+                    kind, _ = s.conn.recv()
+                except (EOFError, OSError):
+                    kind = None
+                if kind == "ready":
+                    s.ready, s.deadline = True, float("inf")
+                    return s
+            s.kill() if s.proc.is_alive() else s.reap()
+            self.slot = None
+            failed += 1
+            if failed >= START_FAILURES_MAX:
+                raise RuntimeError(f"the file reader would not start (exit code {s.proc.exitcode})")
+
+    def _replace(self, s: _Slot) -> None:
+        self.slot = None
+        self.restarts += 1
+        self.start()                                  # warming while the caller deals with the lost frame
+
+    def call(self, task, limit: float) -> dict:
+        s = self._ready()
+        try:
+            s.give(task, limit)
+        except (BrokenPipeError, OSError):            # it died between frames: the frame never reached it, so try once more
+            s.reap(); self._replace(s)
+            s = self._ready(); s.give(task, limit)
+        while True:
+            got = wait([s.conn, s.proc.sentinel], timeout=max(0.0, s.deadline - time.monotonic()))
+            if s.conn in got:
+                try:
+                    kind, res = s.conn.recv()
+                except (EOFError, OSError):
+                    kind = None
+                if kind == "done":
+                    s.task, s.deadline = None, float("inf")
+                    return res
+                if kind is not None:
+                    continue
+            elif s.proc.sentinel not in got:
+                s.kill(); self._replace(s)
+                return self.lost(task, f"still not read after {_limit_words(limit)}, so it was set aside")
+            s.reap(); self._replace(s)
+            return self.lost(task, why_it_died(s.proc.exitcode))
+
+    def close(self) -> None:
+        s, self.slot = self.slot, None
+        if s is None:
+            return
+        try:
+            s.conn.send(None)
+        except OSError:
+            pass
+        s.proc.join(JOIN_S)
+        if s.proc.is_alive():
+            s.kill()
+        else:
+            s.reap()

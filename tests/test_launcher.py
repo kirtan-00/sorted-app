@@ -147,7 +147,7 @@ def test_a_server_that_will_not_answer_is_replaced(app):
     pid = app.server_pid()
     app.mode("hang")
     app.click()
-    deadline = time.time() + 30
+    deadline = time.time() + 90                        # five tries of a 2 s curl, slower when the Mac is busy
     while time.time() < deadline and "does not answer" not in app.log.read_text():
         time.sleep(0.2)
     assert "does not answer" in app.log.read_text()

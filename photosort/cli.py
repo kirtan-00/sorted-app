@@ -63,6 +63,9 @@ def free_port(start: int, tries: int = 10, host: str = "127.0.0.1") -> int:
     import socket
     for port in range(start, start + tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # as uvicorn binds: a port a crashed server left in TIME_WAIT is free again, so the windows still open on it
+            # reconnect. A port another server is listening on is still refused.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, port))
                 return port

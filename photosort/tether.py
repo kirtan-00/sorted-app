@@ -884,7 +884,7 @@ def _new_login() -> dict:
 def save_login(path: str | os.PathLike, login: dict) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp = path.with_name(path.name + f".{os.getpid()}.{threading.get_ident()}.tmp")    # per thread: two bodies log in at once
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(login, f)
