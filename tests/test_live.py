@@ -2433,3 +2433,26 @@ def test_the_client_window_never_shows_these_messages():
     import re
     client = re.findall(r'<[^>]*class="[^"]*\bclient\b[^"]*"[^>]*>(.*?)</', html, re.S)
     assert not [t for t in client if re.sub(r"<[^>]+>", "", t).strip()], "the client window carries no words"
+
+
+def test_the_usage_log_keeps_a_shoots_timings_and_never_its_names(tmp_path, fake_encoder, drive):
+    from photosort import usage
+    root, hub, c = api_session(tmp_path, drive)
+    s = hub.session
+    c.post("/api/live/active", json={"product": "Zarina Gown"})
+    landed(root, "DSC00001.JPG")
+    assert wait_for(lambda: s.snapshot()["drive"]["copied"] == 1)
+    sid = shots_of(s)[0]["id"]
+    c.post("/api/live/assign", json={"id": sid, "model": "Meher Kapoor"})
+    pid = c.get("/api/live/state").json()["products"][0]["id"]
+    c.post("/api/live/rename-product", json={"product": pid, "name": "Noor Saree"})
+    hub._camera_event("kept", who="192.168.1.20", name="Meher Kapoor/DSC00002.ARW", why="no space", bytes=10)
+    c.post("/api/live/stop"); assert s.wait(30); s.copier.thread.join(30)
+    text = "".join(p.read_text() for p in usage.event_files() if p.is_file())
+    events = [json.loads(l) for l in text.splitlines()]
+    shot = next(e for e in events if e["ev"] == "live_shot")
+    assert shot["ext"] == ".jpg" and "ms_total" in shot and "ms_decode" in shot
+    assert any(e["ev"] == "live_status" and e["state"] for e in events)
+    assert any(e["ev"] == "live_camera" and e["kind"] == "kept" and e["bytes"] == 10 for e in events)
+    for secret in ("Zarina", "Meher", "Noor", "DSC0000", "192.168", str(root), str(drive)):
+        assert secret not in text, secret

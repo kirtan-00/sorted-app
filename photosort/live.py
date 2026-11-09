@@ -32,7 +32,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import BaseModel
-from . import awake, bundle, db, index, tether
+from . import awake, bundle, db, index, tether, usage
 from .config import (DEV_DIRS, EMBED_DIM, FACE_CLUSTER_MIN_EYE_SHARP, FACE_MATCH_MIN_SIM, FACE_REF_MIN_EDGE, FOCUS_BAD_ABS, FOCUS_BAD_MAX_ABS,
                      IMAGE_EXTS, MODEL_TAG, RAW_EXTS, SHARP_TILE_GRID, SKIP_DIRS, app_home, export_root, shoot_slug)
 from .decode import DecodeError, load_preview
@@ -365,6 +365,9 @@ class _Window(Index):
 # ===== end bursts and brackets =====
 
 
+CAMERA_FACTS = ("camera_name", "bytes", "expected", "free", "command", "why", "transport", "capabilities", "hex", "on_card")   # no names, no peers
+
+
 class EventLog:
     """Ordered events with a monotonically increasing seq, one log for the life of the server so a screen left open
     across two sessions never goes backwards."""
@@ -378,7 +381,38 @@ class EventLog:
             self.seq += 1
             self.items.append({"seq": self.seq, "type": type_, "t": time.time(), **data})
             self.cond.notify_all()
-            return self.seq
+            seq = self.seq
+        try:
+            self._to_usage(type_, data)
+        except Exception:
+            pass                              # the tester's log never costs a shot
+        return seq
+
+    _last_status: tuple | None = None
+
+    def _to_usage(self, type_: str, d: dict) -> None:
+        """A copy for the usage log, for a real shoot's report: counts, timings and states, never a name, a path or a file name.
+        Status repeats on every tick, so only a change in what it says is kept."""
+        if type_ == "shot":
+            usage.log("live_shot", ext=Path(d.get("file") or "").suffix.lower(), verdict=d.get("verdict"), kind=d.get("kind"),
+                      flash=d.get("flash"), burst=bool(d.get("burst")), bracket=bool(d.get("bracket")), alerts=len(d.get("alerts") or []),
+                      model=bool(d.get("model")), queue=d.get("queue"), **{f"ms_{k}": v for k, v in (d.get("ms") or {}).items()})
+        elif type_ == "camera":
+            usage.log("live_camera", kind=d.get("kind"), **{k: d[k] for k in CAMERA_FACTS if k in d})
+        elif type_ in ("model_created", "product_created"):
+            usage.log("live_" + type_, auto=bool(d.get("auto")))
+        elif type_ in ("model_renamed", "product_renamed"):
+            usage.log("live_" + type_, merged=bool(d.get("merged")))
+        elif type_ == "status" and "state" in d:
+            drive = d.get("drive") or {}
+            msg = re.sub(r"[^\s/]+\.[A-Za-z0-9]{2,4}\b", "<file>", d.get("message") or "")
+            now = (d.get("state"), bool(d.get("behind")), d.get("errors"), drive.get("state"), drive.get("failed"), msg)
+            if now != self._last_status:
+                self._last_status = now
+                usage.log("live_status", state=now[0], behind=now[1], errors=now[2], queue=d.get("queue"), done=d.get("done"),
+                          drive=drive.get("state"), drive_fs=drive.get("fs"), copied=drive.get("copied"), pending=drive.get("pending"),
+                          failed=drive.get("failed"), free_gb=round(drive["free_bytes"] / 1e9, 1) if drive.get("free_bytes") else None,
+                          message=msg or None)
 
     def since(self, after: int, wait: float = LONG_POLL_S) -> dict:
         """Events after seq, waiting up to wait seconds for the first. reset True means this client's seq means nothing
@@ -2273,6 +2307,9 @@ class Hub:
             raise HTTPException(400, "mode is new_only, everything or resume")
         if not folder.is_dir() and not req.camera:
             raise HTTPException(400, "that folder is not there")
+        usage.log("live_start", source="wifi" if req.camera else "folder", mode=req.mode, strobe=req.strobe, no_flash=req.no_flash,
+                  faces=req.faces, products=req.products,
+                  drive="chosen" if req.drive else "off" if "drive" in req.model_fields_set else "last")
         if req.drive:
             why = drive_preflight(folder, req.drive, req.shoot)
             if why:
@@ -2348,7 +2385,9 @@ class Hub:
                 tether.save_login(login_path(), {**login, "host": data["host"], "port": data["port"]})
         elif kind == "suspect" and session is not None:
             session.suspect(data["name"])
-        self.log.emit("camera", kind=kind)
+        if kind == "camera":
+            data = dict(data, camera_name=data.get("name"))   # the body's model, the one name worth keeping
+        self.log.emit("camera", kind=kind, **{k: data[k] for k in CAMERA_FACTS if k in data})
 
     def _camera_off(self, session: "LiveSession") -> None:
         """Before the watcher stops: it drops whatever it has not called landed, so the frames on the wire arrive first and it gets

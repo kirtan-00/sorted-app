@@ -50,6 +50,20 @@ From the server:
 - `exception`: an uncaught error in a request, as its last traceback line.
 - `report_saved`: the size of a report zip you saved.
 
+From Live (prefixed `live_`), so a real shoot's report says how fast and how well it went:
+
+- `live_start`: where frames came from (Wi-Fi or a folder), the start mode, strobes or no flash, faces and
+  products on or off, and whether the drive was chosen, left at the last one, or off.
+- `live_shot`: one per frame. Its type (`.jpg`, `.arw`), the verdict and kind, flash, whether it sits in a
+  burst or bracket, how many warnings, whether it has a model, the queue behind it, and its milliseconds
+  (decode, embed, total, and landed: from the file arriving to it on screen).
+- `live_camera`: what the camera did over Wi-Fi or USB. Logins, refusals, frames landed or kept back with
+  their bytes, low space, and the camera's model and capabilities. Never its address or a file name.
+- `live_status`: only when something changes. State, behind or not, errors, the drive's state, file
+  system, copied, pending, failed and free space, and the message on screen with file names cut out.
+- `live_model_created`, `live_product_created`, `live_model_renamed`, `live_product_renamed`: whether
+  sorted made it or you did, and whether a rename merged two. Never the name.
+
 From the app window (prefixed `ui_`):
 
 - `ui_tab` and `ui_tab_time` (which tab, seconds spent on the one just left), `ui_click` (the button's

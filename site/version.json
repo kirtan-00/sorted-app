@@ -1,4 +1,4 @@
 {
-  "version": "0.8.4",
-  "notes": "Live holds up on a real day: a frame that crashes the reader costs only itself, a RAW that lands before its JPEG stays paired, a crash keeps the product you typed and the TV reconnects on the same address, and two cameras can log in over Wi-Fi at once."
+  "version": "0.8.5",
+  "notes": "Live keeps a record of each shoot for your test report: how fast every frame arrived and was judged, what the camera did over Wi-Fi or USB, and the drive's state. Counts and timings only, never names, paths or photos, and it stays on your Mac until you send it."
 }
